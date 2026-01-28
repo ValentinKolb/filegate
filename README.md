@@ -131,6 +131,8 @@ For large files, use chunked uploads. They support:
 - Per-chunk checksum verification
 - Automatic assembly when complete
 
+The [Browser Utilities](#browser-utilities) help with checksum calculation, chunking, and progress tracking. They work both in the browser and on the server.
+
 ```typescript
 // Start or resume upload
 const start = await client.upload.chunked.start({
@@ -302,7 +304,7 @@ if (result.ok) {
 
 ## Browser Utilities
 
-For browser-based chunked uploads, use the utils package:
+Utilities for chunked uploads that work both in the browser and on the server. They handle file chunking, SHA-256 checksum calculation, progress tracking, and retry logic.
 
 ```typescript
 import { chunks, formatBytes } from "@valentinkolb/filegate/utils";
