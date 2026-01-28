@@ -3,12 +3,17 @@
 Secure file proxy for building custom file management systems. Streaming uploads, chunked transfers, Unix permissions.
 
 ```
-+-------------+       +-------------+       +-------------+       +------------+
-|   Client    |<----->|   Your      |<----->|  Filegate   |<----->| Filesystem |
-| (Browser)   |       |   Backend   |       |  (File Ops) |       |            |
-+-------------+       +-------------+       +-------------+       +------------+
-                      Auth & Logic          Streaming, Chunks,
-                                            Permissions
+Browser/App          Your Backend            Filegate            Filesystem
+     |                    |                     |                    |
+     |  upload request    |                     |                    |
+     |------------------->|                     |                    |
+     |                    |  proxy to filegate  |                    |
+     |                    |-------------------->|                    |
+     |                    |                     |  write file        |
+     |                    |                     |------------------->|
+     |                    |                     |                    |
+     |                    |<--------------------|<-------------------|
+     |<-------------------|                     |                    |
 ```
 
 Filegate runs behind your backend, not as a public-facing service. Your backend handles authentication and authorization, then proxies requests to Filegate. You control access logic - Filegate handles file operations.
