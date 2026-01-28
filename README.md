@@ -104,7 +104,7 @@ Symlinks that point outside base paths are also blocked.
 
 ### File Ownership
 
-Filegate runs as root to set file ownership. When uploading files, you can specify Unix permissions:
+Filegate can set Unix file ownership on uploaded files:
 
 ```typescript
 await client.upload.single({
@@ -117,7 +117,11 @@ await client.upload.single({
 });
 ```
 
-This is essential when Filegate manages files for multiple users on a shared filesystem.
+If ownership is not specified, files are created with the user running Filegate (typically root in Docker).
+
+Filegate does not validate whether the specified uid/gid exists on the system, nor does it verify that the requesting user matches the specified ownership. Your backend is responsible for this validation.
+
+This feature is intended for scenarios like NFS shares exposed through Filegate, where preserving the original permission structure is required.
 
 ### Chunked Uploads
 
