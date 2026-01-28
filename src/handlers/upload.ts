@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
-import { redis } from "bun";
-import { mkdir, readdir, rm, stat, rename } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, rename, readFile, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { validatePath } from "../lib/path";
 import { applyOwnership, type Ownership } from "../lib/ownership";
@@ -25,12 +24,10 @@ const computeUploadId = (path: string, filename: string, checksum: string): stri
   return hasher.digest("hex").slice(0, 16);
 };
 
-// Single Redis key per upload
-const metaKey = (id: string) => `filegate:upload:${id}`;
-
 // Chunk storage paths
 const chunksDir = (id: string) => join(config.uploadTempDir, id);
 const chunkPath = (id: string, idx: number) => join(chunksDir(id), String(idx));
+const metaPath = (id: string) => join(chunksDir(id), "meta.json");
 
 type UploadMeta = {
   uploadId: string;
@@ -41,26 +38,35 @@ type UploadMeta = {
   chunkSize: number;
   totalChunks: number;
   ownership: Ownership | null;
+  createdAt: number; // Unix timestamp for expiry check
 };
 
 const saveMeta = async (meta: UploadMeta): Promise<void> => {
-  await redis.set(metaKey(meta.uploadId), JSON.stringify(meta), "EX", config.uploadExpirySecs);
+  await mkdir(chunksDir(meta.uploadId), { recursive: true });
+  await writeFile(metaPath(meta.uploadId), JSON.stringify(meta));
 };
 
 const loadMeta = async (id: string): Promise<UploadMeta | null> => {
-  const data = await redis.get(metaKey(id));
-  return data ? (JSON.parse(data) as UploadMeta) : null;
+  try {
+    const data = await readFile(metaPath(id), "utf-8");
+    return JSON.parse(data) as UploadMeta;
+  } catch {
+    return null;
+  }
 };
 
-const refreshExpiry = async (id: string): Promise<void> => {
-  await redis.expire(metaKey(id), config.uploadExpirySecs);
+const refreshExpiry = async (id: string, meta: UploadMeta): Promise<void> => {
+  // Update createdAt to extend expiry
+  meta.createdAt = Date.now();
+  await saveMeta(meta);
 };
 
-// Get uploaded chunks from filesystem instead of Redis
+// Get uploaded chunks from filesystem
 const getUploadedChunks = async (id: string): Promise<number[]> => {
   try {
     const files = await readdir(chunksDir(id));
     return files
+      .filter((f) => f !== "meta.json")
       .map((f) => parseInt(f, 10))
       .filter((n) => !isNaN(n))
       .sort((a, b) => a - b);
@@ -70,7 +76,7 @@ const getUploadedChunks = async (id: string): Promise<number[]> => {
 };
 
 const cleanupUpload = async (id: string): Promise<void> => {
-  await Promise.all([redis.del(metaKey(id)), rm(chunksDir(id), { recursive: true }).catch(() => {})]);
+  await rm(chunksDir(id), { recursive: true }).catch(() => {});
 };
 
 const assembleFile = async (meta: UploadMeta): Promise<string | null> => {
@@ -155,8 +161,8 @@ app.post(
     // Check for existing upload (resume)
     const existingMeta = await loadMeta(uploadId);
     if (existingMeta) {
-      // Refresh TTL on resume
-      await refreshExpiry(uploadId);
+      // Refresh expiry on resume
+      await refreshExpiry(uploadId, existingMeta);
       // Get chunks from filesystem
       const uploadedChunks = await getUploadedChunks(uploadId);
       return c.json({
@@ -186,9 +192,9 @@ app.post(
       chunkSize,
       totalChunks,
       ownership,
+      createdAt: Date.now(),
     };
 
-    await mkdir(chunksDir(uploadId), { recursive: true });
     await saveMeta(meta);
 
     return c.json({
@@ -306,23 +312,26 @@ app.post(
   },
 );
 
-// Cleanup orphaned chunk directories (Redis keys expired but files remain)
+// Cleanup expired upload directories
 export const cleanupOrphanedChunks = async () => {
   try {
     const dirs = await readdir(config.uploadTempDir);
     let cleaned = 0;
+    const now = Date.now();
+    const expiryMs = config.uploadExpirySecs * 1000;
 
     for (const dir of dirs) {
-      // Check if upload still exists in Redis
-      const exists = await redis.exists(metaKey(dir));
-      if (!exists) {
+      const meta = await loadMeta(dir);
+
+      // Remove if no meta or expired
+      if (!meta || now - meta.createdAt > expiryMs) {
         await rm(chunksDir(dir), { recursive: true }).catch(() => {});
         cleaned++;
       }
     }
 
     if (cleaned > 0) {
-      console.log(`[Filegate] Cleaned up ${cleaned} orphaned chunk director${cleaned === 1 ? "y" : "ies"}`);
+      console.log(`[Filegate] Cleaned up ${cleaned} expired upload${cleaned === 1 ? "" : "s"}`);
     }
   } catch {
     // Directory doesn't exist yet

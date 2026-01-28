@@ -6,7 +6,6 @@ services:
     environment:
       FILE_PROXY_TOKEN: "test-integration-token"
       ALLOWED_BASE_PATHS: "/data"
-      REDIS_URL: "redis://redis:6379"
       MAX_UPLOAD_MB: 100
       MAX_DOWNLOAD_MB: 200
       MAX_CHUNK_SIZE_MB: 10
@@ -15,9 +14,6 @@ services:
     volumes:
       - filegate-test-data:/data
       - filegate-test-chunks:/tmp/filegate-uploads
-    depends_on:
-      redis:
-        condition: service_healthy
     healthcheck:
       test:
         [
@@ -30,14 +26,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 3s
-
-  redis:
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 5s
-      retries: 5
 
 volumes:
   filegate-test-data:

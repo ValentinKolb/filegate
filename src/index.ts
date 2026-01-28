@@ -22,7 +22,6 @@ if (config.isDev) {
 
 console.log(`[Filegate] ALLOWED_BASE_PATHS: ${config.allowedPaths.join(", ")}`);
 console.log(`[Filegate] MAX_UPLOAD_MB: ${config.maxUploadBytes / 1024 / 1024}`);
-console.log(`[Filegate] REDIS_URL: ${process.env.REDIS_URL ?? "redis://localhost:6379 (default)"}`);
 console.log(`[Filegate] PORT: ${config.port}`);
 
 // Periodic disk cleanup for orphaned chunks (every 6h by default)
