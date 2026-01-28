@@ -1,0 +1,332 @@
+import { Hono } from "hono";
+import { describeRoute } from "hono-openapi";
+import { redis } from "bun";
+import { mkdir, readdir, rm, stat, rename } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { validatePath } from "../lib/path";
+import { applyOwnership, type Ownership } from "../lib/ownership";
+import { jsonResponse, requiresAuth } from "../lib/openapi";
+import { v } from "../lib/validator";
+import {
+  UploadStartBodySchema,
+  UploadStartResponseSchema,
+  UploadChunkResponseSchema,
+  ErrorSchema,
+  UploadChunkHeadersSchema,
+} from "../schemas";
+import { config } from "../config";
+
+const app = new Hono();
+
+// Deterministic upload ID from path + filename + checksum
+const computeUploadId = (path: string, filename: string, checksum: string): string => {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(`${path}:${filename}:${checksum}`);
+  return hasher.digest("hex").slice(0, 16);
+};
+
+// Single Redis key per upload
+const metaKey = (id: string) => `filegate:upload:${id}`;
+
+// Chunk storage paths
+const chunksDir = (id: string) => join(config.uploadTempDir, id);
+const chunkPath = (id: string, idx: number) => join(chunksDir(id), String(idx));
+
+type UploadMeta = {
+  uploadId: string;
+  path: string;
+  filename: string;
+  size: number;
+  checksum: string;
+  chunkSize: number;
+  totalChunks: number;
+  ownership: Ownership | null;
+};
+
+const saveMeta = async (meta: UploadMeta): Promise<void> => {
+  await redis.set(metaKey(meta.uploadId), JSON.stringify(meta), "EX", config.uploadExpirySecs);
+};
+
+const loadMeta = async (id: string): Promise<UploadMeta | null> => {
+  const data = await redis.get(metaKey(id));
+  return data ? (JSON.parse(data) as UploadMeta) : null;
+};
+
+const refreshExpiry = async (id: string): Promise<void> => {
+  await redis.expire(metaKey(id), config.uploadExpirySecs);
+};
+
+// Get uploaded chunks from filesystem instead of Redis
+const getUploadedChunks = async (id: string): Promise<number[]> => {
+  try {
+    const files = await readdir(chunksDir(id));
+    return files
+      .map((f) => parseInt(f, 10))
+      .filter((n) => !isNaN(n))
+      .sort((a, b) => a - b);
+  } catch {
+    return [];
+  }
+};
+
+const cleanupUpload = async (id: string): Promise<void> => {
+  await Promise.all([redis.del(metaKey(id)), rm(chunksDir(id), { recursive: true }).catch(() => {})]);
+};
+
+const assembleFile = async (meta: UploadMeta): Promise<string | null> => {
+  const chunks = await getUploadedChunks(meta.uploadId);
+  if (chunks.length !== meta.totalChunks) return "missing chunks";
+
+  const fullPath = join(meta.path, meta.filename);
+  const pathResult = await validatePath(fullPath);
+  if (!pathResult.ok) return pathResult.error;
+
+  await mkdir(dirname(pathResult.realPath), { recursive: true });
+
+  const hasher = new Bun.CryptoHasher("sha256");
+  const file = Bun.file(pathResult.realPath);
+  const writer = file.writer();
+
+  try {
+    for (let i = 0; i < meta.totalChunks; i++) {
+      // Stream each chunk instead of loading entirely into memory
+      const chunkFile = Bun.file(chunkPath(meta.uploadId, i));
+      for await (const data of chunkFile.stream()) {
+        hasher.update(data);
+        writer.write(data);
+      }
+    }
+    await writer.end();
+  } catch (e) {
+    writer.end();
+    await rm(pathResult.realPath).catch(() => {});
+    throw e;
+  }
+
+  const finalChecksum = `sha256:${hasher.digest("hex")}`;
+  if (finalChecksum !== meta.checksum) {
+    await rm(pathResult.realPath).catch(() => {});
+    return `checksum mismatch: expected ${meta.checksum}, got ${finalChecksum}`;
+  }
+
+  const ownershipError = await applyOwnership(pathResult.realPath, meta.ownership);
+  if (ownershipError) {
+    await rm(pathResult.realPath).catch(() => {});
+    return ownershipError;
+  }
+
+  await cleanupUpload(meta.uploadId);
+  return null;
+};
+
+// POST /upload/start
+app.post(
+  "/start",
+  describeRoute({
+    tags: ["Upload"],
+    summary: "Start or resume chunked upload",
+    description: "Initialize a new upload or get status of existing upload with same checksum",
+    ...requiresAuth,
+    responses: {
+      200: jsonResponse(UploadStartResponseSchema, "Upload initialized or resumed"),
+      400: jsonResponse(ErrorSchema, "Bad request"),
+      403: jsonResponse(ErrorSchema, "Forbidden"),
+    },
+  }),
+  v("json", UploadStartBodySchema),
+  async (c) => {
+    const body = c.req.valid("json");
+
+    // Validate size limits
+    if (body.size > config.maxUploadBytes) {
+      return c.json({ error: `file size exceeds maximum (${config.maxUploadBytes / 1024 / 1024}MB)` }, 413);
+    }
+    if (body.chunkSize > config.maxChunkBytes) {
+      return c.json({ error: `chunk size exceeds maximum (${config.maxChunkBytes / 1024 / 1024}MB)` }, 400);
+    }
+
+    const fullPath = join(body.path, body.filename);
+    const pathResult = await validatePath(fullPath);
+    if (!pathResult.ok) return c.json({ error: pathResult.error }, pathResult.status);
+
+    // Deterministic upload ID - same file/path/checksum = same ID (enables resume)
+    const uploadId = computeUploadId(body.path, body.filename, body.checksum);
+
+    // Check for existing upload (resume)
+    const existingMeta = await loadMeta(uploadId);
+    if (existingMeta) {
+      // Refresh TTL on resume
+      await refreshExpiry(uploadId);
+      // Get chunks from filesystem
+      const uploadedChunks = await getUploadedChunks(uploadId);
+      return c.json({
+        uploadId,
+        totalChunks: existingMeta.totalChunks,
+        chunkSize: existingMeta.chunkSize,
+        uploadedChunks,
+        completed: false as const,
+      });
+    }
+
+    // New upload
+    const chunkSize = body.chunkSize;
+    const totalChunks = Math.ceil(body.size / chunkSize);
+
+    const ownership: Ownership | null =
+      body.ownerUid != null && body.ownerGid != null && body.mode
+        ? { uid: body.ownerUid, gid: body.ownerGid, mode: parseInt(body.mode, 8) }
+        : null;
+
+    const meta: UploadMeta = {
+      uploadId,
+      path: body.path,
+      filename: body.filename,
+      size: body.size,
+      checksum: body.checksum,
+      chunkSize,
+      totalChunks,
+      ownership,
+    };
+
+    await mkdir(chunksDir(uploadId), { recursive: true });
+    await saveMeta(meta);
+
+    return c.json({
+      uploadId,
+      totalChunks,
+      chunkSize,
+      uploadedChunks: [],
+      completed: false as const,
+    });
+  },
+);
+
+// POST /upload/chunk
+app.post(
+  "/chunk",
+  describeRoute({
+    tags: ["Upload"],
+    summary: "Upload a chunk",
+    description: "Upload a single chunk. Auto-completes when all chunks received.",
+    ...requiresAuth,
+    responses: {
+      200: jsonResponse(UploadChunkResponseSchema, "Chunk received"),
+      400: jsonResponse(ErrorSchema, "Bad request"),
+      404: jsonResponse(ErrorSchema, "Upload not found"),
+    },
+  }),
+  v("header", UploadChunkHeadersSchema),
+  async (c) => {
+    const headers = c.req.valid("header");
+    const uploadId = headers["x-upload-id"];
+    const chunkIndex = headers["x-chunk-index"];
+    const chunkChecksum = headers["x-chunk-checksum"];
+
+    const meta = await loadMeta(uploadId);
+    if (!meta) return c.json({ error: "upload not found" }, 404);
+
+    if (chunkIndex >= meta.totalChunks) {
+      return c.json({ error: `chunk index ${chunkIndex} exceeds total ${meta.totalChunks}` }, 400);
+    }
+
+    const body = c.req.raw.body;
+    if (!body) return c.json({ error: "missing body" }, 400);
+
+    // Stream chunks to a temporary file to avoid memory accumulation
+    const tempChunkPath = chunkPath(uploadId, chunkIndex) + ".tmp";
+    let chunkSize = 0;
+    const hasher = new Bun.CryptoHasher("sha256");
+
+    await mkdir(chunksDir(uploadId), { recursive: true });
+    const tempFile = Bun.file(tempChunkPath);
+    const writer = tempFile.writer();
+
+    try {
+      for await (const chunk of body) {
+        chunkSize += chunk.length;
+        if (chunkSize > config.maxChunkBytes) {
+          writer.end();
+          await rm(tempChunkPath).catch(() => {});
+          return c.json({ error: `chunk size exceeds maximum (${config.maxChunkBytes / 1024 / 1024}MB)` }, 413);
+        }
+        hasher.update(chunk);
+        writer.write(chunk);
+      }
+      await writer.end();
+    } catch (e) {
+      writer.end();
+      await rm(tempChunkPath).catch(() => {});
+      throw e;
+    }
+
+    // Verify checksum if provided
+    if (chunkChecksum) {
+      const computed = `sha256:${hasher.digest("hex")}`;
+      if (computed !== chunkChecksum) {
+        await rm(tempChunkPath).catch(() => {});
+        return c.json({ error: `chunk checksum mismatch: expected ${chunkChecksum}, got ${computed}` }, 400);
+      }
+    }
+
+    // Move temp file to final location (atomic rename, no memory copy)
+    const finalChunkPath = chunkPath(uploadId, chunkIndex);
+    await rename(tempChunkPath, finalChunkPath);
+
+    // Get uploaded chunks from filesystem
+    const uploadedChunks = await getUploadedChunks(uploadId);
+
+    if (uploadedChunks.length === meta.totalChunks) {
+      const assembleError = await assembleFile(meta);
+      if (assembleError) return c.json({ error: assembleError }, 500);
+
+      const fullPath = join(meta.path, meta.filename);
+      const file = Bun.file(fullPath);
+      const s = await stat(fullPath);
+
+      return c.json({
+        completed: true as const,
+        file: {
+          name: meta.filename,
+          path: fullPath,
+          type: "file" as const,
+          size: s.size,
+          mtime: s.mtime.toISOString(),
+          isHidden: meta.filename.startsWith("."),
+          checksum: meta.checksum,
+          mimeType: file.type,
+        },
+      });
+    }
+
+    return c.json({
+      chunkIndex,
+      uploadedChunks,
+      completed: false as const,
+    });
+  },
+);
+
+// Cleanup orphaned chunk directories (Redis keys expired but files remain)
+export const cleanupOrphanedChunks = async () => {
+  try {
+    const dirs = await readdir(config.uploadTempDir);
+    let cleaned = 0;
+
+    for (const dir of dirs) {
+      // Check if upload still exists in Redis
+      const exists = await redis.exists(metaKey(dir));
+      if (!exists) {
+        await rm(chunksDir(dir), { recursive: true }).catch(() => {});
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      console.log(`[Filegate] Cleaned up ${cleaned} orphaned chunk director${cleaned === 1 ? "y" : "ies"}`);
+    }
+  } catch {
+    // Directory doesn't exist yet
+  }
+};
+
+export default app;

@@ -1,0 +1,52 @@
+services:
+  filegate:
+    build: .
+    # image: ghcr.io/valentinkolb/filegate:latest
+    ports:
+      - "4000:4000"
+    environment:
+      # Required
+      FILE_PROXY_TOKEN: "your-secret-token-here"
+      ALLOWED_BASE_PATHS: "/data/homes,/data/groups"
+
+      # Redis (required for chunked uploads)
+      REDIS_URL: "redis://redis:6379"
+
+      # Optional (defaults shown)
+      # PORT: 4000
+
+      # Size limits
+      # MAX_UPLOAD_MB: 500             # Max file size (simple + chunked uploads)
+      # MAX_DOWNLOAD_MB: 5000          # Max download size (files + directories)
+      # MAX_CHUNK_SIZE_MB: 50          # Max chunk size (client must respect this)
+
+      # Chunked upload settings
+      # UPLOAD_EXPIRY_HOURS: 24        # Expiry resets on each chunk upload
+      # DISK_CLEANUP_INTERVAL_HOURS: 6 # Cleanup orphaned chunk files
+      # UPLOAD_TEMP_DIR: /tmp/filegate-uploads
+
+      # SEARCH_MAX_RESULTS: 100
+
+      # Dev mode (override ownership for local testing)
+      # DEV_UID_OVERRIDE: 1000
+      # DEV_GID_OVERRIDE: 1000
+    volumes:
+      # Mount your file storage directories
+      - /export/homes:/data/homes
+      - /export/groups:/data/groups
+
+      # Persistent temp dir for resumable uploads (survives container restarts)
+      - filegate-chunks:/tmp/filegate-uploads
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - filegate-redis:/data
+    restart: unless-stopped
+
+volumes:
+  filegate-chunks:
+  filegate-redis:

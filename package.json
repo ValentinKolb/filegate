@@ -1,0 +1,56 @@
+{
+  "name": "@valentinkolb/filegate",
+  "version": "0.0.1",
+  "description": "Secure, high-performance file proxy server with streaming uploads, chunked uploads, and TAR downloads",
+  "module": "index.ts",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/valentinkolb/filegate.git"
+  },
+  "keywords": [
+    "file-server",
+    "file-proxy",
+    "chunked-upload",
+    "streaming",
+    "bun",
+    "hono"
+  ],
+  "files": [
+    "src",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "bun test --preload ./tests/setup.ts tests/lib tests/schemas.test.ts tests/config.test.ts tests/utils.test.ts",
+    "test:watch": "bun test --preload ./tests/setup.ts --watch",
+    "test:unit": "bun test --preload ./tests/setup.ts tests/lib tests/schemas.test.ts tests/config.test.ts tests/utils.test.ts",
+    "test:integration": "bun test tests/integration",
+    "test:integration:up": "docker compose -f compose.test.yml up -d --build --wait",
+    "test:integration:down": "docker compose -f compose.test.yml down -v",
+    "test:integration:run": "bun run test:integration:up && bun run test:integration && bun run test:integration:down",
+    "test:all": "bun run test:unit && bun run test:integration:run"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts",
+    "./utils": "./src/utils.ts",
+    "./schemas": "./src/schemas.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@hono/standard-validator": "^0.2.2",
+    "@scalar/hono-api-reference": "^0.9.37",
+    "@scalar/openapi-to-markdown": "^0.3.31",
+    "hono": "^4.11.7",
+    "hono-openapi": "^1.2.0",
+    "sanitize-filename": "^1.6.3",
+    "zod": "^4.3.6"
+  }
+}

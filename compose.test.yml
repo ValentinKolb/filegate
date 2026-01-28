@@ -1,0 +1,44 @@
+services:
+  filegate:
+    build: .
+    ports:
+      - "4111:4000"
+    environment:
+      FILE_PROXY_TOKEN: "test-integration-token"
+      ALLOWED_BASE_PATHS: "/data"
+      REDIS_URL: "redis://redis:6379"
+      MAX_UPLOAD_MB: 100
+      MAX_DOWNLOAD_MB: 200
+      MAX_CHUNK_SIZE_MB: 10
+      UPLOAD_EXPIRY_HOURS: 1
+      SEARCH_MAX_RESULTS: 50
+    volumes:
+      - filegate-test-data:/data
+      - filegate-test-chunks:/tmp/filegate-uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://localhost:4000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 3s
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  filegate-test-data:
+  filegate-test-chunks:
