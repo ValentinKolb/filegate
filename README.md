@@ -27,6 +27,7 @@ Filegate is designed to work behind your backend, not as a public-facing service
 - Glob-based file search
 - Type-safe client with full TypeScript support
 - OpenAPI documentation
+- Minimal dependencies (Hono, Zod - no database required)
 
 ## Quick Start
 

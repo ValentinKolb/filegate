@@ -1,7 +1,7 @@
 {
   "name": "@valentinkolb/filegate",
   "version": "0.0.1",
-  "description": "Secure, high-performance file proxy server with streaming uploads, chunked uploads, and TAR downloads",
+  "description": "Secure file proxy for building custom file management systems. Streaming uploads, chunked transfers, Unix permissions.",
   "module": "index.ts",
   "type": "module",
   "license": "MIT",
