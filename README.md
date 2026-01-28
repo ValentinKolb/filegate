@@ -1,22 +1,17 @@
 # Filegate
 
-A secure file proxy server for building custom file management systems. Bring your own backend and frontend - Filegate handles the file operations.
+Secure file proxy for building custom file management systems. Streaming uploads, chunked transfers, Unix permissions.
 
 ```
-Browser/App          Your Backend            Filegate            Filesystem
-     |                    |                     |                    |
-     |  upload request    |                     |                    |
-     |------------------->|                     |                    |
-     |                    |  proxy to filegate  |                    |
-     |                    |-------------------->|                    |
-     |                    |                     |  write file        |
-     |                    |                     |------------------->|
-     |                    |                     |                    |
-     |                    |<--------------------|<-------------------|
-     |<-------------------|                     |                    |
++-------------+       +-------------+       +-------------+       +------------+
+|   Client    |<----->|   Your      |<----->|  Filegate   |<----->| Filesystem |
+| (Browser)   |       |   Backend   |       |  (File Ops) |       |            |
++-------------+       +-------------+       +-------------+       +------------+
+                      Auth & Logic          Streaming, Chunks,
+                                            Permissions
 ```
 
-Filegate is designed to work behind your backend, not as a public-facing service. Your backend handles authentication and authorization, then proxies requests to Filegate. This gives you full control over access logic while Filegate handles the complexity of streaming, chunked uploads, permissions, and security.
+Filegate runs behind your backend, not as a public-facing service. Your backend handles authentication and authorization, then proxies requests to Filegate. You control access logic - Filegate handles file operations.
 
 ## Features
 
@@ -83,34 +78,6 @@ if (result.ok) {
   const blob = await result.data.blob();
 }
 ```
-
-## Architecture
-
-Filegate follows a proxy architecture where your backend mediates all file operations:
-
-```
-+------------------+       +------------------+       +------------------+
-|                  |       |                  |       |                  |
-|   Your Client    |<----->|   Your Backend   |<----->|    Filegate      |
-|   (Browser/App)  |       |   (Auth, Logic)  |       |   (File Ops)     |
-|                  |       |                  |       |                  |
-+------------------+       +------------------+       +------------------+
-                                                              |
-                                                              v
-                                                      +------------------+
-                                                      |                  |
-                                                      |   Filesystem     |
-                                                      |                  |
-                                                      +------------------+
-```
-
-**Your Client** handles the UI and user interactions. It communicates with your backend.
-
-**Your Backend** handles authentication, authorization, and business logic. It decides who can access what and proxies requests to Filegate.
-
-**Filegate** handles the actual file operations: reading, writing, streaming, chunked uploads, permissions. It only accepts requests with a valid token.
-
-This separation means you have full control over access patterns while Filegate handles the complexity of file operations.
 
 ## Core Concepts
 
