@@ -4,7 +4,7 @@ import { readdir, mkdir, rm, rename, cp, stat } from "node:fs/promises";
 import { join, basename, relative } from "node:path";
 import sanitizeFilename from "sanitize-filename";
 import { validatePath, validateSameBase } from "../lib/path";
-import { parseOwnershipBody, applyOwnership } from "../lib/ownership";
+import { parseOwnershipBody, applyOwnership, applyOwnershipRecursive } from "../lib/ownership";
 import { jsonResponse, binaryResponse, requiresAuth } from "../lib/openapi";
 import { v } from "../lib/validator";
 import {
@@ -15,8 +15,7 @@ import {
   PathQuerySchema,
   ContentQuerySchema,
   MkdirBodySchema,
-  MoveBodySchema,
-  CopyBodySchema,
+  TransferBodySchema,
   UploadFileHeadersSchema,
   type FileInfo,
 } from "../schemas";
@@ -47,19 +46,20 @@ const getDirSize = async (dirPath: string): Promise<number> => {
   }
 };
 
-const getFileInfo = async (path: string, relativeTo?: string): Promise<FileInfo> => {
+const getFileInfo = async (path: string, relativeTo?: string, computeDirSize?: boolean): Promise<FileInfo> => {
   const file = Bun.file(path);
   const s = await stat(path);
   const name = basename(path);
+  const isDir = s.isDirectory();
 
   return {
     name,
     path: relativeTo ? relative(relativeTo, path) : path,
-    type: s.isDirectory() ? "directory" : "file",
-    size: s.isDirectory() ? 0 : s.size,
+    type: isDir ? "directory" : "file",
+    size: isDir ? (computeDirSize ? await getDirSize(path) : 0) : s.size,
     mtime: s.mtime.toISOString(),
     isHidden: name.startsWith("."),
-    mimeType: s.isDirectory() ? undefined : file.type,
+    mimeType: isDir ? undefined : file.type,
   };
 };
 
@@ -102,7 +102,7 @@ app.get(
       await Promise.all(
         entries
           .filter((e) => showHidden || !e.name.startsWith("."))
-          .map((e) => getFileInfo(join(result.realPath, e.name), result.realPath).catch(() => null)),
+          .map((e) => getFileInfo(join(result.realPath, e.name), result.realPath, true).catch(() => null)),
       )
     ).filter((item): item is FileInfo => item !== null);
 
@@ -357,73 +357,118 @@ app.delete(
   },
 );
 
-// POST /move
+// POST /transfer
 app.post(
-  "/move",
+  "/transfer",
   describeRoute({
     tags: ["Files"],
-    summary: "Move file or directory",
-    description: "Move within same base path only",
+    summary: "Move or copy file/directory",
+    description:
+      "Transfer files between locations. Mode 'move' requires same base path. " +
+      "Mode 'copy' allows cross-base transfer when ownership (ownerUid, ownerGid, fileMode) is provided.",
     ...requiresAuth,
     responses: {
-      200: jsonResponse(FileInfoSchema, "Moved"),
+      200: jsonResponse(FileInfoSchema, "Transferred"),
       400: jsonResponse(ErrorSchema, "Bad request"),
       403: jsonResponse(ErrorSchema, "Forbidden"),
       404: jsonResponse(ErrorSchema, "Not found"),
     },
   }),
-  v("json", MoveBodySchema),
+  v("json", TransferBodySchema),
   async (c) => {
-    const { from, to } = c.req.valid("json");
+    const { from, to, mode, ownerUid, ownerGid, fileMode, dirMode } = c.req.valid("json");
 
-    const result = await validateSameBase(from, to);
-    if (!result.ok) return c.json({ error: result.error }, result.status);
+    // Build ownership if provided
+    const ownership =
+      ownerUid != null && ownerGid != null && fileMode != null
+        ? {
+            uid: ownerUid,
+            gid: ownerGid,
+            mode: parseInt(fileMode, 8),
+            dirMode: dirMode ? parseInt(dirMode, 8) : undefined,
+          }
+        : null;
+
+    // Move always requires same base
+    if (mode === "move") {
+      const result = await validateSameBase(from, to);
+      if (!result.ok) return c.json({ error: result.error }, result.status);
+
+      try {
+        await stat(result.realPath);
+      } catch {
+        return c.json({ error: "source not found" }, 404);
+      }
+
+      await mkdir(join(result.realTo, ".."), { recursive: true });
+      await rename(result.realPath, result.realTo);
+
+      // Apply ownership if provided (for move within same base)
+      if (ownership) {
+        const ownershipError = await applyOwnershipRecursive(result.realTo, ownership);
+        if (ownershipError) {
+          return c.json({ error: ownershipError }, 500);
+        }
+      }
+
+      return c.json(await getFileInfo(result.realTo));
+    }
+
+    // Copy: check if same base or cross-base with ownership
+    const sameBaseResult = await validateSameBase(from, to);
+
+    if (sameBaseResult.ok) {
+      // Same base - no ownership required
+      try {
+        await stat(sameBaseResult.realPath);
+      } catch {
+        return c.json({ error: "source not found" }, 404);
+      }
+
+      await mkdir(join(sameBaseResult.realTo, ".."), { recursive: true });
+      await cp(sameBaseResult.realPath, sameBaseResult.realTo, { recursive: true });
+
+      // Apply ownership if provided
+      if (ownership) {
+        const ownershipError = await applyOwnershipRecursive(sameBaseResult.realTo, ownership);
+        if (ownershipError) {
+          await rm(sameBaseResult.realTo, { recursive: true }).catch(() => {});
+          return c.json({ error: ownershipError }, 500);
+        }
+      }
+
+      return c.json(await getFileInfo(sameBaseResult.realTo));
+    }
+
+    // Cross-base copy - ownership is required
+    if (!ownership) {
+      return c.json({ error: "cross-base copy requires ownership (ownerUid, ownerGid, fileMode)" }, 400);
+    }
+
+    // Validate source and destination separately
+    const fromResult = await validatePath(from);
+    if (!fromResult.ok) return c.json({ error: fromResult.error }, fromResult.status);
+
+    const toResult = await validatePath(to, { createParents: true, ownership });
+    if (!toResult.ok) return c.json({ error: toResult.error }, toResult.status);
 
     try {
-      await stat(result.realPath);
+      await stat(fromResult.realPath);
     } catch {
       return c.json({ error: "source not found" }, 404);
     }
 
-    await mkdir(join(result.realTo, ".."), { recursive: true });
-    await rename(result.realPath, result.realTo);
+    await mkdir(join(toResult.realPath, ".."), { recursive: true });
+    await cp(fromResult.realPath, toResult.realPath, { recursive: true });
 
-    return c.json(await getFileInfo(result.realTo));
-  },
-);
-
-// POST /copy
-app.post(
-  "/copy",
-  describeRoute({
-    tags: ["Files"],
-    summary: "Copy file or directory",
-    description: "Copy within same base path only",
-    ...requiresAuth,
-    responses: {
-      200: jsonResponse(FileInfoSchema, "Copied"),
-      400: jsonResponse(ErrorSchema, "Bad request"),
-      403: jsonResponse(ErrorSchema, "Forbidden"),
-      404: jsonResponse(ErrorSchema, "Not found"),
-    },
-  }),
-  v("json", CopyBodySchema),
-  async (c) => {
-    const { from, to } = c.req.valid("json");
-
-    const result = await validateSameBase(from, to);
-    if (!result.ok) return c.json({ error: result.error }, result.status);
-
-    try {
-      await stat(result.realPath);
-    } catch {
-      return c.json({ error: "source not found" }, 404);
+    // Apply ownership recursively to copied content
+    const ownershipError = await applyOwnershipRecursive(toResult.realPath, ownership);
+    if (ownershipError) {
+      await rm(toResult.realPath, { recursive: true }).catch(() => {});
+      return c.json({ error: ownershipError }, 500);
     }
 
-    await mkdir(join(result.realTo, ".."), { recursive: true });
-    await cp(result.realPath, result.realTo, { recursive: true });
-
-    return c.json(await getFileInfo(result.realTo));
+    return c.json(await getFileInfo(toResult.realPath));
   },
 );
 
