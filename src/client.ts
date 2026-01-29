@@ -94,6 +94,8 @@ export interface TransferOptions {
   from: string;
   to: string;
   mode: "move" | "copy";
+  /** If true (default), appends -01, -02, etc. to avoid overwriting existing files */
+  ensureUniqueName?: boolean;
   /** Owner UID - required for cross-base copy */
   uid?: number;
   /** Owner GID - required for cross-base copy */
@@ -305,6 +307,7 @@ export class Filegate {
       to: opts.to,
       mode: opts.mode,
     };
+    if (opts.ensureUniqueName !== undefined) body.ensureUniqueName = opts.ensureUniqueName;
     if (opts.uid !== undefined) body.ownerUid = opts.uid;
     if (opts.gid !== undefined) body.ownerGid = opts.gid;
     if (opts.fileMode) body.fileMode = opts.fileMode;
