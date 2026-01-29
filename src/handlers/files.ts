@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
-import { readdir, mkdir, rm, rename, cp, stat } from "node:fs/promises";
-import { join, basename, relative } from "node:path";
+import { readdir, mkdir, rm, rename, cp, stat, access } from "node:fs/promises";
+import { join, basename, relative, dirname, extname } from "node:path";
 import sanitizeFilename from "sanitize-filename";
 import { validatePath, validateSameBase } from "../lib/path";
 import { parseOwnershipBody, applyOwnership, applyOwnershipRecursive } from "../lib/ownership";
@@ -22,6 +22,35 @@ import {
 import { config } from "../config";
 
 const app = new Hono();
+
+// Generate a unique path by appending -01, -02, etc. if target exists
+const getUniquePath = async (targetPath: string): Promise<string> => {
+  // Check if target exists
+  try {
+    await access(targetPath);
+  } catch {
+    // Doesn't exist, use as-is
+    return targetPath;
+  }
+
+  const dir = dirname(targetPath);
+  const ext = extname(targetPath);
+  const base = basename(targetPath, ext);
+
+  for (let i = 1; i <= 99; i++) {
+    const suffix = i.toString().padStart(2, "0");
+    const newPath = join(dir, `${base}-${suffix}${ext}`);
+    try {
+      await access(newPath);
+    } catch {
+      return newPath;
+    }
+  }
+
+  // Fallback: use timestamp if all 99 are taken
+  const timestamp = Date.now();
+  return join(dir, `${base}-${timestamp}${ext}`);
+};
 
 // Cross-platform directory size using `du` command
 const getDirSize = async (dirPath: string): Promise<number> => {
@@ -107,7 +136,8 @@ app.get(
     ).filter((item): item is FileInfo => item !== null);
 
     const info = await getFileInfo(result.realPath);
-    return c.json({ ...info, items, total: items.length });
+    const totalSize = items.reduce((sum, item) => sum + item.size, 0);
+    return c.json({ ...info, size: totalSize, items, total: items.length });
   },
 );
 
@@ -376,7 +406,7 @@ app.post(
   }),
   v("json", TransferBodySchema),
   async (c) => {
-    const { from, to, mode, ownerUid, ownerGid, fileMode, dirMode } = c.req.valid("json");
+    const { from, to, mode, ensureUniqueName, ownerUid, ownerGid, fileMode, dirMode } = c.req.valid("json");
 
     // Build ownership if provided
     const ownership =
@@ -400,18 +430,20 @@ app.post(
         return c.json({ error: "source not found" }, 404);
       }
 
-      await mkdir(join(result.realTo, ".."), { recursive: true });
-      await rename(result.realPath, result.realTo);
+      const targetPath = ensureUniqueName ? await getUniquePath(result.realTo) : result.realTo;
+
+      await mkdir(join(targetPath, ".."), { recursive: true });
+      await rename(result.realPath, targetPath);
 
       // Apply ownership if provided (for move within same base)
       if (ownership) {
-        const ownershipError = await applyOwnershipRecursive(result.realTo, ownership);
+        const ownershipError = await applyOwnershipRecursive(targetPath, ownership);
         if (ownershipError) {
           return c.json({ error: ownershipError }, 500);
         }
       }
 
-      return c.json(await getFileInfo(result.realTo));
+      return c.json(await getFileInfo(targetPath));
     }
 
     // Copy: check if same base or cross-base with ownership
@@ -425,19 +457,21 @@ app.post(
         return c.json({ error: "source not found" }, 404);
       }
 
-      await mkdir(join(sameBaseResult.realTo, ".."), { recursive: true });
-      await cp(sameBaseResult.realPath, sameBaseResult.realTo, { recursive: true });
+      const targetPath = ensureUniqueName ? await getUniquePath(sameBaseResult.realTo) : sameBaseResult.realTo;
+
+      await mkdir(join(targetPath, ".."), { recursive: true });
+      await cp(sameBaseResult.realPath, targetPath, { recursive: true });
 
       // Apply ownership if provided
       if (ownership) {
-        const ownershipError = await applyOwnershipRecursive(sameBaseResult.realTo, ownership);
+        const ownershipError = await applyOwnershipRecursive(targetPath, ownership);
         if (ownershipError) {
-          await rm(sameBaseResult.realTo, { recursive: true }).catch(() => {});
+          await rm(targetPath, { recursive: true }).catch(() => {});
           return c.json({ error: ownershipError }, 500);
         }
       }
 
-      return c.json(await getFileInfo(sameBaseResult.realTo));
+      return c.json(await getFileInfo(targetPath));
     }
 
     // Cross-base copy - ownership is required
@@ -458,17 +492,19 @@ app.post(
       return c.json({ error: "source not found" }, 404);
     }
 
-    await mkdir(join(toResult.realPath, ".."), { recursive: true });
-    await cp(fromResult.realPath, toResult.realPath, { recursive: true });
+    const targetPath = ensureUniqueName ? await getUniquePath(toResult.realPath) : toResult.realPath;
+
+    await mkdir(join(targetPath, ".."), { recursive: true });
+    await cp(fromResult.realPath, targetPath, { recursive: true });
 
     // Apply ownership recursively to copied content
-    const ownershipError = await applyOwnershipRecursive(toResult.realPath, ownership);
+    const ownershipError = await applyOwnershipRecursive(targetPath, ownership);
     if (ownershipError) {
-      await rm(toResult.realPath, { recursive: true }).catch(() => {});
+      await rm(targetPath, { recursive: true }).catch(() => {});
       return c.json({ error: ownershipError }, 500);
     }
 
-    return c.json(await getFileInfo(toResult.realPath));
+    return c.json(await getFileInfo(targetPath));
   },
 );
 
