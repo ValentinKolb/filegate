@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { Scalar } from "@scalar/hono-api-reference";
 import { generateSpecs } from "hono-openapi";
 import { createMarkdownFromOpenApi } from "@scalar/openapi-to-markdown";
@@ -69,6 +70,11 @@ app.notFound((c) => c.json({ error: "not found" }, 404));
 
 // Error handler
 app.onError((err, c) => {
+  // HTTPException (from bearerAuth, etc.) - return the proper response
+  if (err instanceof HTTPException) {
+    return err.getResponse();
+  }
+
   console.error("[Filegate] Error:", err);
   return c.json({ error: "internal error" }, 500);
 });
