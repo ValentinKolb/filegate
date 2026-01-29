@@ -89,16 +89,19 @@ export interface DeleteOptions {
   path: string;
 }
 
-// --- Move ---
-export interface MoveOptions {
+// --- Transfer (Move/Copy) ---
+export interface TransferOptions {
   from: string;
   to: string;
-}
-
-// --- Copy ---
-export interface CopyOptions {
-  from: string;
-  to: string;
+  mode: "move" | "copy";
+  /** Owner UID - required for cross-base copy */
+  uid?: number;
+  /** Owner GID - required for cross-base copy */
+  gid?: number;
+  /** File mode (e.g. "644") - required for cross-base copy */
+  fileMode?: string;
+  /** Directory mode (e.g. "755") - if not set, derived from fileMode */
+  dirMode?: string;
 }
 
 // --- Glob (Search) ---
@@ -293,23 +296,24 @@ export class Filegate {
   }
 
   // ==========================================================================
-  // Move & Copy
+  // Transfer (Move/Copy)
   // ==========================================================================
 
-  async move(opts: MoveOptions): Promise<FileProxyResponse<FileInfo>> {
-    const res = await this._fetch(`${this.url}/files/move`, {
-      method: "POST",
-      headers: this.jsonHdrs(),
-      body: JSON.stringify({ from: opts.from, to: opts.to }),
-    });
-    return this.handleResponse(res);
-  }
+  async transfer(opts: TransferOptions): Promise<FileProxyResponse<FileInfo>> {
+    const body: Record<string, unknown> = {
+      from: opts.from,
+      to: opts.to,
+      mode: opts.mode,
+    };
+    if (opts.uid !== undefined) body.ownerUid = opts.uid;
+    if (opts.gid !== undefined) body.ownerGid = opts.gid;
+    if (opts.fileMode) body.fileMode = opts.fileMode;
+    if (opts.dirMode) body.dirMode = opts.dirMode;
 
-  async copy(opts: CopyOptions): Promise<FileProxyResponse<FileInfo>> {
-    const res = await this._fetch(`${this.url}/files/copy`, {
+    const res = await this._fetch(`${this.url}/files/transfer`, {
       method: "POST",
       headers: this.jsonHdrs(),
-      body: JSON.stringify({ from: opts.from, to: opts.to }),
+      body: JSON.stringify(body),
     });
     return this.handleResponse(res);
   }
