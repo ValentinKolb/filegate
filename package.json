@@ -1,8 +1,6 @@
 {
   "name": "@valentinkolb/filegate",
   "version": "0.0.1",
-  "description": "Secure file proxy for building custom file management systems. Streaming uploads, chunked transfers, Unix permissions.",
-  "module": "index.ts",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -27,10 +25,7 @@
     "test:watch": "bun test --preload ./tests/setup.ts --watch",
     "test:unit": "bun test --preload ./tests/setup.ts tests/lib tests/schemas.test.ts tests/config.test.ts tests/utils.test.ts",
     "test:integration": "bun test tests/integration",
-    "test:integration:up": "docker compose -f compose.test.yml up -d --build --wait",
-    "test:integration:down": "docker compose -f compose.test.yml down -v",
-    "test:integration:run": "bun run test:integration:up && bun run test:integration && bun run test:integration:down",
-    "test:all": "bun run test:unit && bun run test:integration:run"
+    "test:all": "bun run test:unit && bun run test:integration"
   },
   "exports": {
     ".": "./src/index.ts",

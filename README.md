@@ -144,6 +144,42 @@ Filegate does not validate whether the specified uid/gid exists on the system, n
 
 This feature is intended for scenarios like NFS shares exposed through Filegate, where preserving the original permission structure is required.
 
+### Transfer (Move/Copy)
+
+The `transfer` endpoint handles both moving and copying files or directories:
+
+```typescript
+// Move (rename) a file - same base path only
+await client.transfer({
+  from: "/data/old-name.txt",
+  to: "/data/new-name.txt",
+  mode: "move",
+});
+
+// Copy within same base path - no ownership required
+await client.transfer({
+  from: "/data/file.txt",
+  to: "/data/backup/file.txt",
+  mode: "copy",
+});
+
+// Copy across different base paths - ownership required
+await client.transfer({
+  from: "/data/file.txt",
+  to: "/backup/file.txt",
+  mode: "copy",
+  uid: 1000,
+  gid: 1000,
+  fileMode: "644",
+});
+```
+
+**Rules:**
+- `mode: "move"` - Only within the same base path (uses filesystem rename)
+- `mode: "copy"` without ownership - Only within the same base path
+- `mode: "copy"` with ownership - Allows cross-base copying (ownership is applied recursively)
+- Both operations work recursively on directories
+
 ### Chunked Uploads
 
 For large files, use chunked uploads. They support:
@@ -294,11 +330,23 @@ await client.mkdir({ path: "/data/new-folder", mode: "755" });
 // Delete file or directory
 await client.delete({ path: "/data/old-file.txt" });
 
-// Move (within same base path)
-await client.move({ from: "/data/old.txt", to: "/data/new.txt" });
+// Transfer: Move or copy files/directories
+await client.transfer({
+  from: "/data/old.txt",
+  to: "/data/new.txt",
+  mode: "move",  // or "copy"
+});
 
-// Copy (within same base path)
-await client.copy({ from: "/data/file.txt", to: "/data/backup.txt" });
+// Transfer with ownership (required for cross-base copy)
+await client.transfer({
+  from: "/data/file.txt",
+  to: "/backup/file.txt",
+  mode: "copy",
+  uid: 1000,
+  gid: 1000,
+  fileMode: "644",
+  dirMode: "755",
+});
 
 // Search files with glob patterns
 await client.glob({
@@ -396,8 +444,7 @@ All `/files/*` endpoints require `Authorization: Bearer <token>`.
 | PUT | `/files/content` | Upload file |
 | POST | `/files/mkdir` | Create directory |
 | DELETE | `/files/delete` | Delete file or directory |
-| POST | `/files/move` | Move file or directory |
-| POST | `/files/copy` | Copy file or directory |
+| POST | `/files/transfer` | Move or copy file/directory. Cross-base copy requires ownership |
 | GET | `/files/search` | Search with glob pattern. Use `?directories=true` to include folders |
 | POST | `/files/upload/start` | Start or resume chunked upload |
 | POST | `/files/upload/chunk` | Upload a chunk |
