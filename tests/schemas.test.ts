@@ -8,8 +8,7 @@ import {
   InfoQuerySchema,
   SearchQuerySchema,
   MkdirBodySchema,
-  MoveBodySchema,
-  CopyBodySchema,
+  TransferBodySchema,
   UploadStartBodySchema,
   SearchResultSchema,
   SearchResponseSchema,
@@ -317,31 +316,64 @@ describe("schemas", () => {
     });
   });
 
-  describe("MoveBodySchema", () => {
-    test("should validate valid move body", () => {
-      const result = MoveBodySchema.safeParse({
+  describe("TransferBodySchema", () => {
+    test("should validate valid move transfer", () => {
+      const result = TransferBodySchema.safeParse({
         from: "/data/old.txt",
         to: "/data/new.txt",
+        mode: "move",
       });
       expect(result.success).toBe(true);
     });
 
-    test("should reject empty from path", () => {
-      const result = MoveBodySchema.safeParse({
-        from: "",
+    test("should validate valid copy transfer", () => {
+      const result = TransferBodySchema.safeParse({
+        from: "/data/source.txt",
+        to: "/data/dest.txt",
+        mode: "copy",
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("should reject invalid mode", () => {
+      const result = TransferBodySchema.safeParse({
+        from: "/data/old.txt",
         to: "/data/new.txt",
+        mode: "rename",
       });
       expect(result.success).toBe(false);
     });
-  });
 
-  describe("CopyBodySchema", () => {
-    test("should validate valid copy body", () => {
-      const result = CopyBodySchema.safeParse({
+    test("should reject empty from path", () => {
+      const result = TransferBodySchema.safeParse({
+        from: "",
+        to: "/data/new.txt",
+        mode: "move",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    test("should accept optional ownership fields", () => {
+      const result = TransferBodySchema.safeParse({
         from: "/data/source.txt",
         to: "/data/dest.txt",
+        mode: "copy",
+        ownerUid: 1000,
+        ownerGid: 1000,
+        fileMode: "644",
+        dirMode: "755",
       });
       expect(result.success).toBe(true);
+    });
+
+    test("should reject invalid fileMode format", () => {
+      const result = TransferBodySchema.safeParse({
+        from: "/data/source.txt",
+        to: "/data/dest.txt",
+        mode: "copy",
+        fileMode: "999",
+      });
+      expect(result.success).toBe(false);
     });
   });
 
