@@ -81,7 +81,7 @@ app.get(
   async (c) => {
     const { path, showHidden } = c.req.valid("query");
 
-    const result = await validatePath(path, true);
+    const result = await validatePath(path, { allowBasePath: true });
     if (!result.ok) return c.json({ error: result.error }, result.status);
 
     let s;
@@ -239,8 +239,6 @@ app.put(
     }
 
     const fullPath = join(dirPath, filename);
-    const result = await validatePath(fullPath);
-    if (!result.ok) return c.json({ error: result.error }, result.status);
 
     // Build ownership from validated headers
     const ownership: import("../lib/ownership").Ownership | null =
@@ -249,10 +247,13 @@ app.put(
             uid: headers["x-owner-uid"],
             gid: headers["x-owner-gid"],
             mode: parseInt(headers["x-file-mode"], 8),
+            dirMode: headers["x-dir-mode"] ? parseInt(headers["x-dir-mode"], 8) : undefined,
           }
         : null;
 
-    await mkdir(dirPath, { recursive: true });
+    // Validate path and create parent directories with ownership
+    const result = await validatePath(fullPath, { createParents: true, ownership });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
 
     const body = c.req.raw.body;
     if (!body) return c.json({ error: "missing body" }, 400);

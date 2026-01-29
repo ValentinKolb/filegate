@@ -1,7 +1,14 @@
 import { describe, test, expect, beforeAll, afterAll, mock } from "bun:test";
 import { mkdir, writeFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { parseOwnershipHeaders, parseOwnershipBody, applyOwnership, type Ownership } from "../../src/lib/ownership";
+import {
+  parseOwnershipHeaders,
+  parseOwnershipBody,
+  applyOwnership,
+  fileModeToDirectoryMode,
+  getEffectiveDirMode,
+  type Ownership,
+} from "../../src/lib/ownership";
 
 const TEST_BASE = "/tmp/filegate-test-ownership";
 const TEST_FILE = join(TEST_BASE, "test-file.txt");
@@ -172,6 +179,105 @@ describe("ownership", () => {
       expect(result).not.toBeNull();
       expect(result?.uid).toBe(0);
       expect(result?.gid).toBe(0);
+    });
+  });
+
+  describe("fileModeToDirectoryMode", () => {
+    test("should add execute bit where read bit is set (644 → 755)", () => {
+      expect(fileModeToDirectoryMode(0o644)).toBe(0o755);
+    });
+
+    test("should add execute bit where read bit is set (600 → 700)", () => {
+      expect(fileModeToDirectoryMode(0o600)).toBe(0o700);
+    });
+
+    test("should add execute bit where read bit is set (664 → 775)", () => {
+      expect(fileModeToDirectoryMode(0o664)).toBe(0o775);
+    });
+
+    test("should add execute bit where read bit is set (640 → 750)", () => {
+      expect(fileModeToDirectoryMode(0o640)).toBe(0o750);
+    });
+
+    test("should not add execute bit where read bit is not set (000 → 000)", () => {
+      expect(fileModeToDirectoryMode(0o000)).toBe(0o000);
+    });
+
+    test("should preserve existing execute bits (755 → 755)", () => {
+      expect(fileModeToDirectoryMode(0o755)).toBe(0o755);
+    });
+  });
+
+  describe("getEffectiveDirMode", () => {
+    test("should return explicit dirMode if provided", () => {
+      const ownership: Ownership = { uid: 1000, gid: 1000, mode: 0o644, dirMode: 0o700 };
+      expect(getEffectiveDirMode(ownership)).toBe(0o700);
+    });
+
+    test("should derive dirMode from fileMode if not provided", () => {
+      const ownership: Ownership = { uid: 1000, gid: 1000, mode: 0o644 };
+      expect(getEffectiveDirMode(ownership)).toBe(0o755);
+    });
+
+    test("should derive dirMode from fileMode if dirMode is undefined", () => {
+      const ownership: Ownership = { uid: 1000, gid: 1000, mode: 0o600, dirMode: undefined };
+      expect(getEffectiveDirMode(ownership)).toBe(0o700);
+    });
+  });
+
+  describe("parseOwnershipHeaders with dirMode", () => {
+    test("should parse dirMode header", () => {
+      const headers = new Headers({
+        "X-Owner-UID": "1000",
+        "X-Owner-GID": "1000",
+        "X-File-Mode": "644",
+        "X-Dir-Mode": "700",
+      });
+      const req = new Request("http://localhost", { headers });
+
+      const result = parseOwnershipHeaders(req);
+      expect(result).not.toBeNull();
+      expect(result?.dirMode).toBe(0o700);
+    });
+
+    test("should have undefined dirMode if header not provided", () => {
+      const headers = new Headers({
+        "X-Owner-UID": "1000",
+        "X-Owner-GID": "1000",
+        "X-File-Mode": "644",
+      });
+      const req = new Request("http://localhost", { headers });
+
+      const result = parseOwnershipHeaders(req);
+      expect(result).not.toBeNull();
+      expect(result?.dirMode).toBeUndefined();
+    });
+  });
+
+  describe("parseOwnershipBody with dirMode", () => {
+    test("should parse dirMode from body", () => {
+      const body = {
+        ownerUid: 1000,
+        ownerGid: 1000,
+        mode: "644",
+        dirMode: "700",
+      };
+
+      const result = parseOwnershipBody(body);
+      expect(result).not.toBeNull();
+      expect(result?.dirMode).toBe(0o700);
+    });
+
+    test("should have undefined dirMode if not provided in body", () => {
+      const body = {
+        ownerUid: 1000,
+        ownerGid: 1000,
+        mode: "644",
+      };
+
+      const result = parseOwnershipBody(body);
+      expect(result).not.toBeNull();
+      expect(result?.dirMode).toBeUndefined();
     });
   });
 

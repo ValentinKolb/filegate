@@ -1,6 +1,7 @@
-import { realpath } from "node:fs/promises";
+import { realpath, mkdir } from "node:fs/promises";
 import { join, normalize, dirname, basename } from "node:path";
 import { config } from "../config";
+import { applyOwnershipToNewDirs, type Ownership } from "./ownership";
 
 export type PathResult =
   | { ok: true; realPath: string; basePath: string }
@@ -22,11 +23,21 @@ const getRealBase = async (basePath: string): Promise<string | null> => {
   }
 };
 
+export type ValidatePathOptions = {
+  /** If true, allows operating on the base path itself */
+  allowBasePath?: boolean;
+  /** If true, creates parent directories if they don't exist */
+  createParents?: boolean;
+  /** Ownership to apply to newly created directories */
+  ownership?: Ownership | null;
+};
+
 /**
  * Validates path is within allowed base paths, resolves symlinks.
- * @param allowBasePath - if true, allows operating on the base path itself
+ * Optionally creates parent directories with ownership.
  */
-export const validatePath = async (path: string, allowBasePath = false): Promise<PathResult> => {
+export const validatePath = async (path: string, options: ValidatePathOptions = {}): Promise<PathResult> => {
+  const { allowBasePath = false, createParents = false, ownership = null } = options;
   const cleaned = normalize(path);
 
   // Find matching base
@@ -48,6 +59,20 @@ export const validatePath = async (path: string, allowBasePath = false): Promise
 
   if (!basePath) {
     return { ok: false, error: "path not allowed", status: 403 };
+  }
+
+  // Create parent directories if requested (AFTER base validation)
+  if (createParents) {
+    const parentPath = dirname(cleaned);
+    await mkdir(parentPath, { recursive: true });
+
+    // Apply ownership to newly created directories
+    if (ownership) {
+      const realBase = await getRealBase(basePath);
+      if (realBase) {
+        await applyOwnershipToNewDirs(parentPath, realBase, ownership);
+      }
+    }
   }
 
   // Resolve symlinks

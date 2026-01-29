@@ -111,6 +111,10 @@ export const UploadStartBodySchema = z.object({
     .string()
     .regex(/^[0-7]{3,4}$/)
     .optional(),
+  dirMode: z
+    .string()
+    .regex(/^[0-7]{3,4}$/)
+    .optional(),
 });
 
 // ============================================================================
@@ -160,6 +164,10 @@ export const UploadFileHeadersSchema = z.object({
   "x-owner-uid": z.string().regex(/^\d+$/).transform(Number).optional(),
   "x-owner-gid": z.string().regex(/^\d+$/).transform(Number).optional(),
   "x-file-mode": z
+    .string()
+    .regex(/^[0-7]{3,4}$/)
+    .optional(),
+  "x-dir-mode": z
     .string()
     .regex(/^[0-7]{3,4}$/)
     .optional(),

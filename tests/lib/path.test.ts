@@ -83,7 +83,7 @@ describe("path validation", () => {
     });
 
     test("should allow operating on base path when allowBasePath=true", async () => {
-      const result = await validatePath(TEST_BASE, true);
+      const result = await validatePath(TEST_BASE, { allowBasePath: true });
       expect(result.ok).toBe(true);
       if (result.ok) {
         expect(result.realPath).toBe(TEST_BASE);

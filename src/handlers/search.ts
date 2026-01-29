@@ -114,7 +114,7 @@ app.get(
     const validPaths: string[] = [];
 
     for (const p of paths) {
-      const result = await validatePath(p, true);
+      const result = await validatePath(p, { allowBasePath: true });
       if (!result.ok) return c.json({ error: result.error }, result.status);
 
       const s = await stat(result.realPath).catch(() => null);

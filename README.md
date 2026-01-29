@@ -108,6 +108,21 @@ With this configuration:
 
 Symlinks that point outside base paths are also blocked.
 
+### Auto-Create Parent Directories
+
+When uploading files, Filegate automatically creates any missing parent directories. This simplifies folder uploads where nested structures need to be created on-the-fly:
+
+```typescript
+// Parent directories /data/new/nested/path will be created automatically
+await client.upload.single({
+  path: "/data/new/nested/path",
+  filename: "file.txt",
+  data: buffer,
+});
+```
+
+This applies to both simple uploads and chunked uploads.
+
 ### File Ownership
 
 Filegate can set Unix file ownership on uploaded files:

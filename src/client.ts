@@ -50,6 +50,8 @@ export interface UploadSingleOptions {
   uid?: number;
   gid?: number;
   mode?: string;
+  /** Directory mode for auto-created parent directories (e.g. "755"). If not set, derived from mode. */
+  dirMode?: string;
 }
 
 // --- Upload Chunked Start ---
@@ -62,6 +64,8 @@ export interface UploadChunkedStartOptions {
   uid?: number;
   gid?: number;
   mode?: string;
+  /** Directory mode for auto-created parent directories (e.g. "755"). If not set, derived from mode. */
+  dirMode?: string;
 }
 
 // --- Upload Chunked Send ---
@@ -131,6 +135,7 @@ class UploadClient {
     if (opts.uid !== undefined) uploadHdrs["X-Owner-UID"] = String(opts.uid);
     if (opts.gid !== undefined) uploadHdrs["X-Owner-GID"] = String(opts.gid);
     if (opts.mode) uploadHdrs["X-File-Mode"] = opts.mode;
+    if (opts.dirMode) uploadHdrs["X-Dir-Mode"] = opts.dirMode;
 
     const res = await this._fetch(`${this.url}/files/content`, {
       method: "PUT",
@@ -151,6 +156,7 @@ class UploadClient {
         ownerUid: opts.uid,
         ownerGid: opts.gid,
         mode: opts.mode,
+        dirMode: opts.dirMode,
       };
 
       const res = await this._fetch(`${this.url}/files/upload/start`, {

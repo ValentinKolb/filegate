@@ -152,7 +152,20 @@ app.post(
     }
 
     const fullPath = join(body.path, body.filename);
-    const pathResult = await validatePath(fullPath);
+
+    // Build ownership from body
+    const ownership: Ownership | null =
+      body.ownerUid != null && body.ownerGid != null && body.mode
+        ? {
+            uid: body.ownerUid,
+            gid: body.ownerGid,
+            mode: parseInt(body.mode, 8),
+            dirMode: body.dirMode ? parseInt(body.dirMode, 8) : undefined,
+          }
+        : null;
+
+    // Validate path and create parent directories with ownership
+    const pathResult = await validatePath(fullPath, { createParents: true, ownership });
     if (!pathResult.ok) return c.json({ error: pathResult.error }, pathResult.status);
 
     // Deterministic upload ID - same file/path/checksum = same ID (enables resume)
@@ -177,11 +190,6 @@ app.post(
     // New upload
     const chunkSize = body.chunkSize;
     const totalChunks = Math.ceil(body.size / chunkSize);
-
-    const ownership: Ownership | null =
-      body.ownerUid != null && body.ownerGid != null && body.mode
-        ? { uid: body.ownerUid, gid: body.ownerGid, mode: parseInt(body.mode, 8) }
-        : null;
 
     const meta: UploadMeta = {
       uploadId,
