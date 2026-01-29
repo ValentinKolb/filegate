@@ -82,6 +82,12 @@ const result = await filegate.download({ path: "/data/uploads/document.pdf" });
 if (result.ok) {
   const blob = await result.data.blob();
 }
+
+// Open in browser instead of downloading
+const preview = await filegate.download({
+  path: "/data/uploads/image.png",
+  inline: true,
+});
 ```
 
 ## Core Concepts
@@ -247,6 +253,9 @@ await client.info({ path: "/data/file.txt", showHidden: false });
 // Download file (returns streaming Response)
 await client.download({ path: "/data/file.txt" });
 
+// Download and open in browser (inline)
+await client.download({ path: "/data/image.png", inline: true });
+
 // Download directory as TAR archive
 await client.download({ path: "/data/folder" });
 
@@ -276,11 +285,26 @@ await client.move({ from: "/data/old.txt", to: "/data/new.txt" });
 // Copy (within same base path)
 await client.copy({ from: "/data/file.txt", to: "/data/backup.txt" });
 
-// Search with glob patterns
+// Search files with glob patterns
 await client.glob({
   paths: ["/data/uploads"],
   pattern: "**/*.pdf",
   limit: 50,
+});
+
+// Search directories only
+await client.glob({
+  paths: ["/data"],
+  pattern: "**/*",
+  files: false,
+  directories: true,
+});
+
+// Search both files and directories
+await client.glob({
+  paths: ["/data"],
+  pattern: "**/*",
+  directories: true,
 });
 ```
 
@@ -353,13 +377,13 @@ All `/files/*` endpoints require `Authorization: Bearer <token>`.
 | GET | `/openapi.json` | OpenAPI specification |
 | GET | `/llms.txt` | LLM-friendly markdown documentation |
 | GET | `/files/info` | Get file or directory info |
-| GET | `/files/content` | Download file or directory (TAR) |
+| GET | `/files/content` | Download file or directory (TAR). Use `?inline=true` to view in browser |
 | PUT | `/files/content` | Upload file |
 | POST | `/files/mkdir` | Create directory |
 | DELETE | `/files/delete` | Delete file or directory |
 | POST | `/files/move` | Move file or directory |
 | POST | `/files/copy` | Copy file or directory |
-| GET | `/files/search` | Search with glob pattern |
+| GET | `/files/search` | Search with glob pattern. Use `?directories=true` to include folders |
 | POST | `/files/upload/start` | Start or resume chunked upload |
 | POST | `/files/upload/chunk` | Upload a chunk |
 

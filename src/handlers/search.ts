@@ -43,12 +43,17 @@ const searchInPath = async (
   pattern: string,
   showHidden: boolean,
   limit: number,
+  includeFiles: boolean,
+  includeDirectories: boolean,
 ): Promise<SearchResult> => {
   const glob = new Glob(pattern);
   const files: FileInfo[] = [];
   let hasMore = false;
 
-  for await (const match of glob.scan({ cwd: basePath, dot: showHidden })) {
+  // If we need directories, we must set onlyFiles: false
+  const onlyFiles = includeFiles && !includeDirectories;
+
+  for await (const match of glob.scan({ cwd: basePath, dot: showHidden, onlyFiles })) {
     if (!showHidden && basename(match).startsWith(".")) continue;
 
     if (files.length >= limit) {
@@ -57,7 +62,13 @@ const searchInPath = async (
     }
 
     const info = await getFileInfo(join(basePath, match), basePath);
-    if (info) files.push(info);
+    if (!info) continue;
+
+    // Filter based on type
+    if (info.type === "file" && !includeFiles) continue;
+    if (info.type === "directory" && !includeDirectories) continue;
+
+    files.push(info);
   }
 
   return { basePath, files, total: files.length, hasMore };
@@ -79,7 +90,12 @@ app.get(
   }),
   v("query", SearchQuerySchema),
   async (c) => {
-    const { paths: pathsParam, pattern, showHidden, limit: limitParam } = c.req.valid("query");
+    const { paths: pathsParam, pattern, showHidden, limit: limitParam, files, directories } = c.req.valid("query");
+
+    // At least one of files or directories must be true
+    if (!files && !directories) {
+      return c.json({ error: "at least one of 'files' or 'directories' must be true" }, 400);
+    }
 
     // Validate recursive wildcard count
     const wildcardCount = countRecursiveWildcards(pattern);
@@ -108,7 +124,9 @@ app.get(
       validPaths.push(result.realPath);
     }
 
-    const results = await Promise.all(validPaths.map((p) => searchInPath(p, pattern, showHidden, limit)));
+    const results = await Promise.all(
+      validPaths.map((p) => searchInPath(p, pattern, showHidden, limit, files, directories)),
+    );
 
     const totalFiles = results.reduce((sum, r) => sum + r.total, 0);
 

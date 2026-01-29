@@ -5,6 +5,7 @@ import { generateSpecs } from "hono-openapi";
 import { createMarkdownFromOpenApi } from "@scalar/openapi-to-markdown";
 import { bearerAuth } from "hono/bearer-auth";
 import { secureHeaders } from "hono/secure-headers";
+import { logger } from "hono/logger";
 import { config } from "./config";
 import { openApiMeta } from "./lib/openapi";
 import filesRoutes from "./handlers/files";
@@ -31,6 +32,9 @@ setTimeout(cleanupOrphanedChunks, 10_000); // Run 10s after startup
 
 // Main app
 const app = new Hono();
+
+// Request logging
+app.use("*", logger());
 
 // Security headers
 app.use(

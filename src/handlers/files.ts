@@ -13,6 +13,7 @@ import {
   ErrorSchema,
   InfoQuerySchema,
   PathQuerySchema,
+  ContentQuerySchema,
   MkdirBodySchema,
   MoveBodySchema,
   CopyBodySchema,
@@ -116,7 +117,8 @@ app.get(
   describeRoute({
     tags: ["Files"],
     summary: "Download file or directory",
-    description: "Downloads a file directly or a directory as a TAR archive. Size limit applies to both.",
+    description:
+      "Downloads a file directly or a directory as a TAR archive. Size limit applies to both. Use ?inline=true to display in browser instead of downloading.",
     ...requiresAuth,
     responses: {
       200: binaryResponse("application/octet-stream", "File content or TAR archive"),
@@ -126,9 +128,9 @@ app.get(
       413: jsonResponse(ErrorSchema, "Content too large"),
     },
   }),
-  v("query", PathQuerySchema),
+  v("query", ContentQuerySchema),
   async (c) => {
-    const { path } = c.req.valid("query");
+    const { path, inline } = c.req.valid("query");
 
     const result = await validatePath(path);
     if (!result.ok) return c.json({ error: result.error }, result.status);
@@ -194,11 +196,15 @@ app.get(
       );
     }
 
+    const filename = basename(result.realPath);
+    const disposition = inline ? "inline" : "attachment";
+
     return new Response(file.stream(), {
       headers: {
         "Content-Type": file.type,
         "Content-Length": String(file.size),
-        "X-File-Name": basename(result.realPath),
+        "Content-Disposition": `${disposition}; filename="${filename}"`,
+        "X-File-Name": filename,
       },
     });
   },

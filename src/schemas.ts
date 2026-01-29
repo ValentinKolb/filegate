@@ -33,6 +33,14 @@ export const PathQuerySchema = z.object({
   path: z.string().min(1),
 });
 
+export const ContentQuerySchema = z.object({
+  path: z.string().min(1),
+  inline: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"), // default: false (attachment)
+});
+
 export const InfoQuerySchema = z.object({
   path: z.string().min(1),
   showHidden: z
@@ -52,6 +60,14 @@ export const SearchQuerySchema = z.object({
     .string()
     .optional()
     .transform((v) => (v ? parseInt(v, 10) : undefined)),
+  files: z
+    .string()
+    .optional()
+    .transform((v) => v !== "false"), // default: true
+  directories: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"), // default: false
 });
 
 /** Count recursive wildcards (**) in a glob pattern */

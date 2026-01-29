@@ -38,6 +38,8 @@ export interface InfoOptions {
 // --- Download ---
 export interface DownloadOptions {
   path: string;
+  /** If true, sets Content-Disposition: inline (view in browser) instead of attachment (download) */
+  inline?: boolean;
 }
 
 // --- Upload Single ---
@@ -101,6 +103,10 @@ export interface GlobOptions {
   pattern: string;
   showHidden?: boolean;
   limit?: number;
+  /** Include files in results (default: true) */
+  files?: boolean;
+  /** Include directories in results (default: false) */
+  directories?: boolean;
 }
 
 // ============================================================================
@@ -236,6 +242,7 @@ export class Filegate {
 
   async download(opts: DownloadOptions): Promise<FileProxyResponse<Response>> {
     const params = new URLSearchParams({ path: opts.path });
+    if (opts.inline) params.set("inline", "true");
     const res = await this._fetch(`${this.url}/files/content?${params}`, { headers: this.hdrs() });
     if (!res.ok) {
       const body = (await res.json().catch(() => ({ error: "unknown error" }))) as ApiError;
@@ -312,6 +319,8 @@ export class Filegate {
     });
     if (opts.showHidden) params.set("showHidden", "true");
     if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.files === false) params.set("files", "false");
+    if (opts.directories) params.set("directories", "true");
 
     const res = await this._fetch(`${this.url}/files/search?${params}`, { headers: this.hdrs() });
     return this.handleResponse(res);
