@@ -89,14 +89,22 @@ export const MkdirBodySchema = z.object({
     .optional(),
 });
 
-export const MoveBodySchema = z.object({
-  from: z.string().min(1),
-  to: z.string().min(1),
-});
+export const TransferModeSchema = z.enum(["move", "copy"]);
 
-export const CopyBodySchema = z.object({
+export const TransferBodySchema = z.object({
   from: z.string().min(1),
   to: z.string().min(1),
+  mode: TransferModeSchema,
+  ownerUid: z.number().int().optional(),
+  ownerGid: z.number().int().optional(),
+  fileMode: z
+    .string()
+    .regex(/^[0-7]{3,4}$/)
+    .optional(),
+  dirMode: z
+    .string()
+    .regex(/^[0-7]{3,4}$/)
+    .optional(),
 });
 
 export const UploadStartBodySchema = z.object({
