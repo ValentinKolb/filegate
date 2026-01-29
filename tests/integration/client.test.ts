@@ -1038,6 +1038,220 @@ describe("integration tests", () => {
     });
   });
 
+  describe("ensureUniqueName (transfer)", () => {
+    let testDir: string;
+
+    beforeAll(async () => {
+      testDir = `${testDataDir}/test-unique-name-${randomString(8)}`;
+      await client.mkdir({ path: testDir });
+    });
+
+    afterAll(async () => {
+      await client.delete({ path: testDir });
+    });
+
+    test("should append -01 when copying to existing file (default)", async () => {
+      // Create original file
+      await client.upload.single({
+        path: testDir,
+        filename: "original.txt",
+        data: new TextEncoder().encode("original content"),
+      });
+
+      // Create source file to copy
+      await client.upload.single({
+        path: testDir,
+        filename: "source.txt",
+        data: new TextEncoder().encode("source content"),
+      });
+
+      // Copy to same name as original - should create original-01.txt
+      const result = await client.transfer({
+        from: `${testDir}/source.txt`,
+        to: `${testDir}/original.txt`,
+        mode: "copy",
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.name).toBe("original-01.txt");
+      }
+
+      // Verify original still exists with original content
+      const originalDownload = await client.download({ path: `${testDir}/original.txt` });
+      expect(originalDownload.ok).toBe(true);
+      if (originalDownload.ok) {
+        expect(await originalDownload.data.text()).toBe("original content");
+      }
+
+      // Verify copy exists with source content
+      const copyDownload = await client.download({ path: `${testDir}/original-01.txt` });
+      expect(copyDownload.ok).toBe(true);
+      if (copyDownload.ok) {
+        expect(await copyDownload.data.text()).toBe("source content");
+      }
+    });
+
+    test("should append -02 when -01 already exists", async () => {
+      // Create base file
+      await client.upload.single({
+        path: testDir,
+        filename: "multi.txt",
+        data: new TextEncoder().encode("base"),
+      });
+
+      // Create -01 file
+      await client.upload.single({
+        path: testDir,
+        filename: "multi-01.txt",
+        data: new TextEncoder().encode("first copy"),
+      });
+
+      // Copy should create -02
+      await client.upload.single({
+        path: testDir,
+        filename: "copy-src.txt",
+        data: new TextEncoder().encode("new copy"),
+      });
+
+      const result = await client.transfer({
+        from: `${testDir}/copy-src.txt`,
+        to: `${testDir}/multi.txt`,
+        mode: "copy",
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.name).toBe("multi-02.txt");
+      }
+    });
+
+    test("should preserve file extension when adding suffix", async () => {
+      await client.upload.single({
+        path: testDir,
+        filename: "document.pdf",
+        data: new TextEncoder().encode("pdf content"),
+      });
+
+      await client.upload.single({
+        path: testDir,
+        filename: "new-doc.pdf",
+        data: new TextEncoder().encode("new pdf"),
+      });
+
+      const result = await client.transfer({
+        from: `${testDir}/new-doc.pdf`,
+        to: `${testDir}/document.pdf`,
+        mode: "copy",
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.name).toBe("document-01.pdf");
+      }
+    });
+
+    test("should overwrite when ensureUniqueName is false", async () => {
+      await client.upload.single({
+        path: testDir,
+        filename: "overwrite-target.txt",
+        data: new TextEncoder().encode("old content"),
+      });
+
+      await client.upload.single({
+        path: testDir,
+        filename: "overwrite-source.txt",
+        data: new TextEncoder().encode("new content"),
+      });
+
+      const result = await client.transfer({
+        from: `${testDir}/overwrite-source.txt`,
+        to: `${testDir}/overwrite-target.txt`,
+        mode: "copy",
+        ensureUniqueName: false,
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.name).toBe("overwrite-target.txt");
+      }
+
+      // Verify content was overwritten
+      const download = await client.download({ path: `${testDir}/overwrite-target.txt` });
+      expect(download.ok).toBe(true);
+      if (download.ok) {
+        expect(await download.data.text()).toBe("new content");
+      }
+    });
+
+    test("should work with move operation", async () => {
+      await client.upload.single({
+        path: testDir,
+        filename: "move-target.txt",
+        data: new TextEncoder().encode("existing"),
+      });
+
+      await client.upload.single({
+        path: testDir,
+        filename: "move-source.txt",
+        data: new TextEncoder().encode("moving"),
+      });
+
+      const result = await client.transfer({
+        from: `${testDir}/move-source.txt`,
+        to: `${testDir}/move-target.txt`,
+        mode: "move",
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.name).toBe("move-target-01.txt");
+      }
+
+      // Verify source is gone
+      const sourceInfo = await client.info({ path: `${testDir}/move-source.txt` });
+      expect(sourceInfo.ok).toBe(false);
+    });
+
+    test("should work with directories", async () => {
+      await client.mkdir({ path: `${testDir}/dir-a` });
+      await client.upload.single({
+        path: `${testDir}/dir-a`,
+        filename: "file.txt",
+        data: new TextEncoder().encode("in dir-a"),
+      });
+
+      await client.mkdir({ path: `${testDir}/dir-b` });
+      await client.upload.single({
+        path: `${testDir}/dir-b`,
+        filename: "file.txt",
+        data: new TextEncoder().encode("in dir-b"),
+      });
+
+      const result = await client.transfer({
+        from: `${testDir}/dir-b`,
+        to: `${testDir}/dir-a`,
+        mode: "copy",
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.name).toBe("dir-a-01");
+      }
+
+      // Verify original dir-a still exists
+      const origInfo = await client.info({ path: `${testDir}/dir-a` });
+      expect(origInfo.ok).toBe(true);
+
+      // Verify dir-a-01 exists with content from dir-b
+      const copyDownload = await client.download({ path: `${testDir}/dir-a-01/file.txt` });
+      expect(copyDownload.ok).toBe(true);
+      if (copyDownload.ok) {
+        expect(await copyDownload.data.text()).toBe("in dir-b");
+      }
+    });
+  });
+
   describe("directory size calculation", () => {
     let testDir: string;
 
