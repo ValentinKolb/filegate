@@ -1,4 +1,5 @@
-import { chown, chmod } from "node:fs/promises";
+import { chown, chmod, readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { dirname } from "node:path";
 import { config } from "../config";
 
@@ -100,4 +101,33 @@ export const applyOwnershipToNewDirs = async (
     await applyOwnership(current, dirOwnership);
     current = dirname(current);
   }
+};
+
+// Apply ownership recursively to a file or directory (and all its contents)
+export const applyOwnershipRecursive = async (path: string, ownership: Ownership | null): Promise<string | null> => {
+  if (!ownership) return null;
+
+  const s = await stat(path);
+
+  if (s.isDirectory()) {
+    // Apply directory mode to the directory itself
+    const dirMode = getEffectiveDirMode(ownership);
+    const dirOwnership: Ownership = { ...ownership, mode: dirMode };
+    const err = await applyOwnership(path, dirOwnership);
+    if (err) return err;
+
+    // Recursively apply to contents
+    const entries = await readdir(path, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(path, entry.name);
+      const err = await applyOwnershipRecursive(fullPath, ownership);
+      if (err) return err;
+    }
+  } else {
+    // Apply file mode to files
+    const err = await applyOwnership(path, ownership);
+    if (err) return err;
+  }
+
+  return null;
 };
