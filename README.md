@@ -172,6 +172,14 @@ await client.transfer({
   gid: 1000,
   fileMode: "644",
 });
+
+// Allow overwriting existing files (default: false)
+await client.transfer({
+  from: "/data/new-file.txt",
+  to: "/data/existing-file.txt",
+  mode: "copy",
+  ensureUniqueName: false,  // Overwrite if target exists
+});
 ```
 
 **Rules:**
@@ -179,6 +187,8 @@ await client.transfer({
 - `mode: "copy"` without ownership - Only within the same base path
 - `mode: "copy"` with ownership - Allows cross-base copying (ownership is applied recursively)
 - Both operations work recursively on directories
+- `ensureUniqueName: true` (default) - Appends `-01`, `-02`, etc. if target exists
+- `ensureUniqueName: false` - Overwrites existing target file
 
 ### Chunked Uploads
 
@@ -346,6 +356,7 @@ await client.transfer({
   gid: 1000,
   fileMode: "644",
   dirMode: "755",
+  ensureUniqueName: true,  // default: append -01, -02 if target exists
 });
 
 // Search files with glob patterns
