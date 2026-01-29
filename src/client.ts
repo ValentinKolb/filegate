@@ -33,6 +33,8 @@ export interface ClientOptions {
 export interface InfoOptions {
   path: string;
   showHidden?: boolean;
+  /** If true, compute recursive sizes for directories (slower, default: false) */
+  computeSizes?: boolean;
 }
 
 // --- Download ---
@@ -243,6 +245,7 @@ export class Filegate {
       path: opts.path,
       showHidden: String(opts.showHidden ?? false),
     });
+    if (opts.computeSizes) params.set("computeSizes", "true");
     const res = await this._fetch(`${this.url}/files/info?${params}`, { headers: this.hdrs() });
     return this.handleResponse(res);
   }

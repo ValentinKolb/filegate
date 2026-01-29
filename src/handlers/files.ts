@@ -108,7 +108,7 @@ app.get(
   }),
   v("query", InfoQuerySchema),
   async (c) => {
-    const { path, showHidden } = c.req.valid("query");
+    const { path, showHidden, computeSizes } = c.req.valid("query");
 
     const result = await validatePath(path, { allowBasePath: true });
     if (!result.ok) return c.json({ error: result.error }, result.status);
@@ -126,17 +126,17 @@ app.get(
 
     const entries = await readdir(result.realPath, { withFileTypes: true });
 
-    // Parallel file info retrieval
+    // Parallel file info retrieval (computeSizes only when requested)
     const items = (
       await Promise.all(
         entries
           .filter((e) => showHidden || !e.name.startsWith("."))
-          .map((e) => getFileInfo(join(result.realPath, e.name), result.realPath, true).catch(() => null)),
+          .map((e) => getFileInfo(join(result.realPath, e.name), result.realPath, computeSizes).catch(() => null)),
       )
     ).filter((item): item is FileInfo => item !== null);
 
     const info = await getFileInfo(result.realPath);
-    const totalSize = items.reduce((sum, item) => sum + item.size, 0);
+    const totalSize = computeSizes ? items.reduce((sum, item) => sum + item.size, 0) : 0;
     return c.json({ ...info, size: totalSize, items, total: items.length });
   },
 );

@@ -1292,8 +1292,19 @@ describe("integration tests", () => {
       await client.delete({ path: testDir });
     });
 
-    test("should return non-zero size for directories in listing", async () => {
+    test("should return zero size for directories by default (computeSizes=false)", async () => {
       const result = await client.info({ path: testDir });
+      expect(result.ok).toBe(true);
+      if (result.ok && "items" in result.data) {
+        const subdir = result.data.items.find((item) => item.name === "subdir");
+        expect(subdir).toBeDefined();
+        expect(subdir?.type).toBe("directory");
+        expect(subdir?.size).toBe(0);
+      }
+    });
+
+    test("should return non-zero size for directories with computeSizes=true", async () => {
+      const result = await client.info({ path: testDir, computeSizes: true });
       expect(result.ok).toBe(true);
       if (result.ok && "items" in result.data) {
         const subdir = result.data.items.find((item) => item.name === "subdir");
@@ -1309,10 +1320,13 @@ describe("integration tests", () => {
         // subdir2 contains 500 bytes
         expect(subdir2?.size).toBeGreaterThan(0);
         expect(subdir2?.size).toBeGreaterThanOrEqual(500);
+
+        // Root size should be sum of all items
+        expect(result.data.size).toBeGreaterThan(0);
       }
     });
 
-    test("should return correct size for files", async () => {
+    test("should return correct size for files (always computed)", async () => {
       const result = await client.info({ path: testDir });
       expect(result.ok).toBe(true);
       if (result.ok && "items" in result.data) {

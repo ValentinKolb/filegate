@@ -311,6 +311,9 @@ const client = new Filegate({
 // Get file or directory info
 await client.info({ path: "/data/file.txt", showHidden: false });
 
+// Get directory info with recursive sizes (slower)
+await client.info({ path: "/data/uploads", computeSizes: true });
+
 // Download file (returns streaming Response)
 await client.download({ path: "/data/file.txt" });
 
@@ -450,7 +453,7 @@ All `/files/*` endpoints require `Authorization: Bearer <token>`.
 | GET | `/docs` | OpenAPI documentation (Scalar UI) |
 | GET | `/openapi.json` | OpenAPI specification |
 | GET | `/llms.txt` | LLM-friendly markdown documentation |
-| GET | `/files/info` | Get file or directory info |
+| GET | `/files/info` | Get file or directory info. Use `?computeSizes=true` for recursive dir sizes |
 | GET | `/files/content` | Download file or directory (TAR). Use `?inline=true` to view in browser |
 | PUT | `/files/content` | Upload file |
 | POST | `/files/mkdir` | Create directory |

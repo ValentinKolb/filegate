@@ -58,6 +58,11 @@ export const InfoQuerySchema = z
       .optional()
       .transform((v) => v === "true")
       .describe("If 'true', include hidden files (starting with dot) in directory listings"),
+    computeSizes: z
+      .string()
+      .optional()
+      .transform((v) => v === "true")
+      .describe("If 'true', compute recursive sizes for directories (slower, default: false)"),
   })
   .describe("Query parameters for file/directory info");
 
