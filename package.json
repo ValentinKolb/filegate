@@ -40,6 +40,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@henrygd/semaphore": "^0.1.0",
     "@hono/standard-validator": "^0.2.2",
     "@scalar/hono-api-reference": "^0.9.37",
     "@scalar/openapi-to-markdown": "^0.3.31",

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { mkdir, readdir, rm, stat, rename, readFile, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
+import { getSemaphore } from "@henrygd/semaphore";
 import { validatePath } from "../lib/path";
 import { applyOwnership, type Ownership } from "../lib/ownership";
 import { jsonResponse, requiresAuth } from "../lib/openapi";
@@ -80,56 +81,64 @@ const cleanupUpload = async (id: string): Promise<void> => {
 };
 
 const assembleFile = async (meta: UploadMeta): Promise<string | null> => {
-  const chunks = await getUploadedChunks(meta.uploadId);
-  if (chunks.length !== meta.totalChunks) return "missing chunks";
-
-  // Verify all expected chunk indices are present (0 to totalChunks-1)
-  const expectedChunks = Array.from({ length: meta.totalChunks }, (_, i) => i);
-  const missingChunks = expectedChunks.filter((i) => !chunks.includes(i));
-  if (missingChunks.length > 0) {
-    return `missing chunk indices: ${missingChunks.join(", ")}`;
-  }
-
-  const fullPath = join(meta.path, meta.filename);
-  const pathResult = await validatePath(fullPath);
-  if (!pathResult.ok) return pathResult.error;
-
-  await mkdir(dirname(pathResult.realPath), { recursive: true });
-
-  const hasher = new Bun.CryptoHasher("sha256");
-  const file = Bun.file(pathResult.realPath);
-  const writer = file.writer();
+  // Use semaphore to prevent concurrent assembly of the same upload
+  const semaphore = getSemaphore(`assemble:${meta.uploadId}`, 1);
+  await semaphore.acquire();
 
   try {
-    for (let i = 0; i < meta.totalChunks; i++) {
-      // Stream each chunk instead of loading entirely into memory
-      const chunkFile = Bun.file(chunkPath(meta.uploadId, i));
-      for await (const data of chunkFile.stream()) {
-        hasher.update(data);
-        writer.write(data);
-      }
+    const chunks = await getUploadedChunks(meta.uploadId);
+    if (chunks.length !== meta.totalChunks) return "missing chunks";
+
+    // Verify all expected chunk indices are present (0 to totalChunks-1)
+    const expectedChunks = Array.from({ length: meta.totalChunks }, (_, i) => i);
+    const missingChunks = expectedChunks.filter((i) => !chunks.includes(i));
+    if (missingChunks.length > 0) {
+      return `missing chunk indices: ${missingChunks.join(", ")}`;
     }
-    await writer.end();
-  } catch (e) {
-    writer.end();
-    await rm(pathResult.realPath).catch(() => {});
-    throw e;
-  }
 
-  const finalChecksum = `sha256:${hasher.digest("hex")}`;
-  if (finalChecksum !== meta.checksum) {
-    await rm(pathResult.realPath).catch(() => {});
-    return `checksum mismatch: expected ${meta.checksum}, got ${finalChecksum}`;
-  }
+    const fullPath = join(meta.path, meta.filename);
+    const pathResult = await validatePath(fullPath);
+    if (!pathResult.ok) return pathResult.error;
 
-  const ownershipError = await applyOwnership(pathResult.realPath, meta.ownership);
-  if (ownershipError) {
-    await rm(pathResult.realPath).catch(() => {});
-    return ownershipError;
-  }
+    await mkdir(dirname(pathResult.realPath), { recursive: true });
 
-  await cleanupUpload(meta.uploadId);
-  return null;
+    const hasher = new Bun.CryptoHasher("sha256");
+    const file = Bun.file(pathResult.realPath);
+    const writer = file.writer();
+
+    try {
+      for (let i = 0; i < meta.totalChunks; i++) {
+        // Stream each chunk instead of loading entirely into memory
+        const chunkFile = Bun.file(chunkPath(meta.uploadId, i));
+        for await (const data of chunkFile.stream()) {
+          hasher.update(data);
+          writer.write(data);
+        }
+      }
+      await writer.end();
+    } catch (e) {
+      writer.end();
+      await rm(pathResult.realPath).catch(() => {});
+      throw e;
+    }
+
+    const finalChecksum = `sha256:${hasher.digest("hex")}`;
+    if (finalChecksum !== meta.checksum) {
+      await rm(pathResult.realPath).catch(() => {});
+      return `checksum mismatch: expected ${meta.checksum}, got ${finalChecksum}`;
+    }
+
+    const ownershipError = await applyOwnership(pathResult.realPath, meta.ownership);
+    if (ownershipError) {
+      await rm(pathResult.realPath).catch(() => {});
+      return ownershipError;
+    }
+
+    await cleanupUpload(meta.uploadId);
+    return null;
+  } finally {
+    semaphore.release();
+  }
 };
 
 // POST /upload/start
