@@ -86,7 +86,12 @@ const assembleFile = async (meta: UploadMeta): Promise<string | null> => {
   await semaphore.acquire();
 
   try {
+    // Check if assembly was already completed by another request while we waited
     const chunks = await getUploadedChunks(meta.uploadId);
+    if (chunks.length === 0) {
+      // Chunks were cleaned up - assembly was already completed
+      return null;
+    }
     if (chunks.length !== meta.totalChunks) return "missing chunks";
 
     // Verify all expected chunk indices are present (0 to totalChunks-1)
@@ -110,6 +115,14 @@ const assembleFile = async (meta: UploadMeta): Promise<string | null> => {
       for (let i = 0; i < meta.totalChunks; i++) {
         // Stream each chunk instead of loading entirely into memory
         const chunkFile = Bun.file(chunkPath(meta.uploadId, i));
+
+        // Verify chunk exists before streaming
+        if (!(await chunkFile.exists())) {
+          writer.end();
+          await rm(pathResult.realPath).catch(() => {});
+          return `chunk ${i} not found during assembly`;
+        }
+
         for await (const data of chunkFile.stream()) {
           hasher.update(data);
           writer.write(data);
