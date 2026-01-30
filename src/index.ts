@@ -11,6 +11,7 @@ import { openApiMeta } from "./lib/openapi";
 import filesRoutes from "./handlers/files";
 import searchRoutes from "./handlers/search";
 import uploadRoutes, { cleanupOrphanedChunks } from "./handlers/upload";
+import thumbnailRoutes from "./handlers/thumbnail";
 
 // Dev mode warning
 if (config.isDev) {
@@ -56,7 +57,8 @@ const api = new Hono()
   .use("/*", bearerAuth({ token: config.token }))
   .route("/", filesRoutes)
   .route("/", searchRoutes)
-  .route("/upload", uploadRoutes);
+  .route("/upload", uploadRoutes)
+  .route("/thumbnail", thumbnailRoutes);
 
 app.route("/files", api);
 

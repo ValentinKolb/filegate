@@ -190,6 +190,61 @@ await client.transfer({
 - `ensureUniqueName: true` (default) - Appends `-01`, `-02`, etc. if target exists
 - `ensureUniqueName: false` - Overwrites existing target file
 
+### Thumbnails
+
+Filegate can generate image thumbnails on-the-fly using Sharp. No caching - thumbnails are generated per request (typically 5-20ms).
+
+```typescript
+// Get a 200x200 cover thumbnail (default)
+const result = await client.thumbnail.image({
+  path: "/data/photos/vacation.jpg",
+});
+
+if (result.ok) {
+  const blob = await result.data.blob();
+  // Use as image source
+}
+
+// Customized thumbnail
+const result = await client.thumbnail.image({
+  path: "/data/photos/vacation.jpg",
+  width: 400,
+  height: 300,
+  fit: "contain",      // Fit within bounds, preserve aspect ratio
+  format: "webp",      // Output format
+  quality: 90,         // Higher quality
+});
+
+// Smart cropping with attention detection
+const result = await client.thumbnail.image({
+  path: "/data/photos/portrait.jpg",
+  width: 150,
+  height: 150,
+  fit: "cover",
+  position: "attention",  // Focus on interesting areas
+});
+```
+
+**Options:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `width` | 200 | Width in pixels (max 2000) |
+| `height` | 200 | Height in pixels (max 2000) |
+| `fit` | `cover` | `cover`, `contain`, `fill`, `inside`, `outside` |
+| `position` | `center` | Crop position: `center`, `top`, `bottom`, `left`, `right`, `entropy`, `attention` |
+| `format` | `webp` | Output: `webp`, `jpeg`, `png`, `avif` |
+| `quality` | 80 | Quality 1-100 |
+
+**Fit modes:**
+- `cover` - Fill the box, crop excess (best for uniform grids)
+- `contain` - Fit within box, preserve aspect ratio (may have letterboxing)
+- `fill` - Stretch to exact size (distorts)
+- `inside` - Like contain, but never upscale
+- `outside` - Like cover, but never downscale
+
+**Supported input formats:** JPEG, PNG, WebP, AVIF, TIFF, GIF, SVG
+
 ### Chunked Uploads
 
 For large files, use chunked uploads. They support:
@@ -383,6 +438,17 @@ await client.glob({
   pattern: "**/*",
   directories: true,
 });
+
+// Generate image thumbnail
+await client.thumbnail.image({
+  path: "/data/photo.jpg",
+  width: 200,
+  height: 200,
+  fit: "cover",
+  position: "center",
+  format: "webp",
+  quality: 80,
+});
 ```
 
 ### Response Format
@@ -462,6 +528,7 @@ All `/files/*` endpoints require `Authorization: Bearer <token>`.
 | GET | `/files/search` | Search with glob pattern. Use `?directories=true` to include folders |
 | POST | `/files/upload/start` | Start or resume chunked upload |
 | POST | `/files/upload/chunk` | Upload a chunk |
+| GET | `/files/thumbnail/image` | Generate image thumbnail on-the-fly |
 
 ## Security
 

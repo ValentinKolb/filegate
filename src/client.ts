@@ -120,6 +120,60 @@ export interface GlobOptions {
   directories?: boolean;
 }
 
+// --- Thumbnail ---
+export type ThumbnailFit = "cover" | "contain" | "fill" | "inside" | "outside";
+export type ThumbnailPosition = "center" | "top" | "bottom" | "left" | "right" | "entropy" | "attention";
+export type ThumbnailFormat = "webp" | "jpeg" | "png" | "avif";
+
+export interface ImageThumbnailOptions {
+  path: string;
+  /** Width in pixels (default: 200, max: 2000) */
+  width?: number;
+  /** Height in pixels (default: 200, max: 2000) */
+  height?: number;
+  /** Scaling mode (default: cover) */
+  fit?: ThumbnailFit;
+  /** Crop position for cover fit (default: center) */
+  position?: ThumbnailPosition;
+  /** Output format (default: webp) */
+  format?: ThumbnailFormat;
+  /** Quality 1-100 (default: 80) */
+  quality?: number;
+}
+
+// ============================================================================
+// Thumbnail Namespace Class
+// ============================================================================
+
+class ThumbnailClient {
+  constructor(
+    private readonly url: string,
+    private readonly hdrs: () => Headers,
+    private readonly _fetch: typeof fetch,
+  ) {}
+
+  async image(opts: ImageThumbnailOptions): Promise<FileProxyResponse<Response>> {
+    const params = new URLSearchParams({ path: opts.path });
+    if (opts.width !== undefined) params.set("width", String(opts.width));
+    if (opts.height !== undefined) params.set("height", String(opts.height));
+    if (opts.fit) params.set("fit", opts.fit);
+    if (opts.position) params.set("position", opts.position);
+    if (opts.format) params.set("format", opts.format);
+    if (opts.quality !== undefined) params.set("quality", String(opts.quality));
+
+    const res = await this._fetch(`${this.url}/files/thumbnail/image?${params}`, {
+      headers: this.hdrs(),
+    });
+
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({ error: "unknown error" }))) as ApiError;
+      return { ok: false, error: body.error || "unknown error", status: res.status };
+    }
+
+    return { ok: true, data: res };
+  }
+}
+
 // ============================================================================
 // Upload Namespace Class
 // ============================================================================
@@ -204,6 +258,7 @@ export class Filegate {
   private readonly _fetch: typeof fetch;
 
   readonly upload: UploadClient;
+  readonly thumbnail: ThumbnailClient;
 
   constructor(opts: ClientOptions) {
     this.url = opts.url.replace(/\/$/, "");
@@ -217,6 +272,8 @@ export class Filegate {
       this._fetch,
       (res) => this.handleResponse(res),
     );
+
+    this.thumbnail = new ThumbnailClient(this.url, () => this.hdrs(), this._fetch);
   }
 
   private hdrs(): Headers {

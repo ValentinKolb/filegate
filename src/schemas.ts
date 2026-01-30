@@ -261,6 +261,63 @@ export const UploadChunkHeadersSchema = z
   .describe("Headers for uploading a chunk");
 
 // ============================================================================
+// Thumbnail Schemas
+// ============================================================================
+
+export const ThumbnailFitSchema = z
+  .enum(["cover", "contain", "fill", "inside", "outside"])
+  .describe(
+    "Scaling mode: cover (crop to fill), contain (fit within), fill (stretch), inside (fit, never upscale), outside (cover, never downscale)",
+  );
+
+export const ThumbnailPositionSchema = z
+  .enum(["center", "top", "bottom", "left", "right", "entropy", "attention"])
+  .describe("Crop position for 'cover' fit: cardinal directions, or 'entropy'/'attention' for smart cropping");
+
+export const ThumbnailFormatSchema = z.enum(["webp", "jpeg", "png", "avif"]).describe("Output image format");
+
+export const ImageThumbnailQuerySchema = z
+  .object({
+    path: z.string().min(1).describe("Absolute path to the image file"),
+    width: z
+      .string()
+      .optional()
+      .transform((v) => (v ? parseInt(v, 10) : 200))
+      .refine((v) => v >= 1 && v <= 2000, "width must be between 1 and 2000")
+      .describe("Thumbnail width in pixels (default: 200, max: 2000)"),
+    height: z
+      .string()
+      .optional()
+      .transform((v) => (v ? parseInt(v, 10) : 200))
+      .refine((v) => v >= 1 && v <= 2000, "height must be between 1 and 2000")
+      .describe("Thumbnail height in pixels (default: 200, max: 2000)"),
+    fit: z
+      .string()
+      .optional()
+      .transform((v) => (v as z.infer<typeof ThumbnailFitSchema>) || "cover")
+      .describe("Scaling mode (default: cover)"),
+    position: z
+      .string()
+      .optional()
+      .transform((v) => (v as z.infer<typeof ThumbnailPositionSchema>) || "center")
+      .describe("Crop position for cover fit (default: center)"),
+    format: z
+      .string()
+      .optional()
+      .transform((v) => (v as z.infer<typeof ThumbnailFormatSchema>) || "webp")
+      .describe("Output format (default: webp)"),
+    quality: z
+      .string()
+      .optional()
+      .transform((v) => (v ? parseInt(v, 10) : 80))
+      .refine((v) => v >= 1 && v <= 100, "quality must be between 1 and 100")
+      .describe("Output quality 1-100 (default: 80)"),
+  })
+  .describe("Query parameters for image thumbnail generation");
+
+export type ImageThumbnailQuery = z.infer<typeof ImageThumbnailQuerySchema>;
+
+// ============================================================================
 // Types
 // ============================================================================
 
