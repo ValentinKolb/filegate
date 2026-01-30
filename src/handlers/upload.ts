@@ -113,20 +113,20 @@ const assembleFile = async (meta: UploadMeta): Promise<string | null> => {
 
     try {
       for (let i = 0; i < meta.totalChunks; i++) {
-        // Stream each chunk instead of loading entirely into memory
-        const chunkFile = Bun.file(chunkPath(meta.uploadId, i));
+        const chunkFilePath = chunkPath(meta.uploadId, i);
+        const chunkFile = Bun.file(chunkFilePath);
 
-        // Verify chunk exists before streaming
+        // Verify chunk exists before reading
         if (!(await chunkFile.exists())) {
           writer.end();
           await rm(pathResult.realPath).catch(() => {});
           return `chunk ${i} not found during assembly`;
         }
 
-        for await (const data of chunkFile.stream()) {
-          hasher.update(data);
-          writer.write(data);
-        }
+        // Read chunk as buffer (more reliable than streaming)
+        const data = new Uint8Array(await chunkFile.arrayBuffer());
+        hasher.update(data);
+        writer.write(data);
       }
       await writer.end();
     } catch (e) {
