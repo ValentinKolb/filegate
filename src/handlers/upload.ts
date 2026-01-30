@@ -272,32 +272,33 @@ app.post(
       return c.json({ error: `chunk index ${chunkIndex} exceeds total ${meta.totalChunks}` }, 400);
     }
 
-    const body = c.req.raw.body;
-    if (!body) return c.json({ error: "missing body" }, 400);
+    // Read body as ArrayBuffer (more reliable than streaming)
+    let bodyBuffer: ArrayBuffer;
+    try {
+      bodyBuffer = await c.req.arrayBuffer();
+    } catch {
+      return c.json({ error: "failed to read request body" }, 400);
+    }
 
-    // Stream chunks to a temporary file to avoid memory accumulation
-    const tempChunkPath = chunkPath(uploadId, chunkIndex) + ".tmp";
-    let chunkSize = 0;
+    if (bodyBuffer.byteLength === 0) {
+      return c.json({ error: "missing body" }, 400);
+    }
+
+    if (bodyBuffer.byteLength > config.maxChunkBytes) {
+      return c.json({ error: `chunk size exceeds maximum (${config.maxChunkBytes / 1024 / 1024}MB)` }, 413);
+    }
+
+    const bodyData = new Uint8Array(bodyBuffer);
     const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bodyData);
 
+    // Write chunk to temporary file
+    const tempChunkPath = chunkPath(uploadId, chunkIndex) + ".tmp";
     await mkdir(chunksDir(uploadId), { recursive: true });
-    const tempFile = Bun.file(tempChunkPath);
-    const writer = tempFile.writer();
 
     try {
-      for await (const chunk of body) {
-        chunkSize += chunk.length;
-        if (chunkSize > config.maxChunkBytes) {
-          writer.end();
-          await rm(tempChunkPath).catch(() => {});
-          return c.json({ error: `chunk size exceeds maximum (${config.maxChunkBytes / 1024 / 1024}MB)` }, 413);
-        }
-        hasher.update(chunk);
-        writer.write(chunk);
-      }
-      await writer.end();
+      await Bun.write(tempChunkPath, bodyData);
     } catch (e) {
-      writer.end();
       await rm(tempChunkPath).catch(() => {});
       throw e;
     }
