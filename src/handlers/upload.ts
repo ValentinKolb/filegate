@@ -83,6 +83,13 @@ const assembleFile = async (meta: UploadMeta): Promise<string | null> => {
   const chunks = await getUploadedChunks(meta.uploadId);
   if (chunks.length !== meta.totalChunks) return "missing chunks";
 
+  // Verify all expected chunk indices are present (0 to totalChunks-1)
+  const expectedChunks = Array.from({ length: meta.totalChunks }, (_, i) => i);
+  const missingChunks = expectedChunks.filter((i) => !chunks.includes(i));
+  if (missingChunks.length > 0) {
+    return `missing chunk indices: ${missingChunks.join(", ")}`;
+  }
+
   const fullPath = join(meta.path, meta.filename);
   const pathResult = await validatePath(fullPath);
   if (!pathResult.ok) return pathResult.error;
