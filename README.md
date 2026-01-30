@@ -245,20 +245,13 @@ const result = await client.thumbnail.image({
 
 **Supported input formats:** JPEG, PNG, WebP, AVIF, TIFF, GIF, SVG
 
-**Caching:** Thumbnails include `ETag`, `Last-Modified`, and `Cache-Control: immutable` headers. Forward them to enable browser caching:
+**Caching:** Thumbnails include `ETag`, `Last-Modified`, and `Cache-Control: immutable` headers. Simply pass through the response:
 
 ```typescript
 const result = await client.thumbnail.image({ path: "/data/photo.jpg" });
 if (!result.ok) return c.json({ error: result.error }, result.status);
 
-return new Response(result.data.body, {
-  headers: {
-    "Content-Type": result.data.headers.get("Content-Type")!,
-    "Cache-Control": result.data.headers.get("Cache-Control")!,
-    "Last-Modified": result.data.headers.get("Last-Modified")!,
-    "ETag": result.data.headers.get("ETag")!,
-  },
-});
+return result.data; // Response with all headers
 ```
 
 ### Chunked Uploads
