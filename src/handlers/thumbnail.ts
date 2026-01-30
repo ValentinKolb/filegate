@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
+import { stat } from "node:fs/promises";
 import sharp from "sharp";
 import { validatePath } from "../lib/path";
 import { jsonResponse, requiresAuth } from "../lib/openapi";
@@ -7,6 +8,13 @@ import { v } from "../lib/validator";
 import { ImageThumbnailQuerySchema, ErrorSchema } from "../schemas";
 
 const app = new Hono();
+
+// Generate ETag from path, mtime, and thumbnail parameters
+const generateETag = (path: string, mtime: Date, params: string): string => {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(`${path}:${mtime.getTime()}:${params}`);
+  return `"${hasher.digest("hex").slice(0, 16)}"`;
+};
 
 // Supported image MIME types
 const SUPPORTED_IMAGE_TYPES = new Set([
@@ -74,6 +82,27 @@ app.get(
       );
     }
 
+    // Get file stats for Last-Modified and ETag
+    const fileStat = await stat(result.realPath);
+    const lastModified = fileStat.mtime;
+    const paramsKey = `${width}x${height}:${fit}:${position}:${format}:${quality}`;
+    const etag = generateETag(result.realPath, lastModified, paramsKey);
+
+    // Check If-None-Match (ETag)
+    const ifNoneMatch = c.req.header("If-None-Match");
+    if (ifNoneMatch === etag) {
+      return new Response(null, { status: 304 });
+    }
+
+    // Check If-Modified-Since
+    const ifModifiedSince = c.req.header("If-Modified-Since");
+    if (ifModifiedSince) {
+      const clientDate = new Date(ifModifiedSince);
+      if (lastModified <= clientDate) {
+        return new Response(null, { status: 304 });
+      }
+    }
+
     try {
       // Read file and process with Sharp
       const buffer = await file.arrayBuffer();
@@ -105,6 +134,8 @@ app.get(
         headers: {
           "Content-Type": FORMAT_MIME[format],
           "Cache-Control": "public, max-age=31536000, immutable",
+          "Last-Modified": lastModified.toUTCString(),
+          ETag: etag,
         },
       });
     } catch (err) {
