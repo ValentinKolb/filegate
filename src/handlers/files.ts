@@ -196,7 +196,9 @@ app.get(
           if (entry.isDirectory()) {
             await addDirectoryToArchive(fullPath, basePath);
           } else if (entry.isFile()) {
-            files[archivePath] = Bun.file(fullPath);
+            // Read file content as Blob - Bun.file() is lazy and doesn't work reliably with Archive
+            const fileContent = await Bun.file(fullPath).arrayBuffer();
+            files[archivePath] = new Blob([fileContent]);
           }
         }
       };
