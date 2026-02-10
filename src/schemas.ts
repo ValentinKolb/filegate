@@ -21,6 +21,7 @@ export const FileInfoSchema = z
     mtime: z.iso.datetime().describe("Last modification time in ISO 8601 format"),
     isHidden: z.boolean().describe("True if the name starts with a dot"),
     mimeType: z.string().optional().describe("MIME type of the file (only for files)"),
+    fileId: z.string().optional().describe("Stable file identifier (UUID v7)"),
   })
   .describe("Information about a file or directory");
 
@@ -35,24 +36,33 @@ export const DirInfoSchema = FileInfoSchema.extend({
 
 export const PathQuerySchema = z
   .object({
-    path: z.string().min(1).describe("Absolute path to the file or directory"),
+    path: z.string().min(1).optional().describe("Absolute path to the file or directory"),
+    id: z.string().min(1).optional().describe("Stable file identifier (UUID v7)"),
+  })
+  .refine((v) => (v.path ? !v.id : !!v.id), {
+    message: "exactly one of 'path' or 'id' must be provided",
   })
   .describe("Query parameters for path-based operations");
 
 export const ContentQuerySchema = z
   .object({
-    path: z.string().min(1).describe("Absolute path to the file or directory to download"),
+    path: z.string().min(1).optional().describe("Absolute path to the file or directory to download"),
+    id: z.string().min(1).optional().describe("Stable file identifier (UUID v7)"),
     inline: z
       .string()
       .optional()
       .transform((v) => v === "true")
       .describe("If 'true', display in browser instead of downloading (Content-Disposition: inline)"),
   })
+  .refine((v) => (v.path ? !v.id : !!v.id), {
+    message: "exactly one of 'path' or 'id' must be provided",
+  })
   .describe("Query parameters for content download");
 
 export const InfoQuerySchema = z
   .object({
-    path: z.string().min(1).describe("Absolute path to the file or directory"),
+    path: z.string().min(1).optional().describe("Absolute path to the file or directory"),
+    id: z.string().min(1).optional().describe("Stable file identifier (UUID v7)"),
     showHidden: z
       .string()
       .optional()
@@ -63,6 +73,9 @@ export const InfoQuerySchema = z
       .optional()
       .transform((v) => v === "true")
       .describe("If 'true', compute recursive sizes for directories (slower, default: false)"),
+  })
+  .refine((v) => (v.path ? !v.id : !!v.id), {
+    message: "exactly one of 'path' or 'id' must be provided",
   })
   .describe("Query parameters for file/directory info");
 
@@ -188,6 +201,36 @@ export const SearchResponseSchema = z
   })
   .describe("Complete search response with results from all searched paths");
 
+export const RescanResponseSchema = z
+  .object({
+    scanned: z.number().describe("Directories scanned"),
+    skipped: z.number().describe("Directories skipped (mtime unchanged)"),
+    added: z.number().describe("New files indexed"),
+    moved: z.number().describe("Moves detected"),
+    removed: z.number().describe("Stale index entries removed"),
+    durationMs: z.number().describe("Total scan duration in milliseconds"),
+  })
+  .describe("Index rescan result");
+
+export const IndexStatsSchema = z
+  .object({
+    totalFiles: z.number().describe("Number of indexed files"),
+    totalDirs: z.number().describe("Number of indexed directories"),
+    dbSizeBytes: z.number().describe("Database size in bytes (0 if unavailable)"),
+    lastScanAt: z.number().nullable().describe("Last scan timestamp (ms since epoch)"),
+  })
+  .describe("Index statistics");
+
+export const BulkResolveBodySchema = z
+  .object({
+    ids: z.array(z.string().min(1)).describe("List of file IDs to resolve"),
+  })
+  .describe("Bulk resolve request");
+
+export const BulkResolveResponseSchema = z
+  .record(z.string(), z.string().nullable())
+  .describe("Map of file ID to absolute path or null if missing");
+
 export const UploadStartResponseSchema = z
   .object({
     uploadId: z
@@ -278,7 +321,8 @@ export const ThumbnailFormatSchema = z.enum(["webp", "jpeg", "png", "avif"]).des
 
 export const ImageThumbnailQuerySchema = z
   .object({
-    path: z.string().min(1).describe("Absolute path to the image file"),
+    path: z.string().min(1).optional().describe("Absolute path to the image file"),
+    id: z.string().min(1).optional().describe("Stable file identifier (UUID v7)"),
     width: z
       .string()
       .optional()
@@ -312,6 +356,9 @@ export const ImageThumbnailQuerySchema = z
       .transform((v) => (v ? parseInt(v, 10) : 80))
       .refine((v) => v >= 1 && v <= 100, "quality must be between 1 and 100")
       .describe("Output quality 1-100 (default: 80)"),
+  })
+  .refine((v) => (v.path ? !v.id : !!v.id), {
+    message: "exactly one of 'path' or 'id' must be provided",
   })
   .describe("Query parameters for image thumbnail generation");
 

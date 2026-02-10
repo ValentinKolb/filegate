@@ -15,6 +15,7 @@ import {
   type SearchResult,
 } from "../schemas";
 import { config } from "../config";
+import { enrichFileInfoBatch } from "../lib/index";
 
 const app = new Hono();
 
@@ -127,6 +128,12 @@ app.get(
     const results = await Promise.all(
       validPaths.map((p) => searchInPath(p, pattern, showHidden, limit, files, directories)),
     );
+
+    if (config.indexEnabled) {
+      for (const result of results) {
+        result.files = await enrichFileInfoBatch(result.files, result.basePath);
+      }
+    }
 
     const totalFiles = results.reduce((sum, r) => sum + r.total, 0);
 

@@ -1,12 +1,13 @@
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { mkdir, readdir, rm, stat, rename, readFile, writeFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { getSemaphore } from "@henrygd/semaphore";
 import { validatePath } from "../lib/path";
 import { applyOwnership, type Ownership } from "../lib/ownership";
 import { jsonResponse, requiresAuth } from "../lib/openapi";
 import { v } from "../lib/validator";
+import { indexFile } from "../lib/index";
 import {
   UploadStartBodySchema,
   UploadStartResponseSchema,
@@ -326,6 +327,26 @@ app.post(
       const fullPath = join(meta.path, meta.filename);
       const file = Bun.file(fullPath);
       const s = await stat(fullPath);
+      let fileId: string | undefined;
+
+      if (config.indexEnabled) {
+        const pathResult = await validatePath(fullPath);
+        if (pathResult.ok) {
+          try {
+            const relPath = relative(pathResult.basePath, pathResult.realPath);
+            const outcome = await indexFile(pathResult.basePath, relPath, {
+              dev: s.dev,
+              ino: s.ino,
+              size: s.size,
+              mtimeMs: s.mtimeMs,
+              isDirectory: s.isDirectory(),
+            });
+            fileId = outcome.id;
+          } catch (err) {
+            console.error("[Filegate] Index update failed:", err);
+          }
+        }
+      }
 
       return c.json({
         completed: true as const,
@@ -338,6 +359,7 @@ app.post(
           isHidden: meta.filename.startsWith("."),
           checksum: meta.checksum,
           mimeType: file.type,
+          ...(fileId ? { fileId } : {}),
         },
       });
     }

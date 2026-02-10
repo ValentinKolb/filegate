@@ -12,6 +12,9 @@ import filesRoutes from "./handlers/files";
 import searchRoutes from "./handlers/search";
 import uploadRoutes, { cleanupOrphanedChunks } from "./handlers/upload";
 import thumbnailRoutes from "./handlers/thumbnail";
+import indexRoutes from "./handlers/indexHandler";
+import { initIndex, closeIndex } from "./lib/index";
+import { scanAll } from "./lib/scanner";
 
 // Dev mode warning
 if (config.isDev) {
@@ -27,9 +30,41 @@ console.log(`[Filegate] ALLOWED_BASE_PATHS: ${config.allowedPaths.join(", ")}`);
 console.log(`[Filegate] MAX_UPLOAD_MB: ${config.maxUploadBytes / 1024 / 1024}`);
 console.log(`[Filegate] PORT: ${config.port}`);
 
+if (config.indexEnabled) {
+  await initIndex(config.indexDatabaseUrl);
+  console.log(`[Filegate] INDEX_DATABASE_URL: ${config.indexDatabaseUrl}`);
+}
+
 // Periodic disk cleanup for orphaned chunks (every 6h by default)
 setInterval(cleanupOrphanedChunks, config.diskCleanupIntervalMs);
 setTimeout(cleanupOrphanedChunks, 10_000); // Run 10s after startup
+
+if (config.indexEnabled) {
+  const runRescan = async () => {
+    try {
+      const result = await scanAll();
+      console.log(
+        `[Filegate] Index rescan: scanned=${result.scanned} skipped=${result.skipped} added=${result.added} moved=${result.moved} removed=${result.removed} durationMs=${result.durationMs}`,
+      );
+    } catch (err) {
+      console.error("[Filegate] Index rescan failed:", err);
+    }
+  };
+
+  setInterval(runRescan, config.indexRescanIntervalMs);
+  setTimeout(runRescan, 15_000);
+
+  const shutdown = async () => {
+    try {
+      await closeIndex();
+    } catch (err) {
+      console.error("[Filegate] Index shutdown failed:", err);
+    }
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
 
 // Main app
 const app = new Hono();
@@ -58,7 +93,8 @@ const api = new Hono()
   .route("/", filesRoutes)
   .route("/", searchRoutes)
   .route("/upload", uploadRoutes)
-  .route("/thumbnail", thumbnailRoutes);
+  .route("/thumbnail", thumbnailRoutes)
+  .route("/index", indexRoutes);
 
 app.route("/files", api);
 
@@ -88,6 +124,7 @@ app.onError((err, c) => {
 export default {
   port: config.port,
   fetch: app.fetch,
+  development: false,
 };
 
 console.log(`[Filegate] Listening on http://localhost:${config.port}`);

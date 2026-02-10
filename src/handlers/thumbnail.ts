@@ -1,11 +1,14 @@
 import { Hono } from "hono";
 import { describeRoute } from "hono-openapi";
 import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import sharp from "sharp";
 import { validatePath } from "../lib/path";
 import { jsonResponse, requiresAuth } from "../lib/openapi";
 import { v } from "../lib/validator";
 import { ImageThumbnailQuerySchema, ErrorSchema } from "../schemas";
+import { config } from "../config";
+import { resolveId } from "../lib/index";
 
 const app = new Hono();
 
@@ -35,6 +38,26 @@ const FORMAT_MIME: Record<string, string> = {
   avif: "image/avif",
 };
 
+const resolveQueryPath = async (
+  path: string | undefined,
+  id: string | undefined,
+): Promise<{ ok: true; path: string } | { ok: false; status: 400 | 404; error: string }> => {
+  if (id) {
+    if (!config.indexEnabled) {
+      return { ok: false, status: 400, error: "index disabled" };
+    }
+    const resolved = await resolveId(id);
+    if (!resolved) return { ok: false, status: 404, error: "not found" };
+    return { ok: true, path: join(resolved.basePath, resolved.relPath) };
+  }
+
+  if (!path) {
+    return { ok: false, status: 400, error: "path or id required" };
+  }
+
+  return { ok: true, path };
+};
+
 // GET /thumbnail/image - Generate image thumbnail
 app.get(
   "/image",
@@ -62,10 +85,13 @@ app.get(
   }),
   v("query", ImageThumbnailQuerySchema),
   async (c) => {
-    const { path, width, height, fit, position, format, quality } = c.req.valid("query");
+    const { path, id, width, height, fit, position, format, quality } = c.req.valid("query");
+
+    const resolved = await resolveQueryPath(path, id);
+    if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
 
     // Validate path
-    const result = await validatePath(path);
+    const result = await validatePath(resolved.path);
     if (!result.ok) return c.json({ error: result.error }, result.status);
 
     // Check if file exists and is a file

@@ -59,6 +59,9 @@ describe("integration tests", () => {
     process.env.UPLOAD_EXPIRY_HOURS = "1";
     process.env.UPLOAD_TEMP_DIR = testChunksDir;
     process.env.SEARCH_MAX_RESULTS = "50";
+    process.env.ENABLE_INDEX = "true";
+    process.env.INDEX_DATABASE_URL = "sqlite://:memory:";
+    process.env.INDEX_RESCAN_INTERVAL_MINUTES = "999999";
 
     // Dynamically import the app after setting env vars
     const appModule = await import("../../src/index");
@@ -330,6 +333,39 @@ describe("integration tests", () => {
       // Verify destination exists
       const destInfo = await client.info({ path: movedFile });
       expect(destInfo.ok).toBe(true);
+    });
+
+    test("should preserve fileId on move and resolve by id", async () => {
+      const uploadResult = await client.upload.single({
+        path: testDir,
+        filename: "id-move.txt",
+        data: new TextEncoder().encode("id move"),
+      });
+
+      expect(uploadResult.ok).toBe(true);
+      if (!uploadResult.ok) return;
+      expect(uploadResult.data.fileId).toBeTruthy();
+
+      const originalId = uploadResult.data.fileId as string;
+      const movedPath = `${testDir}/id-move-renamed.txt`;
+
+      const moveResult = await client.transfer({
+        from: `${testDir}/id-move.txt`,
+        to: movedPath,
+        mode: "move",
+      });
+
+      expect(moveResult.ok).toBe(true);
+      if (!moveResult.ok) return;
+      expect(moveResult.data.fileId).toBe(originalId);
+
+      const infoRes = await fetch(`${BASE_URL}/files/info?id=${originalId}`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+
+      expect(infoRes.ok).toBe(true);
+      const info = (await infoRes.json()) as { name: string };
+      expect(info.name).toBe("id-move-renamed.txt");
     });
 
     test("should fail to move file outside allowed path", async () => {

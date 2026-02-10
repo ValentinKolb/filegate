@@ -16,6 +16,10 @@ import {
   UploadChunkProgressSchema,
   UploadChunkCompleteSchema,
   UploadChunkResponseSchema,
+  RescanResponseSchema,
+  IndexStatsSchema,
+  BulkResolveBodySchema,
+  BulkResolveResponseSchema,
   countRecursiveWildcards,
 } from "../src/schemas";
 
@@ -68,6 +72,14 @@ describe("schemas", () => {
       const result = FileInfoSchema.safeParse({
         ...validFileInfo,
         mimeType: "text/plain",
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("should accept optional fileId", () => {
+      const result = FileInfoSchema.safeParse({
+        ...validFileInfo,
+        fileId: "01890fe0-8c48-7f84-8c74-2e1a3b64a6d0",
       });
       expect(result.success).toBe(true);
     });
@@ -143,13 +155,26 @@ describe("schemas", () => {
       expect(result.success).toBe(true);
     });
 
+    test("should validate valid id", () => {
+      const result = PathQuerySchema.safeParse({ id: "01890fe0-8c48-7f84-8c74-2e1a3b64a6d0" });
+      expect(result.success).toBe(true);
+    });
+
     test("should reject empty path", () => {
       const result = PathQuerySchema.safeParse({ path: "" });
       expect(result.success).toBe(false);
     });
 
-    test("should reject missing path", () => {
+    test("should reject missing path and id", () => {
       const result = PathQuerySchema.safeParse({});
+      expect(result.success).toBe(false);
+    });
+
+    test("should reject both path and id", () => {
+      const result = PathQuerySchema.safeParse({
+        path: "/data/file.txt",
+        id: "01890fe0-8c48-7f84-8c74-2e1a3b64a6d0",
+      });
       expect(result.success).toBe(false);
     });
   });
@@ -183,6 +208,21 @@ describe("schemas", () => {
       if (result.success) {
         expect(result.data.showHidden).toBe(false);
       }
+    });
+
+    test("should validate with id only", () => {
+      const result = InfoQuerySchema.safeParse({
+        id: "01890fe0-8c48-7f84-8c74-2e1a3b64a6d0",
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("should reject with both path and id", () => {
+      const result = InfoQuerySchema.safeParse({
+        path: "/data",
+        id: "01890fe0-8c48-7f84-8c74-2e1a3b64a6d0",
+      });
+      expect(result.success).toBe(false);
     });
   });
 
@@ -558,6 +598,45 @@ describe("schemas", () => {
           isHidden: false,
           checksum: "sha256:abc123",
         },
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe("Index schemas", () => {
+    test("should validate rescan response", () => {
+      const result = RescanResponseSchema.safeParse({
+        scanned: 10,
+        skipped: 5,
+        added: 2,
+        moved: 1,
+        removed: 0,
+        durationMs: 1200,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("should validate index stats", () => {
+      const result = IndexStatsSchema.safeParse({
+        totalFiles: 100,
+        totalDirs: 10,
+        dbSizeBytes: 4096,
+        lastScanAt: null,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("should validate bulk resolve body", () => {
+      const result = BulkResolveBodySchema.safeParse({
+        ids: ["01890fe0-8c48-7f84-8c74-2e1a3b64a6d0"],
+      });
+      expect(result.success).toBe(true);
+    });
+
+    test("should validate bulk resolve response", () => {
+      const result = BulkResolveResponseSchema.safeParse({
+        "01890fe0-8c48-7f84-8c74-2e1a3b64a6d0": "/data/file.txt",
+        "01890fe0-8c48-7f84-8c74-2e1a3b64a6d1": null,
       });
       expect(result.success).toBe(true);
     });

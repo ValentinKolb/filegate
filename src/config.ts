@@ -29,6 +29,10 @@ export const config = {
   uploadExpirySecs: int("UPLOAD_EXPIRY_HOURS", 24) * 60 * 60,
   uploadTempDir: process.env.UPLOAD_TEMP_DIR ?? "/tmp/filegate-uploads",
   diskCleanupIntervalMs: int("DISK_CLEANUP_INTERVAL_HOURS", 6) * 60 * 60 * 1000,
+  indexEnabled: process.env.ENABLE_INDEX !== "false",
+  indexDatabaseUrl: process.env.INDEX_DATABASE_URL ?? "sqlite://:memory:",
+  indexRescanIntervalMs: int("INDEX_RESCAN_INTERVAL_MINUTES", 30) * 60 * 1000,
+  indexScanConcurrency: int("INDEX_SCAN_CONCURRENCY", 4),
   devUid: optionalInt("DEV_UID_OVERRIDE"),
   devGid: optionalInt("DEV_GID_OVERRIDE"),
   get isDev() {

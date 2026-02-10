@@ -8,6 +8,15 @@ import { parseOwnershipBody, applyOwnership, applyOwnershipRecursive } from "../
 import { jsonResponse, binaryResponse, requiresAuth } from "../lib/openapi";
 import { v } from "../lib/validator";
 import {
+  indexFile,
+  identifyPath,
+  resolveId,
+  removeFromIndex,
+  removeFromIndexRecursive,
+  updateIndexPath,
+  enrichFileInfoBatch,
+} from "../lib/index";
+import {
   FileInfoSchema,
   DirInfoSchema,
   ErrorSchema,
@@ -75,6 +84,44 @@ const getDirSize = async (dirPath: string): Promise<number> => {
   }
 };
 
+const resolveQueryPath = async (
+  path: string | undefined,
+  id: string | undefined,
+): Promise<{ ok: true; path: string } | { ok: false; status: 400 | 404; error: string }> => {
+  if (id) {
+    if (!config.indexEnabled) {
+      return { ok: false, status: 400, error: "index disabled" };
+    }
+    const resolved = await resolveId(id);
+    if (!resolved) return { ok: false, status: 404, error: "not found" };
+    return { ok: true, path: join(resolved.basePath, resolved.relPath) };
+  }
+
+  if (!path) {
+    return { ok: false, status: 400, error: "path or id required" };
+  }
+
+  return { ok: true, path };
+};
+
+const withFileId = async (info: FileInfo, basePath: string, absPath: string): Promise<FileInfo> => {
+  if (!config.indexEnabled) return info;
+  const relPath = relative(basePath, absPath);
+  const fileId = await identifyPath(basePath, relPath);
+  return fileId ? { ...info, fileId } : info;
+};
+
+const enrichListingItems = async (items: FileInfo[], basePath: string, dirPath: string): Promise<FileInfo[]> => {
+  if (!config.indexEnabled || items.length === 0) return items;
+  const relPaths = items.map((item) => relative(basePath, join(dirPath, item.path)));
+  const tempItems = items.map((item, i) => ({ ...item, path: relPaths[i] ?? item.path }));
+  const enriched = await enrichFileInfoBatch(tempItems, basePath);
+  return items.map((item, i) => {
+    const fileId = enriched[i]?.fileId;
+    return fileId ? { ...item, fileId } : item;
+  });
+};
+
 const getFileInfo = async (path: string, relativeTo?: string, computeDirSize?: boolean): Promise<FileInfo> => {
   const file = Bun.file(path);
   const s = await stat(path);
@@ -108,9 +155,12 @@ app.get(
   }),
   v("query", InfoQuerySchema),
   async (c) => {
-    const { path, showHidden, computeSizes } = c.req.valid("query");
+    const { path, id, showHidden, computeSizes } = c.req.valid("query");
 
-    const result = await validatePath(path, { allowBasePath: true });
+    const resolved = await resolveQueryPath(path, id);
+    if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
+
+    const result = await validatePath(resolved.path, { allowBasePath: true });
     if (!result.ok) return c.json({ error: result.error }, result.status);
 
     let s;
@@ -121,13 +171,14 @@ app.get(
     }
 
     if (!s.isDirectory()) {
-      return c.json(await getFileInfo(result.realPath));
+      const info = await getFileInfo(result.realPath);
+      return c.json(await withFileId(info, result.basePath, result.realPath));
     }
 
     const entries = await readdir(result.realPath, { withFileTypes: true });
 
     // Parallel file info retrieval (computeSizes only when requested)
-    const items = (
+    let items = (
       await Promise.all(
         entries
           .filter((e) => showHidden || !e.name.startsWith("."))
@@ -135,9 +186,12 @@ app.get(
       )
     ).filter((item): item is FileInfo => item !== null);
 
+    items = await enrichListingItems(items, result.basePath, result.realPath);
+
     const info = await getFileInfo(result.realPath);
+    const infoWithId = await withFileId(info, result.basePath, result.realPath);
     const totalSize = computeSizes ? items.reduce((sum, item) => sum + item.size, 0) : 0;
-    return c.json({ ...info, size: totalSize, items, total: items.length });
+    return c.json({ ...infoWithId, size: totalSize, items, total: items.length });
   },
 );
 
@@ -160,9 +214,12 @@ app.get(
   }),
   v("query", ContentQuerySchema),
   async (c) => {
-    const { path, inline } = c.req.valid("query");
+    const { path, id, inline } = c.req.valid("query");
 
-    const result = await validatePath(path);
+    const resolved = await resolveQueryPath(path, id);
+    if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
+
+    const result = await validatePath(resolved.path);
     if (!result.ok) return c.json({ error: result.error }, result.status);
 
     let s;
@@ -209,11 +266,12 @@ app.get(
       const archive = new Bun.Archive(files);
       const archiveBlob = await archive.blob();
 
+      const tarName = `${dirName}.tar`;
       return new Response(archiveBlob, {
         headers: {
           "Content-Type": "application/x-tar",
-          "Content-Disposition": `attachment; filename="${dirName}.tar"`,
-          "X-File-Name": `${dirName}.tar`,
+          "Content-Disposition": `attachment; filename="${encodeURIComponent(tarName)}"; filename*=UTF-8''${encodeURIComponent(tarName)}`,
+          "X-File-Name": encodeURIComponent(tarName),
         },
       });
     }
@@ -229,14 +287,15 @@ app.get(
     }
 
     const filename = basename(result.realPath);
+    const encodedFilename = encodeURIComponent(filename);
     const disposition = inline ? "inline" : "attachment";
 
     return new Response(file.stream(), {
       headers: {
         "Content-Type": file.type,
         "Content-Length": String(file.size),
-        "Content-Disposition": `${disposition}; filename="${filename}"`,
-        "X-File-Name": filename,
+        "Content-Disposition": `${disposition}; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`,
+        "X-File-Name": encodedFilename,
       },
     });
   },
@@ -318,7 +377,27 @@ app.put(
       return c.json({ error: ownershipError }, 500);
     }
 
-    return c.json(await getFileInfo(result.realPath), 201);
+    const info = await getFileInfo(result.realPath);
+
+    if (!config.indexEnabled) {
+      return c.json(info, 201);
+    }
+
+    try {
+      const s = await stat(result.realPath);
+      const relPath = relative(result.basePath, result.realPath);
+      const outcome = await indexFile(result.basePath, relPath, {
+        dev: s.dev,
+        ino: s.ino,
+        size: s.size,
+        mtimeMs: s.mtimeMs,
+        isDirectory: s.isDirectory(),
+      });
+      return c.json({ ...info, fileId: outcome.id }, 201);
+    } catch (err) {
+      console.error("[Filegate] Index update failed:", err);
+      return c.json(info, 201);
+    }
   },
 );
 
@@ -352,7 +431,27 @@ app.post(
       return c.json({ error: ownershipError }, 500);
     }
 
-    return c.json(await getFileInfo(result.realPath), 201);
+    const info = await getFileInfo(result.realPath);
+
+    if (!config.indexEnabled) {
+      return c.json(info, 201);
+    }
+
+    try {
+      const s = await stat(result.realPath);
+      const relPath = relative(result.basePath, result.realPath);
+      const outcome = await indexFile(result.basePath, relPath, {
+        dev: s.dev,
+        ino: s.ino,
+        size: s.size,
+        mtimeMs: s.mtimeMs,
+        isDirectory: s.isDirectory(),
+      });
+      return c.json({ ...info, fileId: outcome.id }, 201);
+    } catch (err) {
+      console.error("[Filegate] Index update failed:", err);
+      return c.json(info, 201);
+    }
   },
 );
 
@@ -372,9 +471,12 @@ app.delete(
   }),
   v("query", PathQuerySchema),
   async (c) => {
-    const { path } = c.req.valid("query");
+    const { path, id } = c.req.valid("query");
 
-    const result = await validatePath(path);
+    const resolved = await resolveQueryPath(path, id);
+    if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
+
+    const result = await validatePath(resolved.path);
     if (!result.ok) return c.json({ error: result.error }, result.status);
 
     let s;
@@ -382,6 +484,19 @@ app.delete(
       s = await stat(result.realPath);
     } catch {
       return c.json({ error: "not found" }, 404);
+    }
+
+    if (config.indexEnabled) {
+      const relPath = relative(result.basePath, result.realPath);
+      if (s.isDirectory()) {
+        await removeFromIndexRecursive(result.basePath, relPath).catch((err) => {
+          console.error("[Filegate] Index remove failed:", err);
+        });
+      } else {
+        await removeFromIndex(result.basePath, relPath).catch((err) => {
+          console.error("[Filegate] Index remove failed:", err);
+        });
+      }
     }
 
     await rm(result.realPath, { recursive: s.isDirectory() });
@@ -432,6 +547,9 @@ app.post(
         return c.json({ error: "source not found" }, 404);
       }
 
+      const sourceRelPath = relative(result.basePath, result.realPath);
+      const existingId = config.indexEnabled ? await identifyPath(result.basePath, sourceRelPath) : null;
+
       const targetPath = ensureUniqueName ? await getUniquePath(result.realTo) : result.realTo;
 
       await mkdir(join(targetPath, ".."), { recursive: true });
@@ -445,7 +563,32 @@ app.post(
         }
       }
 
-      return c.json(await getFileInfo(targetPath));
+      const info = await getFileInfo(targetPath);
+
+      if (!config.indexEnabled) {
+        return c.json(info);
+      }
+
+      try {
+        const targetRelPath = relative(result.basePath, targetPath);
+        if (existingId) {
+          await updateIndexPath(existingId, result.basePath, targetRelPath);
+          return c.json({ ...info, fileId: existingId });
+        }
+
+        const s = await stat(targetPath);
+        const outcome = await indexFile(result.basePath, targetRelPath, {
+          dev: s.dev,
+          ino: s.ino,
+          size: s.size,
+          mtimeMs: s.mtimeMs,
+          isDirectory: s.isDirectory(),
+        });
+        return c.json({ ...info, fileId: outcome.id });
+      } catch (err) {
+        console.error("[Filegate] Index update failed:", err);
+        return c.json(info);
+      }
     }
 
     // Copy: check if same base or cross-base with ownership
@@ -473,7 +616,27 @@ app.post(
         }
       }
 
-      return c.json(await getFileInfo(targetPath));
+      const info = await getFileInfo(targetPath);
+
+      if (!config.indexEnabled) {
+        return c.json(info);
+      }
+
+      try {
+        const targetRelPath = relative(sameBaseResult.basePath, targetPath);
+        const s = await stat(targetPath);
+        const outcome = await indexFile(sameBaseResult.basePath, targetRelPath, {
+          dev: s.dev,
+          ino: s.ino,
+          size: s.size,
+          mtimeMs: s.mtimeMs,
+          isDirectory: s.isDirectory(),
+        });
+        return c.json({ ...info, fileId: outcome.id });
+      } catch (err) {
+        console.error("[Filegate] Index update failed:", err);
+        return c.json(info);
+      }
     }
 
     // Cross-base copy - ownership is required
@@ -506,7 +669,27 @@ app.post(
       return c.json({ error: ownershipError }, 500);
     }
 
-    return c.json(await getFileInfo(targetPath));
+    const info = await getFileInfo(targetPath);
+
+    if (!config.indexEnabled) {
+      return c.json(info);
+    }
+
+    try {
+      const targetRelPath = relative(toResult.basePath, targetPath);
+      const s = await stat(targetPath);
+      const outcome = await indexFile(toResult.basePath, targetRelPath, {
+        dev: s.dev,
+        ino: s.ino,
+        size: s.size,
+        mtimeMs: s.mtimeMs,
+        isDirectory: s.isDirectory(),
+      });
+      return c.json({ ...info, fileId: outcome.id });
+    } catch (err) {
+      console.error("[Filegate] Index update failed:", err);
+      return c.json(info);
+    }
   },
 );
 

@@ -28,6 +28,7 @@ export const openApiMeta: Partial<GenerateSpecOptions> = {
       { name: "Files", description: "File operations (info, download, upload, mkdir, move, copy, delete)" },
       { name: "Search", description: "File search with glob patterns" },
       { name: "Upload", description: "Resumable chunked uploads" },
+      { name: "Index", description: "File index management" },
     ],
     components: {
       securitySchemes: {
