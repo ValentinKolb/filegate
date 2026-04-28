@@ -27,7 +27,7 @@ jobs:
   soak-chaos:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Detector soak test
         env:
           FILEGATE_SOAK_DURATION: ${{ inputs.soak_duration || '5m' }}
@@ -44,7 +44,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.run_btrfs_real == 'true'
     runs-on: [self-hosted, linux, btrfs]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Real btrfs detector/index sync
         env:
           FILEGATE_BTRFS_REAL_ROOT: /var/tmp/filegate-btrfs

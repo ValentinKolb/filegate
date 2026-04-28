@@ -10,8 +10,8 @@ jobs:
   vet-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.25"
       - name: go vet
@@ -22,8 +22,8 @@ jobs:
   race:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.25"
       - name: race tests on hot packages
@@ -32,8 +32,8 @@ jobs:
   staticcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.25"
       - name: install staticcheck
@@ -54,15 +54,26 @@ jobs:
   detector-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: detector + index sync regression tests
         run: make test-detector-linux
+
+  detector-btrfs:
+    # Real btrfs detector test on a loopback btrfs image inside a privileged
+    # container. GitHub-hosted ubuntu-latest supports privileged Docker, so
+    # we can exercise the real `btrfs find-new` path on every push without
+    # needing a self-hosted runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: real-btrfs detector test (loopback image)
+        run: make test-detector-btrfs-real-docker
 
   fuzz-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.25"
       - name: fuzz smoke (10s per target)
@@ -71,8 +82,8 @@ jobs:
   ts-sdk-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
       - name: install
