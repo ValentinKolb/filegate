@@ -1,569 +1,145 @@
 # Filegate
 
-Secure file proxy for building custom file management systems. Streaming uploads, chunked transfers, Unix permissions.
+Fast, reliable file gateway with a stable Pebble index and reverse path/id lookup.
 
-```
-Browser/App          Your Backend            Filegate            Filesystem
-     |                    |                     |                    |
-     |  upload request    |                     |                    |
-     |------------------->|                     |                    |
-     |                    |  proxy to filegate  |                    |
-     |                    |-------------------->|                    |
-     |                    |                     |  write file        |
-     |                    |                     |------------------->|
-     |                    |                     |                    |
-     |                    |<--------------------|<-------------------|
-     |<-------------------|                     |                    |
-```
+Filegate is a Linux-first HTTP service for cloud backends that need filesystem storage with strict boundaries, high metadata throughput, and robust upload semantics.
 
-Filegate runs behind your backend, not as a public-facing service. Your backend handles authentication and authorization, then proxies requests to Filegate. You control access logic - Filegate handles file operations.
+## Overview
 
-## Features
+- Stable metadata index in Pebble with explicit index format versioning and rescan tooling
+- Reverse lookup cache for fast `path -> id` and `id -> path` operations
+- Index-first metadata and directory listings (very low latency on hot paths)
+- External filesystem change sync (btrfs `find-new` delta mode or poll mode, eventual consistency)
+- Strong upload semantics: one-shot + chunked out-of-order + duplicate-safe + auto-finalize
+- Production delivery options: single binary, Docker image, RPM/DEB packages, systemd unit
+- Stateless TypeScript client pattern with relay/file utilities for cloud backends
 
-- Streaming uploads and downloads (no memory buffering)
-- Resumable chunked uploads with SHA-256 verification
-- Directory downloads as TAR archives
-- Unix file permissions (uid, gid, mode)
-- Glob-based file search
-- Type-safe client with full TypeScript support
-- OpenAPI documentation
-- Minimal dependencies (Hono, Zod - no database required)
+## Quickstart
 
-## Quick Start
-
-### 1. Start Filegate with Docker
+### 1. Start Filegate
 
 ```bash
-docker run -d \
+docker run --rm -d \
   --name filegate \
-  -p 4000:4000 \
-  -e FILE_PROXY_TOKEN=your-secret-token \
-  -e ALLOWED_BASE_PATHS=/data \
-  -v /path/to/your/files:/data \
-  ghcr.io/valentinkolb/filegate:latest
+  -p 8080:8080 \
+  -e FILEGATE_AUTH_BEARER_TOKEN=dev-token \
+  -e FILEGATE_STORAGE_BASE_PATHS=/data \
+  -e FILEGATE_STORAGE_INDEX_PATH=/var/lib/filegate/index \
+  -v "$(pwd)/data:/data" \
+  ghcr.io/valentinkolb/filegate:latest \
+  serve
 ```
 
-### 2. Install the Client
+### 2. Install and run TS example
 
 ```bash
-npm install @valentinkolb/filegate
+npm i @valentinkolb/filegate
 ```
 
-### 3. Configure Environment
-
-```bash
-export FILEGATE_URL=http://localhost:4000
-export FILEGATE_TOKEN=your-secret-token
-```
-
-### 4. Upload a File
-
-```typescript
+```ts
+// hello.ts
 import { filegate } from "@valentinkolb/filegate/client";
 
-const result = await filegate.upload.single({
-  path: "/data/uploads",
-  filename: "document.pdf",
-  data: fileBuffer,
-});
+process.env.FILEGATE_URL = "http://127.0.0.1:8080";
+process.env.FILEGATE_TOKEN = "dev-token";
 
-if (result.ok) {
-  console.log("Uploaded:", result.data.path);
-}
+const roots = await filegate.paths.list();
+console.log("roots:", roots.items.map((n) => `${n.name} (${n.id})`));
 ```
-
-### 5. Download a File
-
-```typescript
-import { filegate } from "@valentinkolb/filegate/client";
-
-const result = await filegate.download({ path: "/data/uploads/document.pdf" });
-
-if (result.ok) {
-  const blob = await result.data.blob();
-}
-
-// Open in browser instead of downloading
-const preview = await filegate.download({
-  path: "/data/uploads/image.png",
-  inline: true,
-});
-```
-
-## Core Concepts
-
-### Base Paths
-
-Filegate restricts all file operations to explicitly allowed directories called "base paths". This is a security boundary - files outside these paths cannot be accessed.
 
 ```bash
-ALLOWED_BASE_PATHS=/data/uploads,/data/exports
+node hello.ts
 ```
 
-With this configuration:
-- `/data/uploads/file.txt` - allowed
-- `/data/exports/report.pdf` - allowed
-- `/home/user/file.txt` - forbidden
-- `/data/../etc/passwd` - forbidden (path traversal blocked)
+### 3. Browser note
 
-Symlinks that point outside base paths are also blocked.
+In browsers, do not rely on env-based defaults. Create an explicit client instance:
 
-### Auto-Create Parent Directories
-
-When uploading files, Filegate automatically creates any missing parent directories. This simplifies folder uploads where nested structures need to be created on-the-fly:
-
-```typescript
-// Parent directories /data/new/nested/path will be created automatically
-await client.upload.single({
-  path: "/data/new/nested/path",
-  filename: "file.txt",
-  data: buffer,
-});
-```
-
-This applies to both simple uploads and chunked uploads.
-
-### File Ownership
-
-Filegate can set Unix file ownership on uploaded files:
-
-```typescript
-await client.upload.single({
-  path: "/data/uploads",
-  filename: "file.txt",
-  data: buffer,
-  uid: 1000,    // Owner user ID
-  gid: 1000,    // Owner group ID
-  mode: "644",  // Unix permissions (rw-r--r--)
-});
-```
-
-If ownership is not specified, files are created with the user running Filegate (typically root in Docker).
-
-Filegate does not validate whether the specified uid/gid exists on the system, nor does it verify that the requesting user matches the specified ownership. Your backend is responsible for this validation.
-
-This feature is intended for scenarios like NFS shares exposed through Filegate, where preserving the original permission structure is required.
-
-### Transfer (Move/Copy)
-
-The `transfer` endpoint handles both moving and copying files or directories:
-
-```typescript
-// Move (rename) a file - same base path only
-await client.transfer({
-  from: "/data/old-name.txt",
-  to: "/data/new-name.txt",
-  mode: "move",
-});
-
-// Copy within same base path - no ownership required
-await client.transfer({
-  from: "/data/file.txt",
-  to: "/data/backup/file.txt",
-  mode: "copy",
-});
-
-// Copy across different base paths - ownership required
-await client.transfer({
-  from: "/data/file.txt",
-  to: "/backup/file.txt",
-  mode: "copy",
-  uid: 1000,
-  gid: 1000,
-  fileMode: "644",
-});
-
-// Allow overwriting existing files (default: false)
-await client.transfer({
-  from: "/data/new-file.txt",
-  to: "/data/existing-file.txt",
-  mode: "copy",
-  ensureUniqueName: false,  // Overwrite if target exists
-});
-```
-
-**Rules:**
-- `mode: "move"` - Only within the same base path (uses filesystem rename)
-- `mode: "copy"` without ownership - Only within the same base path
-- `mode: "copy"` with ownership - Allows cross-base copying (ownership is applied recursively)
-- Both operations work recursively on directories
-- `ensureUniqueName: true` (default) - Appends `-01`, `-02`, etc. if target exists
-- `ensureUniqueName: false` - Overwrites existing target file
-
-### Thumbnails
-
-Filegate can generate image thumbnails on-the-fly using Sharp. No caching - thumbnails are generated per request (typically 5-20ms).
-
-```typescript
-// Get a 200x200 cover thumbnail (default)
-const result = await client.thumbnail.image({
-  path: "/data/photos/vacation.jpg",
-});
-
-if (result.ok) {
-  const blob = await result.data.blob();
-  // Use as image source
-}
-
-// Customized thumbnail
-const result = await client.thumbnail.image({
-  path: "/data/photos/vacation.jpg",
-  width: 400,
-  height: 300,
-  fit: "contain",      // Fit within bounds, preserve aspect ratio
-  format: "webp",      // Output format
-  quality: 90,         // Higher quality
-});
-
-// Smart cropping with attention detection
-const result = await client.thumbnail.image({
-  path: "/data/photos/portrait.jpg",
-  width: 150,
-  height: 150,
-  fit: "cover",
-  position: "attention",  // Focus on interesting areas
-});
-```
-
-**Options:**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `width` | 200 | Width in pixels (max 2000) |
-| `height` | 200 | Height in pixels (max 2000) |
-| `fit` | `cover` | `cover`, `contain`, `fill`, `inside`, `outside` |
-| `position` | `center` | Crop position: `center`, `top`, `bottom`, `left`, `right`, `entropy`, `attention` |
-| `format` | `webp` | Output: `webp`, `jpeg`, `png`, `avif` |
-| `quality` | 80 | Quality 1-100 |
-
-**Fit modes:**
-- `cover` - Fill the box, crop excess (best for uniform grids)
-- `contain` - Fit within box, preserve aspect ratio (may have letterboxing)
-- `fill` - Stretch to exact size (distorts)
-- `inside` - Like contain, but never upscale
-- `outside` - Like cover, but never downscale
-
-**Supported input formats:** JPEG, PNG, WebP, AVIF, TIFF, GIF, SVG
-
-**Caching:** Thumbnails include `ETag`, `Last-Modified`, and `Cache-Control: immutable` headers. Simply pass through the response:
-
-```typescript
-const result = await client.thumbnail.image({ path: "/data/photo.jpg" });
-if (!result.ok) return c.json({ error: result.error }, result.status);
-
-return result.data; // Response with all headers
-```
-
-### Chunked Uploads
-
-For large files, use chunked uploads. They support:
-- Resume after connection failure
-- Progress tracking
-- Per-chunk checksum verification
-- Automatic assembly when complete
-
-The [Browser Utilities](#browser-utilities) help with checksum calculation, chunking, and progress tracking. They work both in the browser and on the server.
-
-```typescript
-// Start or resume upload
-const start = await client.upload.chunked.start({
-  path: "/data/uploads",
-  filename: "large-file.zip",
-  size: file.size,
-  checksum: "sha256:abc123...",  // Checksum of entire file
-  chunkSize: 5 * 1024 * 1024,    // 5MB chunks
-});
-
-// Upload each chunk
-for (let i = 0; i < start.data.totalChunks; i++) {
-  if (start.data.uploadedChunks.includes(i)) continue; // Skip already uploaded
-  
-  await client.upload.chunked.send({
-    uploadId: start.data.uploadId,
-    index: i,
-    data: chunkData,
-  });
-}
-```
-
-Uploads automatically expire after 24 hours of inactivity.
-
-## Configuration
-
-All configuration is done through environment variables.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `FILE_PROXY_TOKEN` | Yes | - | Bearer token for API authentication |
-| `ALLOWED_BASE_PATHS` | Yes | - | Comma-separated list of allowed directories |
-| `PORT` | No | 4000 | Server port |
-| `MAX_UPLOAD_MB` | No | 500 | Maximum upload size in MB |
-| `MAX_DOWNLOAD_MB` | No | 5000 | Maximum download size in MB |
-| `MAX_CHUNK_SIZE_MB` | No | 50 | Maximum chunk size in MB |
-| `SEARCH_MAX_RESULTS` | No | 100 | Maximum search results returned |
-| `SEARCH_MAX_RECURSIVE_WILDCARDS` | No | 10 | Maximum `**` wildcards in glob patterns |
-| `UPLOAD_EXPIRY_HOURS` | No | 24 | Hours until incomplete uploads expire |
-| `UPLOAD_TEMP_DIR` | No | /tmp/filegate-uploads | Directory for temporary chunk storage |
-| `DISK_CLEANUP_INTERVAL_HOURS` | No | 6 | Interval for cleaning orphaned chunks |
-
-### Development Mode
-
-For local development without root permissions, you can override file ownership:
-
-```bash
-DEV_UID_OVERRIDE=1000
-DEV_GID_OVERRIDE=1000
-```
-
-This applies the specified uid/gid instead of the requested values. Do not use in production.
-
-## Docker Compose Example
-
-```yaml
-services:
-  filegate:
-    image: ghcr.io/valentinkolb/filegate:latest
-    ports:
-      - "4000:4000"
-    environment:
-      FILE_PROXY_TOKEN: ${FILE_PROXY_TOKEN}
-      ALLOWED_BASE_PATHS: /data
-    volumes:
-      - ./data:/data
-      - filegate-chunks:/tmp/filegate-uploads
-
-volumes:
-  filegate-chunks:
-```
-
-## Client API
-
-The client provides a type-safe interface for all Filegate operations.
-
-### Installation
-
-```bash
-npm install @valentinkolb/filegate
-```
-
-### Default Instance
-
-Set `FILEGATE_URL` and `FILEGATE_TOKEN` environment variables, then import the pre-configured client:
-
-```typescript
-import { filegate } from "@valentinkolb/filegate/client";
-
-await filegate.info({ path: "/data/uploads" });
-```
-
-### Custom Instance
-
-For more control or multiple Filegate servers, create instances manually:
-
-```typescript
+```ts
 import { Filegate } from "@valentinkolb/filegate/client";
 
-const client = new Filegate({
-  url: "http://localhost:4000",
-  token: "your-secret-token",
+const fg = new Filegate({
+  baseUrl: "https://filegate.internal.example",
+  token: "<short-lived-backend-token>",
 });
 ```
 
-### Methods
+See full TS usage in [docs/ts-client.md](https://github.com/ValentinKolb/filegate/blob/main/docs/ts-client.md).
 
-```typescript
-// Get file or directory info
-await client.info({ path: "/data/file.txt", showHidden: false });
+## Quick Start (Local Binary)
 
-// Get directory info with recursive sizes (slower)
-await client.info({ path: "/data/uploads", computeSizes: true });
-
-// Download file (returns streaming Response)
-await client.download({ path: "/data/file.txt" });
-
-// Download and open in browser (inline)
-await client.download({ path: "/data/image.png", inline: true });
-
-// Download directory as TAR archive
-await client.download({ path: "/data/folder" });
-
-// Simple upload
-await client.upload.single({
-  path: "/data/uploads",
-  filename: "file.txt",
-  data: buffer,
-  uid: 1000,
-  gid: 1000,
-  mode: "644",
-});
-
-// Chunked upload
-await client.upload.chunked.start({ ... });
-await client.upload.chunked.send({ ... });
-
-// Create directory
-await client.mkdir({ path: "/data/new-folder", mode: "755" });
-
-// Delete file or directory
-await client.delete({ path: "/data/old-file.txt" });
-
-// Transfer: Move or copy files/directories
-await client.transfer({
-  from: "/data/old.txt",
-  to: "/data/new.txt",
-  mode: "move",  // or "copy"
-});
-
-// Transfer with ownership (required for cross-base copy)
-await client.transfer({
-  from: "/data/file.txt",
-  to: "/backup/file.txt",
-  mode: "copy",
-  uid: 1000,
-  gid: 1000,
-  fileMode: "644",
-  dirMode: "755",
-  ensureUniqueName: true,  // default: append -01, -02 if target exists
-});
-
-// Search files with glob patterns
-await client.glob({
-  paths: ["/data/uploads"],
-  pattern: "**/*.pdf",
-  limit: 50,
-});
-
-// Search directories only
-await client.glob({
-  paths: ["/data"],
-  pattern: "**/*",
-  files: false,
-  directories: true,
-});
-
-// Search both files and directories
-await client.glob({
-  paths: ["/data"],
-  pattern: "**/*",
-  directories: true,
-});
-
-// Generate image thumbnail
-await client.thumbnail.image({
-  path: "/data/photo.jpg",
-  width: 200,
-  height: 200,
-  fit: "cover",
-  position: "center",
-  format: "webp",
-  quality: 80,
-});
-```
-
-### Response Format
-
-All methods return a discriminated union:
-
-```typescript
-type Response<T> = 
-  | { ok: true; data: T }
-  | { ok: false; error: string; status: number };
-
-const result = await client.info({ path: "/data/file.txt" });
-
-if (result.ok) {
-  console.log(result.data.size);
-} else {
-  console.error(result.error); // "not found", "path not allowed", etc.
-}
-```
-
-## Browser Utilities
-
-Utilities for chunked uploads that work both in the browser and on the server. They handle file chunking, SHA-256 checksum calculation, progress tracking, and retry logic.
-
-```typescript
-import { chunks, formatBytes } from "@valentinkolb/filegate/utils";
-
-// Prepare a file for chunked upload
-const upload = await chunks.prepare({
-  file: fileInput.files[0],
-  chunkSize: 5 * 1024 * 1024,
-});
-
-console.log(upload.checksum);    // "sha256:..."
-console.log(upload.totalChunks); // Number of chunks
-console.log(formatBytes({ bytes: upload.fileSize })); // "52.4 MB"
-
-// Subscribe to progress updates
-upload.subscribe((state) => {
-  console.log(`${state.percent}% - ${state.status}`);
-});
-
-// Upload all chunks with retry and concurrency
-await upload.sendAll({
-  skip: alreadyUploadedChunks,
-  retries: 3,
-  concurrency: 3,
-  fn: async ({ index, data }) => {
-    await fetch("/api/upload/chunk", {
-      method: "POST",
-      headers: {
-        "X-Upload-Id": uploadId,
-        "X-Chunk-Index": String(index),
-      },
-      body: data,
-    });
-  },
-});
-```
-
-## API Endpoints
-
-All `/files/*` endpoints require `Authorization: Bearer <token>`.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| GET | `/docs` | OpenAPI documentation (Scalar UI) |
-| GET | `/openapi.json` | OpenAPI specification |
-| GET | `/llms.txt` | LLM-friendly markdown documentation |
-| GET | `/files/info` | Get file or directory info. Use `?computeSizes=true` for recursive dir sizes |
-| GET | `/files/content` | Download file or directory (TAR). Use `?inline=true` to view in browser |
-| PUT | `/files/content` | Upload file |
-| POST | `/files/mkdir` | Create directory |
-| DELETE | `/files/delete` | Delete file or directory |
-| POST | `/files/transfer` | Move or copy file/directory. Cross-base copy requires ownership |
-| GET | `/files/search` | Search with glob pattern. Use `?directories=true` to include folders |
-| POST | `/files/upload/start` | Start or resume chunked upload |
-| POST | `/files/upload/chunk` | Upload a chunk |
-| GET | `/files/thumbnail/image` | Generate image thumbnail on-the-fly |
-
-## Security
-
-Filegate implements multiple security layers:
-
-- **Path validation**: All paths are validated against allowed base paths
-- **Symlink protection**: Symlinks pointing outside base paths are blocked
-- **Path traversal prevention**: Sequences like `../` are normalized and checked
-- **Size limits**: Configurable limits for uploads, downloads, and chunks
-- **Search limits**: Glob pattern complexity is limited to prevent DoS
-- **Secure headers**: X-Frame-Options, X-Content-Type-Options, etc.
-
-## Development
+### 1. Build
 
 ```bash
-# Install dependencies
-bun install
-
-# Run server
-FILE_PROXY_TOKEN=dev ALLOWED_BASE_PATHS=/tmp bun run src/index.ts
-
-# Run tests
-bun run test:unit
-bun run test:integration:run
+go build -o ./bin/filegate ./cmd/filegate
 ```
+
+### 2. Minimal config
+
+```yaml
+# conf.yaml
+server:
+  listen: ":8080"
+
+auth:
+  bearer_token: "dev-token"
+
+storage:
+  base_paths:
+    - /tmp/filegate-data
+  index_path: /tmp/filegate-index
+```
+
+### 3. Start
+
+```bash
+mkdir -p /tmp/filegate-data /tmp/filegate-index
+./bin/filegate serve --config ./conf.yaml
+```
+
+### 4. Smoke test
+
+```bash
+curl -sS -H 'Authorization: Bearer dev-token' \
+  http://127.0.0.1:8080/v1/paths/
+```
+
+## Documentation
+
+- Docs index: [docs/README.md](https://github.com/ValentinKolb/filegate/blob/main/docs/README.md)
+- CLI reference: [docs/cli.md](https://github.com/ValentinKolb/filegate/blob/main/docs/cli.md)
+- HTTP routes: [docs/http-routes.md](https://github.com/ValentinKolb/filegate/blob/main/docs/http-routes.md)
+- Architecture + index internals: [docs/architecture.md](https://github.com/ValentinKolb/filegate/blob/main/docs/architecture.md)
+- Assumptions and behavior: [docs/behavior-and-assumptions.md](https://github.com/ValentinKolb/filegate/blob/main/docs/behavior-and-assumptions.md)
+- TS client in depth: [docs/ts-client.md](https://github.com/ValentinKolb/filegate/blob/main/docs/ts-client.md)
+- Benchmarks: [docs/benchmarks.md](https://github.com/ValentinKolb/filegate/blob/main/docs/benchmarks.md)
+- Deployment: [docs/deployment.md](https://github.com/ValentinKolb/filegate/blob/main/docs/deployment.md)
+- Sysadmin guide: [docs/sysadmin.md](https://github.com/ValentinKolb/filegate/blob/main/docs/sysadmin.md)
+- Code patterns: [docs/code-patterns.md](https://github.com/ValentinKolb/filegate/blob/main/docs/code-patterns.md)
+
+## Benchmarks and Tests
+
+```bash
+make test
+make test-race
+make fuzz-smoke
+make bench-go
+make bench-http
+make bench-compose
+```
+
+## Agent Skills
+
+- TS integration skill: [skills/filegate-ts-client/SKILL.md](https://github.com/ValentinKolb/filegate/blob/main/skills/filegate-ts-client/SKILL.md)
+- Repo engineering skill: [skills/filegate-repo-agent/SKILL.md](https://github.com/ValentinKolb/filegate/blob/main/skills/filegate-repo-agent/SKILL.md)
+
+## Contributing (Short)
+
+1. Keep Linux production behavior stable and explicit.
+2. Add tests for every behavior change.
+3. Run `make test` and `make bench-go` before opening PRs.
+4. Update docs in the same change when API/ops behavior changes.
 
 ## License
 
-MIT
+MIT, see [LICENSE](https://github.com/ValentinKolb/filegate/blob/main/LICENSE).

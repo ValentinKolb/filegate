@@ -1,0 +1,67 @@
+version: 2
+
+project_name: filegate
+
+builds:
+  - id: filegate
+    main: ./cmd/filegate
+    binary: filegate
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - id: binaries
+    ids:
+      - filegate
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true
+
+nfpms:
+  - id: packages
+    package_name: filegate
+    description: Filegate filesystem gateway
+    maintainer: Valentin Kolb <valentinkolb@users.noreply.github.com>
+    license: MIT
+    vendor: filegate
+    homepage: https://github.com/valentinkolb/filegate
+    section: utils
+    priority: optional
+    formats:
+      - deb
+      - rpm
+    ids:
+      - filegate
+    bindir: /usr/bin
+    scripts:
+      preinstall: packaging/scripts/preinstall.sh
+      postinstall: packaging/scripts/postinstall.sh
+      postremove: packaging/scripts/postremove.sh
+    contents:
+      - src: packaging/config/conf.yaml
+        dst: /etc/filegate/conf.yaml
+        type: config|noreplace
+      - src: packaging/systemd/filegate.service
+        dst: /lib/systemd/system/filegate.service
+      - dst: /var/lib/filegate
+        type: dir
+      - dst: /var/log/filegate
+        type: dir

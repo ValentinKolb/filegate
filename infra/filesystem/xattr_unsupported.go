@@ -1,0 +1,17 @@
+//go:build !linux
+
+package filesystem
+
+import (
+	"fmt"
+
+	"github.com/valentinkolb/filegate/domain"
+)
+
+func setID(_ string, _ domain.FileID) error {
+	return fmt.Errorf("xattr only supported on linux builds")
+}
+
+func getID(_ string) (domain.FileID, error) {
+	return domain.FileID{}, fmt.Errorf("xattr only supported on linux builds")
+}

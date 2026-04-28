@@ -1,32 +1,50 @@
-# dependencies (bun install)
-node_modules
-
-# output
-out
-dist
+# Build output
+bin/
+out/
+dist/
 *.tgz
+*.deb
+*.rpm
+# Local-build daemon binary at the repo root (produced by `go build ./cmd/filegate`)
+/filegate
 
-# code coverage
-coverage
+# Go artifacts
+*.test
+*.prof
+*.coverprofile
+coverage.out
+
+# Bench artifacts
+*.bench.out
+filegate_*_bench.out
+bench/results/*.csv
+bench/results/*.txt
+
+# JS/TS tooling (optional local usage)
+node_modules/
+.cache/
+.eslintcache
+*.tsbuildinfo
+coverage/
 *.lcov
 
-# logs
-logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+# Logs
+logs/
+*.log
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
-# dotenv environment variable files
+# Env files
 .env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
+.env.*
+!.env.example
 
-# caches
-.eslintcache
-.cache
-*.tsbuildinfo
-
-# misc
+# Editor / OS
 .DS_Store
-.claude
+.vscode/
+.idea/
+
+# Local agent config
+.claude/
+
+# Local roadmap / scratch notes (not part of the published repo)
+todo.md

@@ -1,40 +1,24 @@
 services:
   filegate:
-    image: ghcr.io/valentinkolb/filegate:latest
+    build: .
     ports:
-      - "4000:4000"
+      - "8080:8080"
     environment:
-      # Required
-      FILE_PROXY_TOKEN: "your-secret-token-here"
-      ALLOWED_BASE_PATHS: "/data/homes,/data/groups"
-
-      # Optional (defaults shown)
-      # PORT: 4000
-
-      # Size limits
-      # MAX_UPLOAD_MB: 500             # Max file size (simple + chunked uploads)
-      # MAX_DOWNLOAD_MB: 5000          # Max download size (files + directories)
-      # MAX_CHUNK_SIZE_MB: 50          # Max chunk size (client must respect this)
-
-      # Chunked upload settings
-      # UPLOAD_EXPIRY_HOURS: 24        # Hours until incomplete uploads expire
-      # DISK_CLEANUP_INTERVAL_HOURS: 6 # Cleanup interval for expired uploads
-      # UPLOAD_TEMP_DIR: /tmp/filegate-uploads
-
-      # Search
-      # SEARCH_MAX_RESULTS: 100
-
-      # Dev mode (override ownership for local testing)
-      # DEV_UID_OVERRIDE: 1000
-      # DEV_GID_OVERRIDE: 1000
+      FILEGATE_AUTH_BEARER_TOKEN: "your-secret-token-here"
+      FILEGATE_STORAGE_BASE_PATHS: "/data/homes,/data/groups"
+      FILEGATE_STORAGE_INDEX_PATH: "/var/lib/filegate/index"
+      FILEGATE_SERVER_LISTEN: ":8080"
+      FILEGATE_SERVER_WRITE_TIMEOUT: "5m"
+      FILEGATE_DETECTION_POLL_INTERVAL: "3s"
+      FILEGATE_UPLOAD_EXPIRY: "24h"
+      FILEGATE_UPLOAD_CLEANUP_INTERVAL: "6h"
+      FILEGATE_UPLOAD_MAX_CHUNK_BYTES: "52428800"     # 50 MiB
+      FILEGATE_UPLOAD_MAX_UPLOAD_BYTES: "524288000"   # 500 MiB
     volumes:
-      # Mount your file storage directories
       - /export/homes:/data/homes
       - /export/groups:/data/groups
-
-      # Persistent temp dir for resumable uploads (survives container restarts)
-      - filegate-chunks:/tmp/filegate-uploads
+      - filegate-index:/var/lib/filegate/index
     restart: unless-stopped
 
 volumes:
-  filegate-chunks:
+  filegate-index:

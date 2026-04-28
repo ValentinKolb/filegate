@@ -1,0 +1,40 @@
+{
+  "name": "@valentinkolb/filegate",
+  "version": "0.0.0",
+  "description": "TypeScript client for the Filegate filesystem gateway",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./utils": {
+      "types": "./dist/utils.d.ts",
+      "import": "./dist/utils.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "filegate",
+    "filesystem",
+    "gateway",
+    "client",
+    "sdk"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.8"
+  }
+}

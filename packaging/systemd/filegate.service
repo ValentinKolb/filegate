@@ -1,0 +1,28 @@
+[Unit]
+Description=Filegate filesystem gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=filegate
+Group=filegate
+ExecStart=/usr/bin/filegate serve --config /etc/filegate/conf.yaml
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/filegate /var/log/filegate
+RuntimeDirectory=filegate
+RuntimeDirectoryMode=0750
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

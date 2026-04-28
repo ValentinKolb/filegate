@@ -1,26 +1,28 @@
 services:
   filegate:
     build: .
+    user: "0:0"
     ports:
-      - "4111:4000"
+      - "4111:8080"
     environment:
-      FILE_PROXY_TOKEN: "test-integration-token"
-      ALLOWED_BASE_PATHS: "/data"
-      MAX_UPLOAD_MB: 100
-      MAX_DOWNLOAD_MB: 200
-      MAX_CHUNK_SIZE_MB: 10
-      UPLOAD_EXPIRY_HOURS: 1
-      SEARCH_MAX_RESULTS: 50
+      FILEGATE_AUTH_BEARER_TOKEN: "test-integration-token"
+      FILEGATE_SERVER_LISTEN: ":8080"
+      FILEGATE_STORAGE_BASE_PATHS: "/data"
+      FILEGATE_STORAGE_INDEX_PATH: "/var/lib/filegate/index"
+      FILEGATE_UPLOAD_EXPIRY: "1h"
+      FILEGATE_UPLOAD_CLEANUP_INTERVAL: "10m"
+      FILEGATE_UPLOAD_MAX_CHUNK_BYTES: "10485760"   # 10 MiB
+      FILEGATE_UPLOAD_MAX_UPLOAD_BYTES: "104857600" # 100 MiB
     volumes:
       - filegate-test-data:/data
-      - filegate-test-chunks:/tmp/filegate-uploads
+      - filegate-test-index:/var/lib/filegate/index
     healthcheck:
       test:
         [
           "CMD",
-          "bun",
-          "-e",
-          "fetch('http://localhost:4000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))",
+          "/app/filegate",
+          "index",
+          "stats",
         ]
       interval: 2s
       timeout: 5s
@@ -29,4 +31,4 @@ services:
 
 volumes:
   filegate-test-data:
-  filegate-test-chunks:
+  filegate-test-index:

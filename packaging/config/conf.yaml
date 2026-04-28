@@ -1,0 +1,43 @@
+server:
+  listen: ":8080"
+  write_timeout: "5m"
+  access_log_enabled: true
+
+auth:
+  # Set a strong token before starting the service.
+  bearer_token: "CHANGE_ME"
+
+storage:
+  base_paths:
+    - /var/lib/filegate/data
+  index_path: /var/lib/filegate/index
+
+detection:
+  backend: auto
+  poll_interval: "3s"
+
+cache:
+  path_cache_size: 100000
+
+jobs:
+  workers: 0
+  queue_size: 8192
+  thumbnail_workers: 0
+  thumbnail_queue_size: 0
+  exif_workers: 0
+  exif_queue_size: 0
+  exif_fast_path_timeout: "5ms"
+
+upload:
+  expiry: "24h"
+  cleanup_interval: "6h"
+  max_chunk_bytes: 52428800
+  max_upload_bytes: 524288000
+  max_chunked_upload_bytes: 53687091200
+  max_concurrent_chunk_writes: 0
+  min_free_bytes: 67108864
+
+thumbnail:
+  lru_cache_size: 1024
+  max_source_bytes: 67108864
+  max_pixels: 40000000

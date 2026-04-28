@@ -1,0 +1,143 @@
+# Verification Gates
+
+The minimum bar before you say "done". In order; stop at the first failure and fix.
+
+## 1. Build clean
+
+```bash
+go build ./...
+```
+
+No errors, no warnings (the macOS LC_DYSYMTAB linker warning when running with `-race` is benign and known — ignore it).
+
+## 2. `go vet`
+
+```bash
+go vet ./...
+```
+
+Must be silent.
+
+## 3. `staticcheck`
+
+```bash
+out=$($(go env GOPATH)/bin/staticcheck ./... 2>&1)
+echo "$out" | grep -q "matched no packages" && { echo "STATICCHECK SAW NO PACKAGES — wrong cwd?"; exit 1; }
+[ -n "$out" ] && { echo "$out"; exit 1; }
+echo "staticcheck: clean"
+```
+
+Install once: `go install honnef.co/go/tools/cmd/staticcheck@latest`.
+
+**Critical guard**: `staticcheck` exits 0 even when it prints
+`warning: "./..." matched no packages` (e.g. when run from a directory
+with no Go files, or when the module isn't selected). A bare `staticcheck
+./...` with empty output looks identical to "all clean" — but means
+"didn't lint anything". Always grep for the warning string OR confirm at
+least one expected check ran. The snippet above does both.
+
+## 4. Dead code
+
+```bash
+$(go env GOPATH)/bin/deadcode -test ./...
+```
+
+Install once: `go install golang.org/x/tools/cmd/deadcode@latest`. Acceptable false positives in this repo:
+
+- SDK methods (`sdk/filegate/...`) — public library API used by external consumers.
+- Some functions guarded by `//go:build linux` aren't seen on macOS.
+
+Anything else: delete it in the same commit, or justify why it must stay.
+
+## 5. Tests on macOS
+
+```bash
+go test -count=1 ./...
+```
+
+Catches non-Linux-tagged regressions. Fast.
+
+## 6. Race tests
+
+```bash
+go test -count=20 -race ./<changed-pkg>
+```
+
+For anything with goroutines, run the changed package 20× under `-race`. If your change touches a shared package (jobs, pebble, domain), include those packages too.
+
+## 7. Linux Docker tests
+
+```bash
+docker run --rm -v "$PWD":/src -w /src golang:1.25 sh -c "go test ./..."
+```
+
+The bulk of HTTP, domain, and CLI tests are Linux-tagged because they exercise xattr, btrfs, real-FS atomic operations. They MUST pass before merge.
+
+For higher-confidence runs (pre-PR or after touching shared infra):
+
+```bash
+docker run --rm -v "$PWD":/src -w /src golang:1.25 sh -c "go test -count=2 -race ./..."
+```
+
+## 8. Fuzz smoke
+
+```bash
+make fuzz-smoke
+```
+
+10 seconds per fuzz target × 4 targets. Required if your change touched:
+
+- `infra/fgbin/` (record codec)
+- `adapter/http/upload_chunked.go` (chunk hashing/writing)
+- Anything else with explicit fuzz coverage
+
+If a target finds a new crasher, the input is saved under `testdata/fuzz/<FuncName>/` — commit it and fix the underlying bug.
+
+## 9. TS SDK build (when SDK changed)
+
+From the repo root:
+
+```bash
+(cd sdk/ts && rm -rf dist && npm run build)
+```
+
+Must finish with no `tsc` errors. If you added new fields/methods, also run
+a quick smoke import to confirm the published shape — from the repo root:
+
+```bash
+node -e 'import("./sdk/ts/dist/index.js").then(m => console.log(Object.keys(m)))'
+```
+
+(If you `cd sdk/ts` first, the import path becomes `./dist/index.js`. Pick
+one and stick with it; the example above stays in the repo root.)
+
+## 10. Docs sync (when API changed)
+
+If you changed any of:
+
+- `api/v1/types.go` (wire contract)
+- `adapter/http/router.go` route handlers (added/removed/renamed an endpoint)
+- `cli/` command surface
+- The TS or Go SDK public surface
+
+Then update the corresponding docs in the same commit:
+
+- `docs/http-routes.md` — for HTTP API
+- `docs/ts-client.md` — for TS SDK changes
+- `docs/cli.md` — for CLI changes
+- `README.md` — for top-level user-facing changes
+
+Reviewers look at this. PRs without doc updates for behavior changes get bounced.
+
+## The one-liner pre-PR check
+
+```bash
+go vet ./... && \
+  $(go env GOPATH)/bin/staticcheck ./... && \
+  $(go env GOPATH)/bin/deadcode -test ./... && \
+  docker run --rm -v "$PWD":/src -w /src golang:1.25 sh -c "go test -count=2 -race ./..." && \
+  make fuzz-smoke && \
+  echo "✅ ready for review"
+```
+
+This is what to run before pushing the PR branch.
