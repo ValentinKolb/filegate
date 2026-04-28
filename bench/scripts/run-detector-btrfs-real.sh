@@ -13,4 +13,4 @@ fi
 # Real btrfs E2E detector/index sync test.
 # Requires host btrfs tooling and subvolume create/delete permissions.
 FILEGATE_BTRFS_REAL=1 FILEGATE_BTRFS_REAL_ROOT="$BTRFS_ROOT" \
-  go test ./cli -run "TestConsumeDetectorEventsWithRealBTRFS" -count=1 -v
+  go test ./cli -run 'TestConsumeDetectorEventsWithRealBTRFS|TestBTRFSReal' -count=1 -v

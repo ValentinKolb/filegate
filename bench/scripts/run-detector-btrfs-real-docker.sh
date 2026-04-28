@@ -22,6 +22,6 @@ mount -o loop /var/tmp/filegate-btrfs/disk.img /var/tmp/filegate-btrfs/mnt
 btrfs filesystem show /var/tmp/filegate-btrfs/mnt
 export FILEGATE_BTRFS_REAL=1
 export FILEGATE_BTRFS_REAL_ROOT=/var/tmp/filegate-btrfs/mnt
-/usr/local/go/bin/go test ./cli -run TestConsumeDetectorEventsWithRealBTRFS -count=1 -v
+/usr/local/go/bin/go test ./cli -run 'TestConsumeDetectorEventsWithRealBTRFS|TestBTRFSReal' -count=1 -v
 umount /var/tmp/filegate-btrfs/mnt
 "
