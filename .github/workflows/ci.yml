@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  vet-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -count=1 ./...
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: race tests on hot packages
+        run: go test -count=5 -race ./adapter/http ./domain ./infra/pebble ./infra/jobs ./infra/eventbus
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      - name: run staticcheck
+        run: |
+          out=$("$(go env GOPATH)/bin/staticcheck" ./... 2>&1)
+          if echo "$out" | grep -q "matched no packages"; then
+            echo "staticcheck saw no packages"
+            exit 1
+          fi
+          if [ -n "$out" ]; then
+            echo "$out"
+            exit 1
+          fi
+          echo "staticcheck: clean"
+
+  detector-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: detector + index sync regression tests
+        run: make test-detector-linux
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: fuzz smoke (10s per target)
+        run: make fuzz-smoke
+
+  ts-sdk-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install
+        working-directory: sdk/ts
+        run: npm install
+      - name: build
+        working-directory: sdk/ts
+        run: npm run build
