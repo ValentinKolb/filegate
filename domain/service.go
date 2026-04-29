@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -640,6 +641,7 @@ func (s *Service) ListNodeChildren(parentID FileID, cursor string, pageSize int,
 	items := make([]FileMeta, 0, pageSize)
 	remainingNodes := 300_000
 	deadline := time.Now().Add(2 * time.Second)
+	parentVP, parentVPErr := s.VirtualPath(parentID)
 	for _, entry := range entries {
 		childMeta, err := s.GetFile(entry.ID)
 		if err != nil {
@@ -650,7 +652,17 @@ func (s *Service) ListNodeChildren(parentID FileID, cursor string, pageSize int,
 				childMeta.Size = size
 			}
 		}
-		items = append(items, *childMeta)
+		// Override Name + Path with the directory entry's view, not the
+		// entity's stored canonical name. For hardlinks two dirents may
+		// share an entity ID but each must surface under its own name in
+		// a directory listing — otherwise listing the dir would return
+		// duplicates of the entity's canonical name.
+		copyMeta := *childMeta
+		copyMeta.Name = entry.Name
+		if parentVPErr == nil {
+			copyMeta.Path = parentVP + "/" + entry.Name
+		}
+		items = append(items, copyMeta)
 	}
 
 	listed := &ListedNodes{Items: items}
@@ -1960,7 +1972,7 @@ func (s *Service) resolveOrReissueID(absPath string, info os.FileInfo) (FileID, 
 	// duplicate. Verify by stat'ing the recorded path. If it's gone or
 	// at a different inode, the recorded entity is stale and it's safe
 	// to take over its ID. Otherwise, re-issue.
-	existingAbs, err := s.absPathFromEntity(existing)
+	existingAbs, err := s.claimedAbsPath(existing)
 	if err != nil || existingAbs == absPath {
 		return id, nil
 	}
@@ -2001,15 +2013,19 @@ func (s *Service) mintAndSetID(absPath string) (FileID, error) {
 	return id, nil
 }
 
-// absPathFromEntity reconstructs the absolute filesystem path that an
-// entity record claims to live at, by walking parent IDs to a known mount
-// root. Returns ErrNotFound if the parent chain is broken.
-func (s *Service) absPathFromEntity(e *Entity) (string, error) {
+// claimedAbsPath reconstructs the absolute filesystem path that an entity
+// record claims to live at, by joining its parent's path with its Name.
+// Distinct from ResolveAbsPath which runs EvalSymlinks via safeResolvedPath
+// and returns ErrForbidden when the resolved real path falls outside the
+// watched mount — that's the right semantics for the public API but wrong
+// here, where we want the literal path the entity record stores so we
+// can ask "does THAT path still exist with the expected inode?" without
+// dereferencing whatever symlink chain may have grown over it.
+func (s *Service) claimedAbsPath(e *Entity) (string, error) {
 	if e == nil {
 		return "", ErrNotFound
 	}
 	if e.ParentID.IsZero() {
-		// Mount root.
 		return s.ResolveAbsPath(e.ID)
 	}
 	parentAbs, err := s.ResolveAbsPath(e.ParentID)
@@ -2020,23 +2036,18 @@ func (s *Service) absPathFromEntity(e *Entity) (string, error) {
 }
 
 func (s *Service) syncSingle(absPath string) error {
-	linfo, err := os.Lstat(absPath)
+	// Lstat is sufficient for the symlink check AND the metadata path.
+	// For non-symlinks Lstat == Stat, and we already reject symlinks
+	// here — so the second Stat call would be a redundant syscall.
+	info, err := os.Lstat(absPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
 		}
 		return err
 	}
-	if linfo.Mode()&os.ModeSymlink != 0 {
+	if info.Mode()&os.ModeSymlink != 0 {
 		return ErrForbidden
-	}
-
-	info, err := s.store.Stat(absPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
-		}
-		return err
 	}
 
 	id, err := s.resolveOrReissueID(absPath, info)
@@ -2079,25 +2090,16 @@ func (s *Service) syncSingle(absPath string) error {
 	s.invalidateCacheByID(id)
 	if parentVP, err := s.VirtualPath(parentID); err == nil {
 		s.InvalidatePathCache(parentVP)
-		// Also invalidate the file's own virtual path. The parent-only
-		// invalidation above only removes the parentVP entry; the
-		// child's path -> ID cache entry survives. When sync produces a
-		// new ID for an existing path (e.g. xattr was removed or
-		// corrupted and we reissued), ResolvePath would otherwise keep
-		// returning the stale ID forever.
+		// Also invalidate the file's own VP — InvalidatePathCache only
+		// removes the exact key, and a re-issued ID at an existing path
+		// would otherwise keep returning the stale ID via cache.
 		s.InvalidatePathCache(parentVP + "/" + name)
 	}
 	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: absPath, At: time.Now()})
-
-	// Stale child-entry cleanup is the responsibility of the consumer's
-	// directory-sync pass (Service.ReconcileDirectory), not syncSingle.
-	// That separation lets snapshot/cp-a duplicates coexist as separate
-	// entities without the per-sync inode reconciler stomping over the
-	// shared-name conflict.
 	return nil
 }
 
-func (s *Service) mountForAbsPath(absPath string) (mountName, basePath, rel string, ok bool) {
+func (s *Service) mountForAbsPath(absPath string) (mountName, rel string, ok bool) {
 	absPath = filepath.Clean(absPath)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2116,20 +2118,20 @@ func (s *Service) mountForAbsPath(absPath string) (mountName, basePath, rel stri
 		}
 	}
 	if bestLen < 0 {
-		return "", "", "", false
+		return "", "", false
 	}
 	relative, err := filepath.Rel(bestBase, absPath)
 	if err != nil {
-		return "", "", "", false
+		return "", "", false
 	}
 	if relative == "." {
 		relative = ""
 	}
-	return bestName, bestBase, relative, true
+	return bestName, relative, true
 }
 
 func (s *Service) virtualPathFromAbs(absPath string) (string, error) {
-	mountName, _, rel, ok := s.mountForAbsPath(absPath)
+	mountName, rel, ok := s.mountForAbsPath(absPath)
 	if !ok {
 		return "", ErrForbidden
 	}
@@ -2228,7 +2230,7 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 		return nil
 	}
 	// Only reconcile inside a mount.
-	if _, _, _, ok := s.mountForAbsPath(parentAbsPath); !ok {
+	if _, _, ok := s.mountForAbsPath(parentAbsPath); !ok {
 		return nil
 	}
 	parentID, err := s.store.GetID(parentAbsPath)
@@ -2318,27 +2320,25 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 		}
 		childAbs := filepath.Join(parentAbsPath, e.Name())
 		if syncErr := s.syncSingle(childAbs); syncErr != nil && !errors.Is(syncErr, ErrNotFound) && !errors.Is(syncErr, ErrForbidden) {
-			// Non-trivial errors get swallowed with a log so an
-			// unstattable child doesn't poison the whole directory sync.
-			// The next ReconcileDirectory call will retry.
-			continue
+			// Per-child errors are logged, not fatal: an unstattable
+			// child must not poison the whole directory sync. The next
+			// ReconcileDirectory pass retries.
+			log.Printf("[filegate] ReconcileDirectory: syncSingle(%q) failed: %v", childAbs, syncErr)
 		}
 	}
 	return nil
 }
 
 func (s *Service) deleteSubtree(rootID FileID) error {
-	rootEntity, err := s.idx.GetEntity(rootID)
-	if err != nil {
+	if _, err := s.idx.GetEntity(rootID); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
 		return err
 	}
-	// Capture the absolute path before we tear down the index entry, so the
-	// EventDeleted we publish below carries a meaningful Path field.
+	// Capture the path BEFORE the entity is torn down so the EventDeleted
+	// we publish at the end carries a meaningful Path field.
 	rootAbsPath, _ := s.ResolveAbsPath(rootID)
-	_ = rootEntity // value retained for the path lookup above
 
 	stack := []FileID{rootID}
 	order := make([]Entity, 0, 64)
@@ -2414,7 +2414,7 @@ func (s *Service) RescanMount(absPath string) error {
 	if absPath == "" {
 		return ErrInvalidArgument
 	}
-	mountName, _, _, ok := s.mountForAbsPath(absPath)
+	mountName, _, ok := s.mountForAbsPath(absPath)
 	if !ok {
 		return nil
 	}
@@ -2484,6 +2484,10 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 	seen := make(map[FileID]struct{}, 1024)
 	collected := make([]scanned, 0, 1024)
 	targetRootIDs := make(map[FileID]struct{}, len(s.mountIDByName))
+	// dirAbsPathsVisited captures every directory the walk descended into,
+	// in walk order. Used at the end to fire ReconcileDirectory on each so
+	// stale child edges (which the entity-level prune misses) get cleaned.
+	dirAbsPathsVisited := make([]string, 0, 64)
 
 	for _, mountName := range s.mountNames {
 		if targetMounts != nil {
@@ -2505,6 +2509,8 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 		rootEntity := buildEntityMetadata(mountID, FileID{}, mountName, basePath, info)
 		seen[mountID] = struct{}{}
 		collected = append(collected, scanned{entity: rootEntity})
+		// Mount root is itself a directory the walk just visited.
+		dirAbsPathsVisited = append(dirAbsPathsVisited, basePath)
 
 		pathToID := map[string]FileID{basePath: mountID}
 		err = filepath.WalkDir(basePath, func(current string, d os.DirEntry, walkErr error) error {
@@ -2541,6 +2547,9 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 			}
 			seen[id] = struct{}{}
 			pathToID[current] = id
+			if d.IsDir() {
+				dirAbsPathsVisited = append(dirAbsPathsVisited, current)
+			}
 			entity := buildEntityMetadata(id, parentID, d.Name(), current, info)
 			collected = append(collected, scanned{
 				entity: entity,
@@ -2615,6 +2624,19 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 			return nil
 		}); err != nil {
 			return err
+		}
+	}
+
+	// Final dir-sync pass: reconcile each visited directory against its
+	// on-disk readdir. The entity-level prune above only drops entities
+	// not seen in the FS walk, but stale child EDGES that point at a
+	// still-living shared entity (hardlink alias unlinked while the
+	// gateway was offline, snapshot file removed but the originals
+	// survive, etc.) are invisible to the entity prune. ReconcileDirectory
+	// catches those.
+	for _, parentAbs := range dirAbsPathsVisited {
+		if err := s.ReconcileDirectory(parentAbs); err != nil {
+			log.Printf("[filegate] Rescan: ReconcileDirectory(%q) failed: %v", parentAbs, err)
 		}
 	}
 

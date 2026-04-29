@@ -90,15 +90,7 @@ func TestBTRFSRealCrossSubvolumeMove(t *testing.T) {
 	go consumeDetectorEvents(ctx, svc, runner.Events())
 
 	src := filepath.Join(subvolA, "moving.txt")
-	if err := os.WriteFile(src, []byte("xsubvol"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(src, []byte("xsubvol"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootA + "/moving.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, src, rootA + "/moving.txt", []byte("xsubvol"))
 
 	dst := filepath.Join(subvolB, "moved.txt")
 	if err := os.Rename(src, dst); err != nil {
@@ -134,15 +126,7 @@ func TestBTRFSRealSnapshotInsideWatchedTree(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	original := filepath.Join(subvol, "snap-source.txt")
-	if err := os.WriteFile(original, []byte("source-payload"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(original, []byte("source-payload"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/snap-source.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, original, rootName + "/snap-source.txt", []byte("source-payload"))
 	originalID, err := svc.ResolvePath(rootName + "/snap-source.txt")
 	if err != nil {
 		t.Fatalf("resolve original: %v", err)
@@ -236,15 +220,7 @@ func TestBTRFSRealFallocateExtension(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "fallocate.bin")
-	if err := os.WriteFile(target, []byte("seed"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("seed"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/fallocate.bin")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/fallocate.bin", []byte("seed"))
 
 	const finalSize int64 = 8 << 20
 	f, err := os.OpenFile(target, os.O_RDWR, 0o644)
@@ -280,15 +256,7 @@ func TestBTRFSRealFIFOIsSkipped(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	regular := filepath.Join(subvol, "alongside-fifo.txt")
-	if err := os.WriteFile(regular, []byte("normal"), 0o644); err != nil {
-		t.Fatalf("seed regular: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(regular, []byte("normal"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/alongside-fifo.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, regular, rootName + "/alongside-fifo.txt", []byte("normal"))
 
 	fifoPath := filepath.Join(subvol, "the-fifo")
 	if err := syscall.Mkfifo(fifoPath, 0o644); err != nil {
@@ -325,15 +293,7 @@ func TestBTRFSRealUnixSocketIsSkipped(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	regular := filepath.Join(subvol, "alongside-socket.txt")
-	if err := os.WriteFile(regular, []byte("normal"), 0o644); err != nil {
-		t.Fatalf("seed regular: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(regular, []byte("normal"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/alongside-socket.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, regular, rootName + "/alongside-socket.txt", []byte("normal"))
 
 	sockPath := filepath.Join(subvol, "the-socket")
 	listener, err := net.Listen("unix", sockPath)
@@ -460,15 +420,7 @@ func TestBTRFSRealLongFilenameNearLimit(t *testing.T) {
 
 	longName := strings.Repeat("x", 250) + ".txt"
 	target := filepath.Join(subvol, longName)
-	if err := os.WriteFile(target, []byte("long"), 0o644); err != nil {
-		t.Fatalf("write long-name: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("long"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/" + longName)
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/" + longName, []byte("long"))
 }
 
 // TestBTRFSRealNewlineInFilename creates a file with an embedded newline
@@ -482,15 +434,7 @@ func TestBTRFSRealNewlineInFilename(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	regular := filepath.Join(subvol, "alongside-newline.txt")
-	if err := os.WriteFile(regular, []byte("normal"), 0o644); err != nil {
-		t.Fatalf("seed regular: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(regular, []byte("normal"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/alongside-newline.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, regular, rootName + "/alongside-newline.txt", []byte("normal"))
 
 	weird := "weird\nname.txt"
 	target := filepath.Join(subvol, weird)
@@ -538,15 +482,7 @@ func TestBTRFSRealLargeDirectoryFanout(t *testing.T) {
 	}
 	// Sentinel to walk past loopback init race before the burst.
 	sentinel := filepath.Join(dir, "_sentinel.txt")
-	if err := os.WriteFile(sentinel, []byte("s"), 0o644); err != nil {
-		t.Fatalf("sentinel: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(sentinel, []byte("s"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/fanout/_sentinel.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, sentinel, rootName + "/fanout/_sentinel.txt", []byte("s"))
 
 	for i := 0; i < n; i++ {
 		p := filepath.Join(dir, fmt.Sprintf("f-%05d.txt", i))
@@ -607,15 +543,7 @@ func TestBTRFSRealConcurrentWritersToDifferentFiles(t *testing.T) {
 
 	// Walk past init race with a sentinel.
 	sentinel := filepath.Join(subvol, "_conc_sentinel.txt")
-	if err := os.WriteFile(sentinel, []byte("s"), 0o644); err != nil {
-		t.Fatalf("sentinel: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(sentinel, []byte("s"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/_conc_sentinel.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, sentinel, rootName + "/_conc_sentinel.txt", []byte("s"))
 
 	const goroutines = 16
 	const perGoroutine = 25
@@ -653,15 +581,7 @@ func TestBTRFSRealConcurrentRenameRace(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	a := filepath.Join(subvol, "race-a.txt")
-	if err := os.WriteFile(a, []byte("payload"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(a, []byte("payload"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/race-a.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, a, rootName + "/race-a.txt", []byte("payload"))
 
 	b := filepath.Join(subvol, "race-b.txt")
 	c := filepath.Join(subvol, "race-c.txt")
@@ -708,15 +628,7 @@ func TestBTRFSRealWriteWhileReading(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "read-while-write.txt")
-	if err := os.WriteFile(target, []byte("first-version"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("first-version"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/read-while-write.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/read-while-write.txt", []byte("first-version"))
 
 	reader, err := os.Open(target)
 	if err != nil {

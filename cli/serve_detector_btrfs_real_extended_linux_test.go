@@ -65,15 +65,7 @@ func TestBTRFSRealAtomicReplaceViaTempRename(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "atomic.txt")
-	if err := os.WriteFile(target, []byte("original-content"), 0o644); err != nil {
-		t.Fatalf("seed target: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("original-content"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/atomic.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/atomic.txt", []byte("original-content"))
 
 	// Atomic-replace: write tmp, then rename over target.
 	tmp := filepath.Join(subvol, "atomic.txt.tmp")
@@ -204,15 +196,7 @@ func TestBTRFSRealMoveOutOfMount(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	src := filepath.Join(subvol, "leaving.txt")
-	if err := os.WriteFile(src, []byte("bye"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(src, []byte("bye"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/leaving.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, src, rootName + "/leaving.txt", []byte("bye"))
 
 	// Use t.TempDir() — guaranteed to be on a different filesystem than the
 	// btrfs loopback mount (it's the container's overlay/tmpfs).
@@ -320,15 +304,7 @@ func TestBTRFSRealExternalXattrRemoval(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "xattr-strip.txt")
-	if err := os.WriteFile(target, []byte("payload"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("payload"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/xattr-strip.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/xattr-strip.txt", []byte("payload"))
 
 	originalID, err := svc.ResolvePath(rootName + "/xattr-strip.txt")
 	if err != nil {
@@ -364,15 +340,7 @@ func TestBTRFSRealCorruptedXattrValue(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "xattr-garbage.txt")
-	if err := os.WriteFile(target, []byte("data"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("data"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/xattr-garbage.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/xattr-garbage.txt", []byte("data"))
 
 	originalID, err := svc.ResolvePath(rootName + "/xattr-garbage.txt")
 	if err != nil {
@@ -407,15 +375,7 @@ func TestBTRFSRealDuplicateIDViaCpA(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	src := filepath.Join(subvol, "original.txt")
-	if err := os.WriteFile(src, []byte("orig"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(src, []byte("orig"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/original.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, src, rootName + "/original.txt", []byte("orig"))
 	originalID, err := svc.ResolvePath(rootName + "/original.txt")
 	if err != nil {
 		t.Fatalf("resolve original: %v", err)
@@ -466,15 +426,7 @@ func TestBTRFSRealSymlinkCreateDeleteRename(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "real-target.txt")
-	if err := os.WriteFile(target, []byte("real"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("real"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/real-target.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/real-target.txt", []byte("real"))
 
 	link := filepath.Join(subvol, "the-link")
 	if err := os.Symlink(target, link); err != nil {
@@ -528,15 +480,7 @@ func TestBTRFSRealUnlinkOneOfHardLinks(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	primary := filepath.Join(subvol, "hl-keep.txt")
-	if err := os.WriteFile(primary, []byte("shared"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(primary, []byte("shared"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/hl-keep.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, primary, rootName + "/hl-keep.txt", []byte("shared"))
 
 	alias := filepath.Join(subvol, "hl-drop.txt")
 	if err := os.Link(primary, alias); err != nil {
@@ -592,15 +536,7 @@ func TestBTRFSRealReflinkCopy(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	src := filepath.Join(subvol, "reflink-src.txt")
-	if err := os.WriteFile(src, []byte("shared-extents"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(src, []byte("shared-extents"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/reflink-src.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, src, rootName + "/reflink-src.txt", []byte("shared-extents"))
 
 	dst := filepath.Join(subvol, "reflink-clone.txt")
 	out, err := exec.Command("cp", "--reflink=always", src, dst).CombinedOutput()
@@ -676,15 +612,7 @@ func TestBTRFSRealTouchMtimeOnly(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "touch.txt")
-	if err := os.WriteFile(target, []byte("static"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("static"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/touch.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/touch.txt", []byte("static"))
 
 	id, err := svc.ResolvePath(rootName + "/touch.txt")
 	if err != nil {
@@ -759,15 +687,7 @@ func TestBTRFSRealRenameOneHardLinkAlias(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	primary := filepath.Join(subvol, "hl-stable.txt")
-	if err := os.WriteFile(primary, []byte("shared"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(primary, []byte("shared"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/hl-stable.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, primary, rootName + "/hl-stable.txt", []byte("shared"))
 
 	alias := filepath.Join(subvol, "hl-rename-me.txt")
 	if err := os.Link(primary, alias); err != nil {
@@ -854,15 +774,7 @@ func TestBTRFSRealOpenWriteUnlinkWithFDOpen(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "fd-pinned.txt")
-	if err := os.WriteFile(target, []byte("alive"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
-		_ = os.WriteFile(target, []byte("alive"), 0o644)
-	}, func() bool {
-		_, err := svc.ResolvePath(rootName + "/fd-pinned.txt")
-		return err == nil
-	})
+	seedAndAwait(t, svc, target, rootName + "/fd-pinned.txt", []byte("alive"))
 
 	// Open a long-lived fd; cancel via context so the deferred close runs
 	// even if the test panics.

@@ -82,6 +82,27 @@ func startRealBTRFSDetector(t *testing.T, subvol string) (*domain.Service, strin
 	return svc, rootName, bus
 }
 
+// seedAndAwait writes payload to absPath and blocks until ResolvePath of
+// virtualPath returns nil. Encapsulates the common "create file then
+// wait for the index to catch up" pattern so individual tests don't
+// repeat the same 8-line waitForResolveWithStimulus boilerplate.
+//
+// For tests that need a more elaborate condition (size match,
+// multiple paths, custom stimulus), call waitForResolveWithStimulus
+// directly instead.
+func seedAndAwait(t *testing.T, svc *domain.Service, absPath, virtualPath string, payload []byte) {
+	t.Helper()
+	if err := os.WriteFile(absPath, payload, 0o644); err != nil {
+		t.Fatalf("seed %q: %v", absPath, err)
+	}
+	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
+		_ = os.WriteFile(absPath, payload, 0o644)
+	}, func() bool {
+		_, err := svc.ResolvePath(virtualPath)
+		return err == nil
+	})
+}
+
 // TestBTRFSRealBurstCreate verifies that 50 files written in a tight burst all
 // reach the index. find-new reports many inodes per generation; this catches
 // any batching/coalescing bug in the detector or consumer that would drop

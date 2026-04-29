@@ -217,17 +217,28 @@ func coalesceDetectorBatches(ctx context.Context, events <-chan []detect.Event, 
 	}
 }
 
+// detectEventPriority orders events when the same path appears multiple
+// times in a single batch — Unknown beats Deleted beats Changed beats
+// Created so a higher-precedence outcome wins coalescing.
+func detectEventPriority(t detect.EventType) int {
+	switch t {
+	case detect.EventUnknown:
+		return 4
+	case detect.EventDeleted:
+		return 3
+	case detect.EventChanged:
+		return 2
+	case detect.EventCreated:
+		return 1
+	}
+	return 0
+}
+
 func applyDetectorBatch(svc *domain.Service, batch []detect.Event) error {
 	if len(batch) == 0 {
 		return nil
 	}
 
-	priority := map[detect.EventType]int{
-		detect.EventUnknown: 4,
-		detect.EventDeleted: 3,
-		detect.EventChanged: 2,
-		detect.EventCreated: 1,
-	}
 	byPath := make(map[string]detect.Event, len(batch))
 	for _, ev := range batch {
 		abs := strings.TrimSpace(ev.AbsPath)
@@ -235,7 +246,7 @@ func applyDetectorBatch(svc *domain.Service, batch []detect.Event) error {
 			continue
 		}
 		if cur, ok := byPath[abs]; ok {
-			if priority[ev.Type] >= priority[cur.Type] {
+			if detectEventPriority(ev.Type) >= detectEventPriority(cur.Type) {
 				byPath[abs] = ev
 			}
 			continue
@@ -246,14 +257,14 @@ func applyDetectorBatch(svc *domain.Service, batch []detect.Event) error {
 		return nil
 	}
 
-	unknownPaths := make([]string, 0, 8)
+	hasUnknown := false
 	unknownBases := make([]string, 0, 4)
 	deletePaths := make([]string, 0, len(byPath))
 	syncPaths := make([]string, 0, len(byPath))
 	for abs, ev := range byPath {
 		switch ev.Type {
 		case detect.EventUnknown:
-			unknownPaths = append(unknownPaths, abs)
+			hasUnknown = true
 			if strings.TrimSpace(ev.Base) != "" {
 				unknownBases = append(unknownBases, ev.Base)
 			}
@@ -262,9 +273,10 @@ func applyDetectorBatch(svc *domain.Service, batch []detect.Event) error {
 		case detect.EventCreated, detect.EventChanged:
 			syncPaths = append(syncPaths, abs)
 		}
+		_ = abs
 	}
 
-	if len(unknownPaths) > 0 {
+	if hasUnknown {
 		if len(unknownBases) == 0 {
 			return svc.Rescan()
 		}
