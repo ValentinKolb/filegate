@@ -2001,6 +2001,13 @@ func (s *Service) syncSingle(absPath string) error {
 	s.invalidateCacheByID(id)
 	if parentVP, err := s.VirtualPath(parentID); err == nil {
 		s.InvalidatePathCache(parentVP)
+		// Also invalidate the file's own virtual path. The parent-only
+		// invalidation above only removes the parentVP entry; the
+		// child's path -> ID cache entry survives. When sync produces a
+		// new ID for an existing path (e.g. xattr was removed or
+		// corrupted and we reissued), ResolvePath would otherwise keep
+		// returning the stale ID forever.
+		s.InvalidatePathCache(parentVP + "/" + name)
 	}
 	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: absPath, At: time.Now()})
 

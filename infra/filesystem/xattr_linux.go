@@ -30,6 +30,15 @@ func getID(path string) (domain.FileID, error) {
 		if errors.Is(err, unix.ENOENT) {
 			return id, os.ErrNotExist
 		}
+		// ERANGE means the xattr exists but doesn't fit in our 16-byte
+		// buffer (i.e. an admin or backup tool wrote a non-UUID value
+		// over user.filegate.id). Treat it as missing so syncSingle
+		// reissues a fresh ID and clobbers the malformed payload.
+		// Without this the entire sync fails and the path is never
+		// re-indexed.
+		if errors.Is(err, unix.ERANGE) {
+			return id, os.ErrNotExist
+		}
 		return id, fmt.Errorf("getxattr %s: %w", path, err)
 	}
 	if n != 16 {

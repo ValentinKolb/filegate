@@ -13,7 +13,7 @@ docker run --rm --privileged \
   "$DOCKER_IMAGE" bash -lc "
 set -euo pipefail
 apt-get update >/dev/null
-DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs util-linux >/dev/null
+DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs util-linux attr >/dev/null
 mkdir -p /var/tmp/filegate-btrfs
 truncate -s ${BTRFS_IMG_SIZE} /var/tmp/filegate-btrfs/disk.img
 mkfs.btrfs -f /var/tmp/filegate-btrfs/disk.img >/dev/null
