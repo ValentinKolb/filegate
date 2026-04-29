@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/valentinkolb/filegate/domain"
 	"github.com/valentinkolb/filegate/infra/eventbus"
 	"github.com/valentinkolb/filegate/infra/filesystem"
@@ -215,11 +217,15 @@ func TestReplaceFileFallbackPreservesSourceID(t *testing.T) {
 		t.Fatalf("write src part: %v", err)
 	}
 
-	sourceNode, err := svc.CreateChild(root.ID, "source-id.txt", false, nil)
-	if err != nil {
-		t.Fatalf("create source node: %v", err)
-	}
-	if err := store.SetID(srcPath, sourceNode.ID); err != nil {
+	// Pre-stamp the .part file with a fresh UUID, simulating a chunked
+	// upload that pre-allocated its target ID. ReplaceFile's fallback
+	// path must carry that ID through to the final destination. The
+	// upload ID must NOT also be claimed by another existing entity —
+	// resolveOrReissueID would otherwise (correctly) re-issue to avoid
+	// xattr-clone aliasing; that distinct case is exercised by the
+	// snapshot/cp-a tests in cli/.
+	sourceID := domain.FileID(uuid.Must(uuid.NewV7()))
+	if err := store.SetID(srcPath, sourceID); err != nil {
 		t.Fatalf("set source id on part: %v", err)
 	}
 
@@ -227,8 +233,8 @@ func TestReplaceFileFallbackPreservesSourceID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replace file: %v", err)
 	}
-	if out.ID != sourceNode.ID {
-		t.Fatalf("final id=%s, want source id=%s", out.ID.String(), sourceNode.ID.String())
+	if out.ID != sourceID {
+		t.Fatalf("final id=%s, want source id=%s", out.ID.String(), sourceID.String())
 	}
 
 	finalAbs, err := svc.ResolveAbsPath(out.ID)
