@@ -1,4 +1,6 @@
-<img src="docs/assets/logo.svg" alt="Filegate" width="140" align="right"/>
+<p align="center">
+    <img src="docs/assets/logo.svg" alt="Filegate" width="256" align="right"/>
+</p>
 
 # Filegate
 
