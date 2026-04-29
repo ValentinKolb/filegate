@@ -117,6 +117,52 @@ curl -sS -H 'Authorization: Bearer dev-token' \
 - Sysadmin guide: [docs/sysadmin.md](https://github.com/ValentinKolb/filegate/blob/main/docs/sysadmin.md)
 - Code patterns: [docs/code-patterns.md](https://github.com/ValentinKolb/filegate/blob/main/docs/code-patterns.md)
 
+## Limitations
+
+Filegate is single-node and assumes that writes happen primarily through
+its own API. Use through the API is consistent. Use against a watched
+mount that other tools also modify has the constraints below.
+
+### External-mutation behavior on the watched mount
+
+| Operation | Behavior | Notes |
+|---|---|---|
+| `cp -a src dst` (preserves xattrs) | `dst` is assigned a fresh UUID; `src` keeps its original ID. | xattr-clone is treated as a duplicate; the conflict rule re-issues. |
+| `btrfs subvolume snapshot` of a watched subvolume | Snapshot files get fresh UUIDs; originals keep their IDs. | Avoid placing snapshots inside the watched tree if you rely on ID stability across snapshots. |
+| `cp --reflink=always` | Both files have independent UUIDs and independent metadata. | OK. |
+| Hardlink unlink within the same directory | Cleaned automatically by the directory-sync pass. | OK. |
+| Hardlink unlink across directories | Stale child entry in the alias's parent directory persists until the next event in that directory or until `Rescan` is called. | Eventual consistency. |
+| Hardlink rename within a subvolume | btrfs `find-new` does not always emit; the new name appears after `Rescan`. | Trigger `Rescan` after such operations. |
+| Nested `btrfs subvolume delete` of a child of a watched subvolume | Known issue: the parent's btrfs detector errors until the gateway restarts. | Don't nest subvolumes inside a watched mount, or restart the gateway after the delete. |
+| Strip `user.filegate.id` xattr externally | The path is re-indexed with a fresh UUID on the next sync. The previous ID becomes orphan and is purged on the next `Rescan`. | OK. |
+| `umount` of a watched mount while the gateway runs | Not tested; expect errors until restart. | Stop the gateway before unmounting. |
+| Power loss / disk full during a write | Pebble WAL replays on restart. Disk-full mid-write is not extensively tested. | The atomic upload finalize relies on Linux `rename(2)` and survives crashes; `.part` files are cleaned by the upload manager. |
+
+### Convergence model
+
+Most external-mutation inconsistencies are eventually consistent: the next
+detector event for the affected directory triggers a `ReconcileDirectory`
+pass that drops stale child entries and indexes new ones. The only
+inconsistencies that persist indefinitely without operator action are:
+
+- A `cp -a` duplicate where the operator wants the original to keep its ID
+  but the second sync got there first. Detection order is non-deterministic.
+- A nested-subvolume-delete bug that requires a gateway restart.
+
+`POST /v1/admin/rescan` (or `svc.Rescan()` from code) reconciles the index
+with the on-disk state at any time and is safe to call under load.
+
+### Production gaps (not implemented)
+
+- No Prometheus / OpenTelemetry metrics; logs are unstructured (`log.Printf`).
+- Single bearer token, no rotation, no JWT.
+- No request rate limiting or per-tenant quotas.
+- Single-node only; no replication.
+- No audit log of mutations.
+- No read-only / maintenance mode.
+
+These are deliberate omissions for the current scope, not regressions.
+
 ## Benchmarks and Tests
 
 ```bash
