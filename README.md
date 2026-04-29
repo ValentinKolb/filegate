@@ -1,3 +1,5 @@
+<img src="docs/assets/logo.svg" alt="Filegate" width="140" align="right"/>
+
 # Filegate
 
 Fast, reliable file gateway with a stable Pebble index and reverse path/id lookup.
