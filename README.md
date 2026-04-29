@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="docs/assets/logo.svg" alt="Filegate" width="256" align="right"/>
+    <img src="docs/assets/logo.svg" alt="Filegate" width="256"/>
 </p>
 
 # Filegate
