@@ -143,6 +143,36 @@ processed, for a subscriber to register, for state transitions), use one of:
 The git history shows several tests that flaked on CI for months until they
 were converted to channel-based sync. Do not re-introduce the pattern.
 
+## Inode-based reconciliation (rename-safety)
+
+After every successful `syncSingle`, the service runs `reconcileByInode`
+([domain/service.go](../../../domain/service.go)). It uses the secondary
+inode keyspace (`familyInode`, format version 5) maintained automatically
+by `infra/pebble.batch.PutEntity` / `DelEntity` to find every entity that
+claims the same `(device, inode)` tuple as the just-synced path. For each
+candidate ID other than the one we just wrote:
+
+- Resolve the candidate's stored absolute path.
+- `Stat` it. Gone (`ENOENT`) or different inode → `deleteSubtree(candidateID)`.
+- Same path as the one we just synced → no-op (false-positive guard).
+
+This is what catches external rename-within-mount on btrfs (where
+`find-new` only emits the new path, never the old). Two short-circuits
+keep it safe:
+
+- `Device == 0 && Inode == 0`: skip. Mount-root entries don't carry stat
+  info; we never want to "reconcile" them away.
+- `Nlink > 1`: skip. The inode is legitimately referenced by multiple
+  paths (hard links); removing any one of them would corrupt the index.
+
+When you add a new write path, you typically don't have to do anything —
+`buildEntityMetadata` reads `(Dev, Ino, Nlink)` from the stat result, the
+Pebble batch maintains the secondary index, and `syncSingle` invokes the
+reconciler. The only situation requiring manual care: if you bypass
+`buildEntityMetadata` and construct an `Entity` literal (only mount roots
+do this today), make sure leaving `Device`/`Inode` zero is genuinely what
+you want — it disables reconciliation for that entity by design.
+
 ## Resource lifecycle
 
 - Always `defer Close()` for things that own a resource (files, iterators,

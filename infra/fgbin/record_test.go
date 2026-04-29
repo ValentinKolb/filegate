@@ -19,6 +19,9 @@ func TestEntityRoundTrip(t *testing.T) {
 		UID:      1000,
 		GID:      1000,
 		Mode:     0o644,
+		Device:   42,
+		Inode:    9001,
+		Nlink:    1,
 		Name:     "a.txt",
 		MimeType: "text/plain",
 		Extensions: []Extension{
@@ -42,6 +45,9 @@ func TestEntityRoundTrip(t *testing.T) {
 	}
 	if out.Size != in.Size || out.MtimeNs != in.MtimeNs || out.Mode != in.Mode {
 		t.Fatalf("numeric mismatch")
+	}
+	if out.Device != in.Device || out.Inode != in.Inode || out.Nlink != in.Nlink {
+		t.Fatalf("inode identity mismatch: got dev=%d ino=%d nlink=%d", out.Device, out.Inode, out.Nlink)
 	}
 	if len(out.Extensions) != 2 {
 		t.Fatalf("ext count=%d, want 2", len(out.Extensions))

@@ -118,13 +118,18 @@ func FuzzDecodeEntityWithCorruptedLengths(f *testing.F) {
 	}
 	f.Add(base)
 	f.Fuzz(func(t *testing.T, data []byte) {
-		if len(data) < 70 {
+		// V2 entity records have a 90-byte fixed header; reject anything that
+		// can't even hold one with empty Name/MimeType/Extensions.
+		if len(data) < 90 {
 			return
 		}
 		mut := append([]byte(nil), data...)
-		// Overwrite name length with fuzzed bytes when possible.
-		if len(mut) > 66 {
-			binary.LittleEndian.PutUint16(mut[64:66], uint16(len(mut)))
+		// Name length lives at offset 84 in V2 (4 header + 16 ID + 16 ParentID
+		// + 8 Size + 8 MtimeNs + 4 UID + 4 GID + 4 Mode + 8 Device + 8 Inode
+		// + 4 Nlink = 84). Overwrite with a corrupted length to exercise
+		// bounds-check paths.
+		if len(mut) > 86 {
+			binary.LittleEndian.PutUint16(mut[84:86], uint16(len(mut)))
 		}
 		_, _ = DecodeEntity(mut)
 	})

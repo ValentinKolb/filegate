@@ -12,6 +12,11 @@ type Index interface {
 	ListChildren(parentID FileID, after string, limit int) ([]DirEntry, error)
 	ListEntities() ([]Entity, error)
 	ForEachEntity(func(Entity) error) error
+	// LookupByInode returns every FileID whose entity claims the given
+	// (device, inode) pair. Used by the inode-based reconciliation path to
+	// find candidates for stale-path cleanup after an external rename.
+	// Returns an empty slice if no entity matches.
+	LookupByInode(device, inode uint64) ([]FileID, error)
 	Batch(fn func(Batch) error) error
 	Close() error
 }

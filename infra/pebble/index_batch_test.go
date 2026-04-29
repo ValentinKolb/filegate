@@ -2,6 +2,7 @@ package pebble
 
 import (
 	"errors"
+	"io"
 	"testing"
 
 	cpebble "github.com/cockroachdb/pebble"
@@ -15,6 +16,13 @@ type failingBatchWriter struct {
 
 	setCalls int
 	delCalls int
+}
+
+// Get always returns pebble.ErrNotFound so PutEntity / DelEntity proceed to
+// their write paths without resurrecting any prior state. The tests in this
+// file only care about Set/Delete error handling.
+func (b *failingBatchWriter) Get(_ []byte) ([]byte, io.Closer, error) {
+	return nil, nil, cpebble.ErrNotFound
 }
 
 func (b *failingBatchWriter) Set(_, _ []byte, _ *cpebble.WriteOptions) error {

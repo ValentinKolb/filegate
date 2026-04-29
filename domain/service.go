@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -449,8 +450,21 @@ func fileOwnership(info os.FileInfo) (uid uint32, gid uint32, mode uint32) {
 	return st.Uid, st.Gid, mode
 }
 
+// fileInodeIdentity extracts (device, inode, nlink) from a stat result. On
+// platforms or filesystems where Sys() doesn't yield a *syscall.Stat_t the
+// returned tuple is all zero — Inode reconciliation treats zero as "unknown"
+// and skips, so this is the safe default for cross-platform builds.
+func fileInodeIdentity(info os.FileInfo) (device, inode uint64, nlink uint32) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, 0
+	}
+	return uint64(st.Dev), uint64(st.Ino), uint32(st.Nlink)
+}
+
 func buildEntityMetadata(id, parentID FileID, name, absPath string, info os.FileInfo) Entity {
 	uid, gid, mode := fileOwnership(info)
+	device, inode, nlink := fileInodeIdentity(info)
 	exif := map[string]string{}
 	mimeType := ""
 	if !info.IsDir() {
@@ -467,6 +481,9 @@ func buildEntityMetadata(id, parentID FileID, name, absPath string, info os.File
 		UID:      uid,
 		GID:      gid,
 		Mode:     mode,
+		Device:   device,
+		Inode:    inode,
+		Nlink:    nlink,
 		MimeType: mimeType,
 		Exif:     exif,
 	}
@@ -1986,6 +2003,83 @@ func (s *Service) syncSingle(absPath string) error {
 		s.InvalidatePathCache(parentVP)
 	}
 	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: absPath, At: time.Now()})
+
+	// Inode-based reconciliation: after this entity has settled in the
+	// index, look for other entities claiming the same (device, inode).
+	// External rename within the same mount produces a stale Index entry
+	// at the old path that the regular sync flow has no signal to clean
+	// up; reconcileByInode is that signal.
+	if reconErr := s.reconcileByInode(absPath, entity.Device, entity.Inode, entity.Nlink, id); reconErr != nil {
+		log.Printf("[filegate] reconcileByInode after sync of %q: %v", absPath, reconErr)
+	}
+	return nil
+}
+
+// reconcileByInode walks every entity that claims the given (device, inode)
+// tuple and drops the ones whose stored path no longer points at this inode
+// on disk. Called from syncSingle after a successful entity write to detect
+// stale entries left behind by external renames.
+//
+// Skipped silently when:
+//   - device and inode are both zero (caller had no stat info — e.g. mount
+//     root entries created before the inode-tracking field landed)
+//   - nlink > 1 (file is hard-linked; multiple paths legitimately share the
+//     inode and removing any of them would corrupt the index)
+//
+// keepID is the entity that just succeeded; it is excluded from the candidate
+// list. All other claimants are stat-checked: if their stored path is gone
+// or now points to a different inode they are deleted via deleteSubtree.
+func (s *Service) reconcileByInode(currentAbsPath string, device, inode uint64, nlink uint32, keepID FileID) error {
+	if device == 0 && inode == 0 {
+		return nil
+	}
+	if nlink > 1 {
+		return nil
+	}
+	candidates, err := s.idx.LookupByInode(device, inode)
+	if err != nil {
+		return err
+	}
+	for _, candidateID := range candidates {
+		if candidateID == keepID {
+			continue
+		}
+		oldAbs, err := s.ResolveAbsPath(candidateID)
+		if err != nil {
+			// Resolve failed (e.g. dangling parent chain). The entity is
+			// already wedged; let deleteSubtree clean up using the ID alone.
+			if delErr := s.deleteSubtree(candidateID); delErr != nil {
+				log.Printf("[filegate] reconcileByInode: delete dangling %s failed: %v", candidateID, delErr)
+			}
+			continue
+		}
+		// Skip if the stale candidate path is the one we just synced — this
+		// guards against false positives if ResolveAbsPath returns the same
+		// path through a cache.
+		if filepath.Clean(oldAbs) == filepath.Clean(currentAbsPath) {
+			continue
+		}
+		// Re-stat the candidate path. If it's gone or its inode doesn't
+		// match the one we hold for it, the entity is stale.
+		info, statErr := s.store.Stat(oldAbs)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				if delErr := s.deleteSubtree(candidateID); delErr != nil {
+					log.Printf("[filegate] reconcileByInode: delete vanished %s (%s) failed: %v", candidateID, oldAbs, delErr)
+				}
+			}
+			// Other stat errors (permission, IO): leave the entity alone
+			// rather than risk false deletion.
+			continue
+		}
+		curDev, curIno, _ := fileInodeIdentity(info)
+		if curDev != device || curIno != inode {
+			if delErr := s.deleteSubtree(candidateID); delErr != nil {
+				log.Printf("[filegate] reconcileByInode: delete stale %s (%s, dev=%d ino=%d) failed: %v",
+					candidateID, oldAbs, curDev, curIno, delErr)
+			}
+		}
+	}
 	return nil
 }
 

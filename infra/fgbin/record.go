@@ -8,12 +8,21 @@ import (
 )
 
 const (
-	recordVersionV1 byte = 1
+	// recordVersionV2 is the current entity record format. V2 added inline
+	// inode-identity fields (Device, Inode, Nlink) to support inode-based
+	// reconciliation of external moves on btrfs. V1 records are not readable
+	// by this build; an index format-version bump in infra/pebble forces a
+	// rebuild on upgrade.
+	recordVersionV2 byte = 2
 
 	recordTypeEntity byte = 1
 	recordTypeChild  byte = 2
 
 	flagIsDir byte = 0x01
+
+	// Minimum byte length for a V2 entity record before its variable-length
+	// Name/MimeType/Extensions sections.
+	entityMinLenV2 = 4 + 16 + 16 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 4 + 2 + 2 + 2
 )
 
 const (
@@ -44,6 +53,16 @@ type Entity struct {
 	UID        uint32
 	GID        uint32
 	Mode       uint32
+	// Device and Inode together identify a file at the filesystem level
+	// independent of its path. Used for inode-based reconciliation of
+	// external moves; zero values mean "unknown" (e.g. detector backend
+	// did not provide stat info for this entity).
+	Device     uint64
+	Inode      uint64
+	// Nlink is the hard-link count from stat. Reconciliation must skip when
+	// Nlink > 1 because the inode is legitimately referenced by multiple
+	// paths.
+	Nlink      uint32
 	Name       string
 	MimeType   string
 	Extensions []Extension
@@ -78,11 +97,11 @@ func EncodeEntity(e Entity) ([]byte, error) {
 		extBytes += 6 + len(ext[i].Value)
 	}
 
-	total := 4 + 16 + 16 + 8 + 8 + 4 + 4 + 4 + 2 + len(e.Name) + 2 + len(e.MimeType) + 2 + extBytes
+	total := 4 + 16 + 16 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 4 + 2 + len(e.Name) + 2 + len(e.MimeType) + 2 + extBytes
 	out := make([]byte, total)
 	pos := 0
 
-	out[pos] = recordVersionV1
+	out[pos] = recordVersionV2
 	out[pos+1] = recordTypeEntity
 	if e.IsDir {
 		out[pos+2] = flagIsDir
@@ -103,6 +122,12 @@ func EncodeEntity(e Entity) ([]byte, error) {
 	binary.LittleEndian.PutUint32(out[pos:pos+4], e.GID)
 	pos += 4
 	binary.LittleEndian.PutUint32(out[pos:pos+4], e.Mode)
+	pos += 4
+	binary.LittleEndian.PutUint64(out[pos:pos+8], e.Device)
+	pos += 8
+	binary.LittleEndian.PutUint64(out[pos:pos+8], e.Inode)
+	pos += 8
+	binary.LittleEndian.PutUint32(out[pos:pos+4], e.Nlink)
 	pos += 4
 
 	binary.LittleEndian.PutUint16(out[pos:pos+2], uint16(len(e.Name)))
@@ -131,10 +156,10 @@ func EncodeEntity(e Entity) ([]byte, error) {
 // DecodeEntity deserializes an Entity from its binary record format.
 func DecodeEntity(in []byte) (Entity, error) {
 	var out Entity
-	if len(in) < 70 {
+	if len(in) < entityMinLenV2 {
 		return out, ErrInvalidRecord
 	}
-	if in[0] != recordVersionV1 {
+	if in[0] != recordVersionV2 {
 		return out, ErrUnsupportedVer
 	}
 	if in[1] != recordTypeEntity {
@@ -162,6 +187,12 @@ func DecodeEntity(in []byte) (Entity, error) {
 	out.GID = binary.LittleEndian.Uint32(in[pos : pos+4])
 	pos += 4
 	out.Mode = binary.LittleEndian.Uint32(in[pos : pos+4])
+	pos += 4
+	out.Device = binary.LittleEndian.Uint64(in[pos : pos+8])
+	pos += 8
+	out.Inode = binary.LittleEndian.Uint64(in[pos : pos+8])
+	pos += 8
+	out.Nlink = binary.LittleEndian.Uint32(in[pos : pos+4])
 	pos += 4
 
 	nameLen := int(binary.LittleEndian.Uint16(in[pos : pos+2]))
@@ -224,7 +255,7 @@ func EncodeChild(c Child) ([]byte, error) {
 	total := 4 + 16 + 8 + 8 + 2 + len(c.Name)
 	out := make([]byte, total)
 	pos := 0
-	out[pos] = recordVersionV1
+	out[pos] = recordVersionV2
 	out[pos+1] = recordTypeChild
 	if c.IsDir {
 		out[pos+2] = flagIsDir
@@ -250,7 +281,7 @@ func DecodeChild(in []byte) (Child, error) {
 	if len(in) < 38 {
 		return out, ErrInvalidRecord
 	}
-	if in[0] != recordVersionV1 {
+	if in[0] != recordVersionV2 {
 		return out, ErrUnsupportedVer
 	}
 	if in[1] != recordTypeChild {

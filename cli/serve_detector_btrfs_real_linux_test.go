@@ -123,7 +123,10 @@ func TestBTRFSRealBurstCreate(t *testing.T) {
 // TestBTRFSRealRenameWithinSubvol verifies that renaming a file within the
 // same subvolume is reflected in the index: the old path becomes unresolvable
 // and the new path resolves. Btrfs keeps the same inode across an in-subvol
-// rename, so this exercises a path that pure inode-based tracking would miss.
+// rename, so this exercises the inode-based reconciliation in
+// service.reconcileByInode plus PutEntity's stale-child cleanup. Without
+// either, the index would happily index the new path while leaving the old
+// one as a stale lookup target.
 func TestBTRFSRealRenameWithinSubvol(t *testing.T) {
 	subvol := setupRealBTRFSSubvol(t)
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
@@ -297,5 +300,157 @@ func TestBTRFSRealXattrSelfLoopGuard(t *testing.T) {
 	got := updates.Load()
 	if got > 2 {
 		t.Fatalf("xattr self-loop suspected: %d EventUpdated for unchanged file in 2s quiet window", got)
+	}
+}
+
+// TestBTRFSRealRenameAcrossDirectories covers the cross-directory case for
+// inode-based reconciliation: a file moves from dir-a/ to dir-b/ within the
+// same subvolume. This is structurally distinct from the same-directory
+// rename because it exercises both stale-child cleanup AND the inode
+// secondary index lookup (the candidate path is under a completely
+// different parent).
+func TestBTRFSRealRenameAcrossDirectories(t *testing.T) {
+	subvol := setupRealBTRFSSubvol(t)
+	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
+
+	dirA := filepath.Join(subvol, "dir-a")
+	dirB := filepath.Join(subvol, "dir-b")
+	if err := os.Mkdir(dirA, 0o755); err != nil {
+		t.Fatalf("mkdir a: %v", err)
+	}
+	if err := os.Mkdir(dirB, 0o755); err != nil {
+		t.Fatalf("mkdir b: %v", err)
+	}
+
+	src := filepath.Join(dirA, "x.txt")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
+		_ = os.WriteFile(src, []byte("payload"), 0o644)
+	}, func() bool {
+		_, err := svc.ResolvePath(rootName + "/dir-a/x.txt")
+		return err == nil
+	})
+
+	dst := filepath.Join(dirB, "x.txt")
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatalf("rename across dirs: %v", err)
+	}
+
+	waitUntil(t, 15*time.Second, func() bool {
+		_, err := svc.ResolvePath(rootName + "/dir-b/x.txt")
+		return err == nil
+	})
+	waitUntil(t, 15*time.Second, func() bool {
+		_, err := svc.ResolvePath(rootName + "/dir-a/x.txt")
+		return err == domain.ErrNotFound
+	})
+}
+
+// TestBTRFSRealHardLinkLeavesBothPathsValid verifies the safety guard in
+// reconcileByInode: when the same inode is referenced by multiple paths
+// (nlink > 1), the reconciler must not invalidate either of them. Without
+// the nlink>1 short-circuit, the detector seeing one of the two paths
+// would happily delete the other.
+func TestBTRFSRealHardLinkLeavesBothPathsValid(t *testing.T) {
+	subvol := setupRealBTRFSSubvol(t)
+	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
+
+	primary := filepath.Join(subvol, "hl-primary.txt")
+	if err := os.WriteFile(primary, []byte("shared"), 0o644); err != nil {
+		t.Fatalf("write primary: %v", err)
+	}
+	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
+		_ = os.WriteFile(primary, []byte("shared"), 0o644)
+	}, func() bool {
+		_, err := svc.ResolvePath(rootName + "/hl-primary.txt")
+		return err == nil
+	})
+
+	alias := filepath.Join(subvol, "hl-alias.txt")
+	if err := os.Link(primary, alias); err != nil {
+		t.Fatalf("hard link: %v", err)
+	}
+
+	// Wait for the alias to be detected. find-new will report the inode
+	// again under the new directory entry, so eventually both paths should
+	// resolve.
+	waitUntil(t, 15*time.Second, func() bool {
+		_, err := svc.ResolvePath(rootName + "/hl-alias.txt")
+		return err == nil
+	})
+
+	// Now bump the primary so the detector sees the (still-shared) inode
+	// again. A buggy reconciler with no nlink check could see the inode
+	// "moved" and drop one of the two paths.
+	if err := os.WriteFile(primary, []byte("touch"), 0o644); err != nil {
+		t.Fatalf("touch primary: %v", err)
+	}
+	waitUntil(t, 10*time.Second, func() bool {
+		id, err := svc.ResolvePath(rootName + "/hl-primary.txt")
+		if err != nil {
+			return false
+		}
+		meta, err := svc.GetFile(id)
+		return err == nil && meta.Size == int64(len("touch"))
+	})
+
+	// Both paths must still resolve.
+	if _, err := svc.ResolvePath(rootName + "/hl-primary.txt"); err != nil {
+		t.Fatalf("primary disappeared after touch: %v", err)
+	}
+	if _, err := svc.ResolvePath(rootName + "/hl-alias.txt"); err != nil {
+		t.Fatalf("alias was wrongly invalidated by reconciler: %v", err)
+	}
+}
+
+// TestBTRFSRealInodeReuseDoesNotResurrectDeletedEntry verifies that when a
+// file is deleted and a new file later happens to land on the same inode
+// number, the reconciler does the right thing: the old entity is gone, the
+// new entity is fresh, and there's no cross-talk via the secondary inode
+// mapping. This is a high-volatility scenario on btrfs (where inode reuse
+// can happen relatively quickly under churn).
+func TestBTRFSRealInodeReuseDoesNotResurrectDeletedEntry(t *testing.T) {
+	subvol := setupRealBTRFSSubvol(t)
+	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
+
+	first := filepath.Join(subvol, "reuse-1.txt")
+	if err := os.WriteFile(first, []byte("first"), 0o644); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
+		_ = os.WriteFile(first, []byte("first"), 0o644)
+	}, func() bool {
+		_, err := svc.ResolvePath(rootName + "/reuse-1.txt")
+		return err == nil
+	})
+
+	if err := os.Remove(first); err != nil {
+		t.Fatalf("remove first: %v", err)
+	}
+	waitUntil(t, 15*time.Second, func() bool {
+		_, err := svc.ResolvePath(rootName + "/reuse-1.txt")
+		return err == domain.ErrNotFound
+	})
+
+	// Create a fresh file at a different path. If btrfs gives it the same
+	// inode as the deleted one, the secondary-inode index must not have a
+	// stale entry pointing back at "reuse-1.txt".
+	second := filepath.Join(subvol, "reuse-2.txt")
+	if err := os.WriteFile(second, []byte("second"), 0o644); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	waitForResolveWithStimulus(t, 15*time.Second, 150*time.Millisecond, func() {
+		_ = os.WriteFile(second, []byte("second"), 0o644)
+	}, func() bool {
+		_, err := svc.ResolvePath(rootName + "/reuse-2.txt")
+		return err == nil
+	})
+
+	// Final guarantee: the deleted path stays unresolvable, even if its
+	// former inode now backs the new file.
+	if _, err := svc.ResolvePath(rootName + "/reuse-1.txt"); err != domain.ErrNotFound {
+		t.Fatalf("deleted path resurrected via inode reuse: err=%v", err)
 	}
 }

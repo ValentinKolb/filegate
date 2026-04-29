@@ -67,6 +67,15 @@ type Entity struct {
 	UID      uint32
 	GID      uint32
 	Mode     uint32
+	// Device and Inode together identify a file on disk independent of its
+	// path. Used by the inode-based reconciliation pass to detect external
+	// renames where a path moves but the inode (and xattr ID) stays the
+	// same. Zero means "unknown" — written entries without stat info.
+	Device uint64
+	Inode  uint64
+	// Nlink is the hard-link count. Reconciliation must skip when Nlink > 1
+	// because the inode is legitimately shared by multiple paths.
+	Nlink    uint32
 	MimeType string
 	Exif     map[string]string
 }
