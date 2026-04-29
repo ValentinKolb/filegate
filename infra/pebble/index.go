@@ -666,10 +666,16 @@ func (b *batch) PutEntity(entity domain.Entity) {
 		return
 	}
 	if prev != nil {
-		if prev.ParentID != entity.ParentID || prev.Name != entity.Name {
-			// Stale child entry under the previous parent: delete both
-			// dir-flag variants because we don't know whether the previous
-			// IsDir matched the new one and DelChild handles both anyway.
+		// Stale-child cleanup must skip when either side reports nlink > 1.
+		// Hard-link siblings share the same xattr ID, so a Rescan walks both
+		// directory entries and calls PutEntity twice with the same ID but
+		// different (parent, name). Treating the first as "stale" because
+		// the second overwrote it would delete the legitimate sibling
+		// child entry.
+		nlinkSafe := prev.Nlink <= 1 && entity.Nlink <= 1
+		if nlinkSafe && (prev.ParentID != entity.ParentID || prev.Name != entity.Name) {
+			// Delete both dir-flag variants because we don't know whether
+			// the previous IsDir matched the new one.
 			if err := b.b.Delete(childKey(prev.ParentID, true, prev.Name), nil); err != nil {
 				b.setErr(err)
 				return

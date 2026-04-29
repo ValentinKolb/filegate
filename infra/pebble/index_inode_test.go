@@ -211,6 +211,44 @@ func TestPutEntityCoalescesMultipleIDsAtSameInode(t *testing.T) {
 	}
 }
 
+func TestPutEntityPreservesSiblingChildEntryOnHardLinkRescan(t *testing.T) {
+	idx, err := Open(t.TempDir(), 16<<20)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer idx.Close()
+
+	parent := testID(10)
+	id := testID(1)
+
+	// Simulate what Rescan does when it walks two hard-link siblings: the
+	// xattr maps both names to the same FileID, so PutEntity is called
+	// twice for the same ID with different (parent, name) pairs. With
+	// nlink>1, the second call MUST NOT delete the first sibling's child
+	// entry as if it were a stale rename.
+	if err := idx.Batch(func(b domain.Batch) error {
+		b.PutEntity(domain.Entity{ID: id, ParentID: parent, Name: "primary", Device: 7, Inode: 42, Nlink: 2})
+		b.PutChild(parent, "primary", domain.DirEntry{ID: id, Name: "primary"})
+		b.PutEntity(domain.Entity{ID: id, ParentID: parent, Name: "alias", Device: 7, Inode: 42, Nlink: 2})
+		b.PutChild(parent, "alias", domain.DirEntry{ID: id, Name: "alias"})
+		return nil
+	}); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+
+	gotPrimary, _ := idx.LookupChild(parent, "primary")
+	gotAlias, _ := idx.LookupChild(parent, "alias")
+	if gotPrimary == nil {
+		t.Fatalf("primary child entry was wrongly deleted by hard-link sibling write")
+	}
+	if gotAlias == nil {
+		t.Fatalf("alias child entry missing")
+	}
+	if gotPrimary.ID != id || gotAlias.ID != id {
+		t.Fatalf("both child entries must point to id=%v, got primary=%v alias=%v", id, gotPrimary.ID, gotAlias.ID)
+	}
+}
+
 func TestFormatVersionIsFive(t *testing.T) {
 	// Compile-time guard: catch accidental rollback of the inode-tracking
 	// schema bump. If this fails it's because someone changed the version
