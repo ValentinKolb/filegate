@@ -353,6 +353,13 @@ func TestBTRFSRealRenameAcrossDirectories(t *testing.T) {
 // (nlink > 1), the reconciler must not invalidate either of them. Without
 // the nlink>1 short-circuit, the detector seeing one of the two paths
 // would happily delete the other.
+//
+// Note on detection: btrfs `find-new` is generation-based, not directory-
+// entry-based, so creating a hard link via link(2) does not bump the inode
+// generation and is therefore invisible to the detector. We work around
+// this by triggering a manual Rescan after the link, which walks the
+// filesystem and indexes both names. Once both paths sit in the index,
+// the reconciler's behavior is the actual thing under test.
 func TestBTRFSRealHardLinkLeavesBothPathsValid(t *testing.T) {
 	subvol := setupRealBTRFSSubvol(t)
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
@@ -373,17 +380,22 @@ func TestBTRFSRealHardLinkLeavesBothPathsValid(t *testing.T) {
 		t.Fatalf("hard link: %v", err)
 	}
 
-	// Wait for the alias to be detected. find-new will report the inode
-	// again under the new directory entry, so eventually both paths should
-	// resolve.
-	waitUntil(t, 15*time.Second, func() bool {
-		_, err := svc.ResolvePath(rootName + "/hl-alias.txt")
-		return err == nil
+	// link(2) does not bump btrfs generation; force a rescan so both names
+	// land in the index. Without this, only the primary path is indexed
+	// and the test couldn't tell apart "alias was never indexed" from
+	// "alias was indexed and then wrongly removed".
+	if err := svc.Rescan(); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		_, errA := svc.ResolvePath(rootName + "/hl-primary.txt")
+		_, errB := svc.ResolvePath(rootName + "/hl-alias.txt")
+		return errA == nil && errB == nil
 	})
 
 	// Now bump the primary so the detector sees the (still-shared) inode
-	// again. A buggy reconciler with no nlink check could see the inode
-	// "moved" and drop one of the two paths.
+	// again. A buggy reconciler with no nlink check would treat one of the
+	// two indexed paths as stale and drop it.
 	if err := os.WriteFile(primary, []byte("touch"), 0o644); err != nil {
 		t.Fatalf("touch primary: %v", err)
 	}
