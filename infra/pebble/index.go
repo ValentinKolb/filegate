@@ -21,19 +21,15 @@ import (
 const (
 	familyEntity byte = 0x01
 	familyChild  byte = 0x02
-	// familyInode is the secondary keyspace mapping (device, inode) tuples
-	// to the FileIDs of entities that claim them. The primary use is the
-	// inode-based reconciliation pass which needs O(1) lookup of "who else
-	// thinks this inode is theirs" after a btrfs find-new event reports a
-	// changed path.
-	familyInode byte = 0x03
 
-	// currentIndexFormatVersion was bumped from 4 to 5 when the entity
-	// record gained inline Device/Inode/Nlink fields and the secondary
-	// inode keyspace was introduced. Older indexes are not readable: the
-	// operator must wipe the index directory and let the bootstrap rescan
-	// rebuild it.
-	currentIndexFormatVersion uint16 = 5
+	// currentIndexFormatVersion was bumped from 5 to 6 when the secondary
+	// inode keyspace was removed. The directory-sync reconciliation pass
+	// (Service.ReconcileDirectory) plus the xattr-conflict re-issue rule
+	// (Service.resolveOrReissueID) together do the work the inode index
+	// used to do, with simpler write-path semantics. Older indexes carry
+	// dead bytes under family 0x03 that this build will never read; the
+	// version bump forces a clean rebuild.
+	currentIndexFormatVersion uint16 = 6
 )
 
 // ErrUnsupportedIndexFormat is returned when the on-disk index version is incompatible.
@@ -200,44 +196,6 @@ func childKey(parentID domain.FileID, isDir bool, name string) []byte {
 	return append(p, []byte(name)...)
 }
 
-// inodeKey encodes the (device, inode) tuple into a Pebble key under the
-// familyInode keyspace. Both fields use big-endian so a key-range scan
-// would naturally sort by device first, then inode — useful for future
-// per-mount enumeration.
-func inodeKey(device, inode uint64) []byte {
-	key := make([]byte, 1+8+8)
-	key[0] = familyInode
-	binary.BigEndian.PutUint64(key[1:9], device)
-	binary.BigEndian.PutUint64(key[9:17], inode)
-	return key
-}
-
-// encodeInodeIDList serializes a list of FileIDs as a length-prefixed blob:
-// [count uint16][id1 16][id2 16]... The empty list encodes to two zero
-// bytes; an entirely missing key has the same semantic meaning.
-func encodeInodeIDList(ids []domain.FileID) []byte {
-	out := make([]byte, 2+16*len(ids))
-	binary.LittleEndian.PutUint16(out[0:2], uint16(len(ids)))
-	for i, id := range ids {
-		copy(out[2+i*16:2+(i+1)*16], id[:])
-	}
-	return out
-}
-
-func decodeInodeIDList(value []byte) ([]domain.FileID, error) {
-	if len(value) < 2 {
-		return nil, fmt.Errorf("inode id list too short")
-	}
-	count := int(binary.LittleEndian.Uint16(value[0:2]))
-	if len(value) != 2+16*count {
-		return nil, fmt.Errorf("inode id list length mismatch: want %d, got %d", 2+16*count, len(value))
-	}
-	out := make([]domain.FileID, count)
-	for i := 0; i < count; i++ {
-		copy(out[i][:], value[2+i*16:2+(i+1)*16])
-	}
-	return out, nil
-}
 
 func prefixUpperBound(prefix []byte) []byte {
 	if len(prefix) == 0 {
@@ -512,33 +470,6 @@ func (i *Index) ForEachEntity(fn func(domain.Entity) error) error {
 	return retErr
 }
 
-// LookupByInode returns the FileIDs of every entity claiming the given
-// (device, inode) tuple. The empty slice is returned (with nil error) when no
-// entity matches. Used by the inode-based reconciliation pass after a
-// detector emits an event whose stat info indicates a possible external
-// rename or inode reuse.
-func (i *Index) LookupByInode(device, inode uint64) (out []domain.FileID, err error) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	if stateErr := i.currentStateLocked(); stateErr != nil {
-		return nil, normalizeIndexErr(stateErr)
-	}
-	defer i.recoverIntoError(&err)
-	v, closer, err := i.db.Get(inodeKey(device, inode))
-	if err != nil {
-		if errors.Is(err, pebble.ErrNotFound) {
-			return nil, nil
-		}
-		return nil, normalizeIndexErr(err)
-	}
-	defer closer.Close()
-	ids, decErr := decodeInodeIDList(v)
-	if decErr != nil {
-		return nil, decErr
-	}
-	return ids, nil
-}
-
 type batch struct {
 	b   pebbleBatchReadWriter
 	err error
@@ -562,6 +493,49 @@ func (b *batch) setErr(err error) {
 	b.err = err
 }
 
+func (b *batch) PutEntity(entity domain.Entity) {
+	if b.err != nil {
+		return
+	}
+	// Read the previous entity so we can detect a same-id rename
+	// (Name or ParentID changed for the same entity ID) and drop the
+	// stale child entry under the old parent. This is the common case
+	// fast path; ReconcileDirectory in the consumer is the safety net
+	// for the cases this misses (e.g. when find-new doesn't emit at all
+	// for an in-subvol directory rename).
+	//
+	// Skipped for hard-link siblings (nlink > 1) because they share an ID
+	// across multiple (parent, name) pairs and "the previous Put was
+	// stale" is not a valid inference. snapshot/cp-a duplicates can't
+	// trigger this path because resolveOrReissueID upstream re-issues a
+	// fresh UUID for them — by the time PutEntity sees them they have
+	// their own ID with no prior entity record.
+	prev, err := b.loadEntityForBatch(entity.ID)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	if prev != nil {
+		nlinkSafe := prev.Nlink <= 1 && entity.Nlink <= 1
+		if nlinkSafe && (prev.ParentID != entity.ParentID || prev.Name != entity.Name) {
+			if err := b.b.Delete(childKey(prev.ParentID, true, prev.Name), nil); err != nil {
+				b.setErr(err)
+				return
+			}
+			if err := b.b.Delete(childKey(prev.ParentID, false, prev.Name), nil); err != nil {
+				b.setErr(err)
+				return
+			}
+		}
+	}
+	payload, err := encodeEntity(entity)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(entityKey(entity.ID), payload, nil))
+}
+
 // loadEntityForBatch returns the entity stored under id, reading from the
 // batch's pending writes plus the underlying DB. Returns (nil, nil) when no
 // entity is stored.
@@ -579,131 +553,6 @@ func (b *batch) loadEntityForBatch(id domain.FileID) (*domain.Entity, error) {
 		return nil, err
 	}
 	return &e, nil
-}
-
-// loadInodeIDsForBatch returns the FileIDs currently mapped to the given
-// (device, inode) tuple, reading through the batch.
-func (b *batch) loadInodeIDsForBatch(device, inode uint64) ([]domain.FileID, error) {
-	if device == 0 && inode == 0 {
-		return nil, nil
-	}
-	v, closer, err := b.b.Get(inodeKey(device, inode))
-	if err != nil {
-		if errors.Is(err, pebble.ErrNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer closer.Close()
-	return decodeInodeIDList(v)
-}
-
-// removeIDFromInodeMapping rewrites the inode mapping for (device, inode)
-// without id. Empty mapping after removal is deleted.
-func (b *batch) removeIDFromInodeMapping(device, inode uint64, id domain.FileID) {
-	if b.err != nil {
-		return
-	}
-	if device == 0 && inode == 0 {
-		return
-	}
-	current, err := b.loadInodeIDsForBatch(device, inode)
-	if err != nil {
-		b.setErr(err)
-		return
-	}
-	out := current[:0]
-	for _, existing := range current {
-		if existing != id {
-			out = append(out, existing)
-		}
-	}
-	if len(out) == 0 {
-		b.setErr(b.b.Delete(inodeKey(device, inode), nil))
-		return
-	}
-	b.setErr(b.b.Set(inodeKey(device, inode), encodeInodeIDList(out), nil))
-}
-
-// addIDToInodeMapping inserts id into the (device, inode) mapping if not
-// already present. Idempotent.
-func (b *batch) addIDToInodeMapping(device, inode uint64, id domain.FileID) {
-	if b.err != nil {
-		return
-	}
-	if device == 0 && inode == 0 {
-		return
-	}
-	current, err := b.loadInodeIDsForBatch(device, inode)
-	if err != nil {
-		b.setErr(err)
-		return
-	}
-	for _, existing := range current {
-		if existing == id {
-			return
-		}
-	}
-	current = append(current, id)
-	b.setErr(b.b.Set(inodeKey(device, inode), encodeInodeIDList(current), nil))
-}
-
-func (b *batch) PutEntity(entity domain.Entity) {
-	if b.err != nil {
-		return
-	}
-	// Read the previous entity so we can detect three things in one shot:
-	//   1. Rename / reparent (Name or ParentID changed) -> drop the stale
-	//      child entry under the old parent.
-	//   2. Inode change (Device or Inode differs) -> rewrite the secondary
-	//      inode mapping. Common case is the same inode (no change), but
-	//      external mv-into-place can put a different inode at the same ID.
-	//   3. First write (no previous entity) -> just install the inode
-	//      mapping and the entity record.
-	prev, err := b.loadEntityForBatch(entity.ID)
-	if err != nil {
-		b.setErr(err)
-		return
-	}
-	if prev != nil {
-		// Stale-child cleanup must skip when either side reports nlink > 1.
-		// Hard-link siblings share the same xattr ID, so a Rescan walks both
-		// directory entries and calls PutEntity twice with the same ID but
-		// different (parent, name). Treating the first as "stale" because
-		// the second overwrote it would delete the legitimate sibling
-		// child entry.
-		nlinkSafe := prev.Nlink <= 1 && entity.Nlink <= 1
-		if nlinkSafe && (prev.ParentID != entity.ParentID || prev.Name != entity.Name) {
-			// Delete both dir-flag variants because we don't know whether
-			// the previous IsDir matched the new one.
-			if err := b.b.Delete(childKey(prev.ParentID, true, prev.Name), nil); err != nil {
-				b.setErr(err)
-				return
-			}
-			if err := b.b.Delete(childKey(prev.ParentID, false, prev.Name), nil); err != nil {
-				b.setErr(err)
-				return
-			}
-		}
-		if prev.Device != entity.Device || prev.Inode != entity.Inode {
-			b.removeIDFromInodeMapping(prev.Device, prev.Inode, entity.ID)
-			if b.err != nil {
-				return
-			}
-		}
-	}
-
-	b.addIDToInodeMapping(entity.Device, entity.Inode, entity.ID)
-	if b.err != nil {
-		return
-	}
-
-	payload, err := encodeEntity(entity)
-	if err != nil {
-		b.setErr(err)
-		return
-	}
-	b.setErr(b.b.Set(entityKey(entity.ID), payload, nil))
 }
 
 func (b *batch) PutChild(parentID domain.FileID, name string, entry domain.DirEntry) {
@@ -733,19 +582,6 @@ func (b *batch) DelEntity(id domain.FileID) {
 	if b.err != nil {
 		return
 	}
-	// Tear down the inode mapping before the entity itself goes — we need
-	// the entity's stored Device/Inode to find the right mapping key.
-	prev, err := b.loadEntityForBatch(id)
-	if err != nil {
-		b.setErr(err)
-		return
-	}
-	if prev != nil {
-		b.removeIDFromInodeMapping(prev.Device, prev.Inode, id)
-		if b.err != nil {
-			return
-		}
-	}
 	b.setErr(b.b.Delete(entityKey(id), nil))
 }
 
@@ -757,9 +593,10 @@ func (i *Index) Batch(fn func(domain.Batch) error) error {
 	}
 	var retErr error
 	defer i.recoverIntoError(&retErr)
-	// Indexed batch is required because PutEntity / DelEntity now Get the
-	// previous entity to maintain the secondary inode mapping and clean up
-	// stale child entries on rename. NewBatch() does not support Get.
+	// Indexed batch is required because PutEntity reads the previous
+	// entity to detect a same-id rename (so it can drop the stale child
+	// entry under the old parent in the same atomic write). NewBatch
+	// does not support Get inside the batch.
 	b := i.db.NewIndexedBatch()
 	defer b.Close()
 	wrap := &batch{b: b}

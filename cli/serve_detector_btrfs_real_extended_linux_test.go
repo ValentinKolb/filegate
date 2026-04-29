@@ -396,15 +396,11 @@ func TestBTRFSRealCorruptedXattrValue(t *testing.T) {
 }
 
 // TestBTRFSRealDuplicateIDViaCpA covers `cp -a` which preserves xattrs by
-// design — the copy claims the same Filegate stable ID as the source.
-// Filegate must produce a deterministic outcome: both paths resolve via
-// some valid ID, and the index isn't corrupted.
-//
-// Documented expectation as of writing: the second sync wins because
-// PutEntity overwrites the entity record by ID. The source path's child
-// entry gets cleaned up by the rename-detection logic, leaving only the
-// copy resolvable. This is suboptimal but not crashy; a proper fix would
-// detect xattr duplication and reissue an ID for one of the paths.
+// design — the copy arrives on disk with the same Filegate stable ID as
+// the source. The xattr-conflict detection in resolveOrReissueID kicks
+// in: when syncSingle sees a path whose xattr ID is already owned by a
+// DIFFERENT live inode, it mints a fresh UUID for the new path. The end
+// state must be: BOTH paths resolve, with DIFFERENT IDs, both readable.
 func TestBTRFSRealDuplicateIDViaCpA(t *testing.T) {
 	requireBin(t, "cp")
 	subvol := setupRealBTRFSSubvol(t)
@@ -420,25 +416,44 @@ func TestBTRFSRealDuplicateIDViaCpA(t *testing.T) {
 		_, err := svc.ResolvePath(rootName + "/original.txt")
 		return err == nil
 	})
+	originalID, err := svc.ResolvePath(rootName + "/original.txt")
+	if err != nil {
+		t.Fatalf("resolve original: %v", err)
+	}
 
 	dst := filepath.Join(subvol, "copy.txt")
 	runCmd(t, "cp", "-a", src, dst)
 
-	// Wait until either path's existence stabilises. We don't assert which
-	// one wins — only that the index converges and Filegate is still
-	// operational. A panic in syncSingle / reconcile would surface as a
-	// goroutine fatal somewhere; this test is mostly a smoke for the
-	// duplicate-ID corner case.
+	// Force a Rescan to walk the FS and pick up the copy. cp -a on btrfs
+	// uses --reflink=auto by default; the cloned inode may not bump the
+	// generation in a way find-new emits, so we explicitly walk to seed
+	// the index.
+	if err := svc.Rescan(); err != nil {
+		t.Fatalf("rescan after cp: %v", err)
+	}
+
 	waitUntil(t, 15*time.Second, func() bool {
-		_, errA := svc.ResolvePath(rootName + "/original.txt")
-		_, errB := svc.ResolvePath(rootName + "/copy.txt")
-		return errA == nil || errB == nil
+		_, errCopy := svc.ResolvePath(rootName + "/copy.txt")
+		return errCopy == nil
 	})
-	// At least one of the two must be resolvable for Filegate to be useful.
-	_, errA := svc.ResolvePath(rootName + "/original.txt")
-	_, errB := svc.ResolvePath(rootName + "/copy.txt")
-	if errA != nil && errB != nil {
-		t.Fatalf("after cp -a, neither path resolves: original=%v copy=%v", errA, errB)
+
+	// Original path must still resolve to the original ID — the conflict
+	// rule must NOT have hijacked the source side.
+	stillID, err := svc.ResolvePath(rootName + "/original.txt")
+	if err != nil {
+		t.Fatalf("original lost after cp -a: %v", err)
+	}
+	if stillID != originalID {
+		t.Fatalf("original ID drifted from %v to %v", originalID, stillID)
+	}
+
+	// Copy must resolve to a DIFFERENT ID (re-issued by the conflict rule).
+	copyID, err := svc.ResolvePath(rootName + "/copy.txt")
+	if err != nil {
+		t.Fatalf("copy not indexed: %v", err)
+	}
+	if copyID == originalID {
+		t.Fatalf("copy got the same ID as original — conflict rule didn't re-issue")
 	}
 }
 
@@ -504,18 +519,10 @@ func TestBTRFSRealSymlinkCreateDeleteRename(t *testing.T) {
 }
 
 // TestBTRFSRealUnlinkOneOfHardLinks verifies that removing one path of a
-// hard-linked pair leaves the other path fully usable. The shared entity
-// (with the surviving inode) MUST stay valid; reading content via the
-// surviving path must work.
-//
-// Known limitation: the unlinked alias's child entry may linger in the
-// index. Filegate has no reverse "child entries by entity ID" lookup, so
-// stale child entries pointing at a still-living shared entity are not
-// proactively cleaned. The next time something forces a syncSingle on the
-// alias path, the missing-on-disk file will be cleaned up via reconcile,
-// but ambient detector events alone don't trigger that. The test below
-// pins what we DO guarantee — primary continues to work — and notes the
-// gap explicitly so the next reader doesn't think this is fully solved.
+// hard-linked pair leaves the surviving primary fully usable AND drops
+// the deleted alias from the index. With directory-sync running after
+// each detector batch, the parent's child table gets reconciled against
+// readdir, which is what catches the unlinked alias.
 func TestBTRFSRealUnlinkOneOfHardLinks(t *testing.T) {
 	subvol := setupRealBTRFSSubvol(t)
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
@@ -562,6 +569,15 @@ func TestBTRFSRealUnlinkOneOfHardLinks(t *testing.T) {
 		}
 		meta, err := svc.GetFile(id)
 		return err == nil && meta.Size == int64(len("after-unlink"))
+	})
+
+	// Unlinked alias must drop out of the index (directory-sync prunes
+	// the stale child entry). This was the limitation that the old
+	// test documented as deliberately not asserted; with dir-sync it's
+	// now an enforced contract.
+	waitUntil(t, 15*time.Second, func() bool {
+		_, err := svc.ResolvePath(rootName + "/hl-drop.txt")
+		return err == domain.ErrNotFound
 	})
 }
 
@@ -730,14 +746,14 @@ func TestBTRFSRealFilenameEdgeCases(t *testing.T) {
 }
 
 // TestBTRFSRealRenameOneHardLinkAlias verifies that renaming one alias of
-// a hard-linked pair leaves the surviving primary intact and that the
-// renamed name becomes resolvable after a rescan. As with
-// UnlinkOneOfHardLinks, the old alias name's stale child entry is a
-// known limitation — Filegate has no proactive child-by-entity-id sweep,
-// so renaming a hard-link's directory entry does not auto-clean the old
-// name. We seed the new name with an explicit Rescan (link(2)/rename
-// don't bump inode generation) and assert the contract we DO promise:
-// primary works, renamed works.
+// a hard-linked pair propagates through the index with directory-sync
+// alone (no manual Rescan needed for the post-rename steady state — the
+// hardlink-link step still needs a Rescan to seed the alias because
+// link(2) doesn't fire find-new). After the rename:
+//   - primary still resolves (entity preserved),
+//   - renamed name resolves (synced via the stimulus write that bumps
+//     the parent directory's children),
+//   - old alias name is gone (dir-sync drops the stale child entry).
 func TestBTRFSRealRenameOneHardLinkAlias(t *testing.T) {
 	subvol := setupRealBTRFSSubvol(t)
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
@@ -757,6 +773,9 @@ func TestBTRFSRealRenameOneHardLinkAlias(t *testing.T) {
 	if err := os.Link(primary, alias); err != nil {
 		t.Fatalf("link: %v", err)
 	}
+	// Seed the alias's child entry. link(2) on btrfs doesn't bump the
+	// inode generation, so without an explicit walk the alias never
+	// reaches the index in the first place.
 	if err := svc.Rescan(); err != nil {
 		t.Fatalf("rescan after link: %v", err)
 	}
@@ -765,18 +784,20 @@ func TestBTRFSRealRenameOneHardLinkAlias(t *testing.T) {
 	if err := os.Rename(alias, renamed); err != nil {
 		t.Fatalf("rename alias: %v", err)
 	}
-	// Force-walk the FS so the new dir entry is indexed. Ambient detector
-	// events on hard-link rename within a subvol are not guaranteed.
-	if err := svc.Rescan(); err != nil {
-		t.Fatalf("rescan after rename: %v", err)
+	// Stimulate the detector — touching the primary bumps its inode
+	// generation, the consumer will sync primary AND reconcile the
+	// parent dir, picking up the renamed entry as new and dropping the
+	// old alias name.
+	if err := os.WriteFile(primary, []byte("touch"), 0o644); err != nil {
+		t.Fatalf("touch primary: %v", err)
 	}
 
-	if _, err := svc.ResolvePath(rootName + "/hl-stable.txt"); err != nil {
-		t.Fatalf("primary lost when alias was renamed: %v", err)
-	}
-	if _, err := svc.ResolvePath(rootName + "/hl-renamed.txt"); err != nil {
-		t.Fatalf("renamed alias should resolve after rescan: %v", err)
-	}
+	waitUntil(t, 15*time.Second, func() bool {
+		_, errStable := svc.ResolvePath(rootName + "/hl-stable.txt")
+		_, errRenamed := svc.ResolvePath(rootName + "/hl-renamed.txt")
+		_, errOldAlias := svc.ResolvePath(rootName + "/hl-rename-me.txt")
+		return errStable == nil && errRenamed == nil && errOldAlias == domain.ErrNotFound
+	})
 }
 
 // TestBTRFSRealSymlinkTargetReplacement exercises delete+recreate of a

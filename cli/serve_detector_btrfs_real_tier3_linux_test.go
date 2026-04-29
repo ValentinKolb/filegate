@@ -120,16 +120,15 @@ func TestBTRFSRealCrossSubvolumeMove(t *testing.T) {
 	})
 }
 
-// TestBTRFSRealSnapshotInsideWatchedTree exercises an admin operation
-// that's structurally hostile to Filegate: `btrfs subvolume snapshot`
-// creates a sibling tree where every file shares the original's inode
-// AND xattrs. Filegate's stable-ID model assumes "one inode = one ID =
-// one canonical path"; a snapshot doubles that mapping in one shot.
+// TestBTRFSRealSnapshotInsideWatchedTree verifies that a btrfs snapshot
+// nested inside the watched tree gets indexed correctly: the snapshot's
+// files arrive with xattrs cloned from the originals, and the conflict
+// rule in resolveOrReissueID re-issues fresh UUIDs for each snapshot
+// file so original and snapshot become independent entities.
 //
-// The realistic acceptable outcome is: Filegate doesn't crash, the
-// originals stay resolvable. Whether the snapshot's contents resolve
-// depends on detection cadence and is not guaranteed; this test only
-// pins the safety side.
+// Acceptance: original resolves with its ORIGINAL id; snapshot path
+// resolves with a DIFFERENT id; deleting the original does not break
+// the snapshot copy.
 func TestBTRFSRealSnapshotInsideWatchedTree(t *testing.T) {
 	subvol := setupRealBTRFSSubvol(t)
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
@@ -144,6 +143,10 @@ func TestBTRFSRealSnapshotInsideWatchedTree(t *testing.T) {
 		_, err := svc.ResolvePath(rootName + "/snap-source.txt")
 		return err == nil
 	})
+	originalID, err := svc.ResolvePath(rootName + "/snap-source.txt")
+	if err != nil {
+		t.Fatalf("resolve original: %v", err)
+	}
 
 	snapPath := filepath.Join(subvol, "snap")
 	out, err := exec.Command("btrfs", "subvolume", "snapshot", subvol, snapPath).CombinedOutput()
@@ -154,23 +157,42 @@ func TestBTRFSRealSnapshotInsideWatchedTree(t *testing.T) {
 		_, _ = exec.Command("btrfs", "subvolume", "delete", snapPath).CombinedOutput()
 	})
 
-	// Stimulate to make sure the detector ticks past the snapshot creation.
-	if err := os.WriteFile(original, []byte("touched-after-snap"), 0o644); err != nil {
-		t.Fatalf("touch: %v", err)
+	// Trigger a Rescan to walk the snapshot tree (find-new on the parent
+	// subvolume doesn't enumerate the nested snapshot).
+	if err := svc.Rescan(); err != nil {
+		t.Fatalf("rescan after snapshot: %v", err)
 	}
 
-	// Original path must remain valid. Snapshot duplicate-IDs would
-	// normally invalidate the original via the inode-reconciler if both
-	// paths have the same xattr; the assertion here is the Filegate-side
-	// invariant that this scenario doesn't break the watched tree.
+	// Original path must keep its original ID — the snapshot must NOT
+	// have stolen the entity record.
+	stillID, err := svc.ResolvePath(rootName + "/snap-source.txt")
+	if err != nil {
+		t.Fatalf("original lost after snapshot: %v", err)
+	}
+	if stillID != originalID {
+		t.Fatalf("original ID drifted: %v -> %v", originalID, stillID)
+	}
+
+	// Snapshot copy must resolve with a DIFFERENT ID (conflict-rule re-issue).
+	snapID, err := svc.ResolvePath(rootName + "/snap/snap-source.txt")
+	if err != nil {
+		t.Fatalf("snapshot copy not indexed: %v", err)
+	}
+	if snapID == originalID {
+		t.Fatalf("snapshot copy got the same ID as original — conflict rule didn't re-issue")
+	}
+
+	// Delete the original. Snapshot copy must still resolve with its own ID.
+	if err := os.Remove(original); err != nil {
+		t.Fatalf("remove original: %v", err)
+	}
 	waitUntil(t, 15*time.Second, func() bool {
-		id, err := svc.ResolvePath(rootName + "/snap-source.txt")
-		if err != nil {
-			return false
-		}
-		meta, err := svc.GetFile(id)
-		return err == nil && meta.Size == int64(len("touched-after-snap"))
+		_, err := svc.ResolvePath(rootName + "/snap-source.txt")
+		return err == domain.ErrNotFound
 	})
+	if _, err := svc.ResolvePath(rootName + "/snap/snap-source.txt"); err != nil {
+		t.Fatalf("snapshot copy was broken by deleting the original: %v", err)
+	}
 }
 
 // TestBTRFSRealSparseFile creates a logically large file via truncate(2)

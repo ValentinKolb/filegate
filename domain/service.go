@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -1840,29 +1839,20 @@ func (s *Service) syncSubtree(absPath string) error {
 			return nil
 		}
 
-		id, err := s.store.GetID(current)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			id, err = newID()
-			if err != nil {
-				return err
-			}
-			if err := s.store.SetID(current, id); err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					// File vanished between WalkDir and SetID. Skip and
-					// continue the scan — losing this entry is benign, but
-					// aborting the whole subtree is not.
-					return nil
-				}
-				return err
-			}
-		}
-
 		info, err := d.Info()
 		if err != nil {
 			return nil
+		}
+		// Same conflict-aware ID resolution as the Rescan walk uses.
+		// syncSubtree is invoked for newly-added directory trees (e.g.
+		// after a Transfer that brought in a sub-tree containing files
+		// with pre-existing xattrs); the conflict rule must run here too.
+		id, err := s.resolveOrReissueID(current, info)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
 		}
 
 		pathToID[current] = id
@@ -1932,6 +1922,103 @@ func (s *Service) Delete(id FileID) error {
 	return nil
 }
 
+// resolveOrReissueID returns the stable ID for absPath. It reads the
+// user.filegate.id xattr; if missing it mints a fresh UUID and writes it.
+// If the xattr names an existing entity that is anchored to a DIFFERENT
+// inode (snapshot copy or `cp -a` clone — the xattr was preserved by the
+// copy operation), it re-issues a fresh ID for absPath instead of letting
+// the new path silently steal the original's stable identity.
+//
+// This is the key invariant that lets Filegate stay correct in the face
+// of filesystem operations that duplicate xattrs (snapshots, cp -a):
+// xattr identity is stable across in-place modifications but explicitly
+// not stable across path duplication.
+func (s *Service) resolveOrReissueID(absPath string, info os.FileInfo) (FileID, error) {
+	id, err := s.store.GetID(absPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return FileID{}, err
+		}
+		return s.mintAndSetID(absPath)
+	}
+
+	device, inode, _ := fileInodeIdentity(info)
+	existing, err := s.idx.GetEntity(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// xattr names an ID we don't know yet — first time indexing this entity.
+			return id, nil
+		}
+		return FileID{}, err
+	}
+	// Older entities written before format-version 5 have Inode/Device == 0;
+	// treat zero as "no inode info recorded" and trust the xattr.
+	if existing.Inode == 0 || (existing.Device == device && existing.Inode == inode) {
+		return id, nil
+	}
+	// Different inode in the entity record — possible snapshot/cp-a
+	// duplicate. Verify by stat'ing the recorded path. If it's gone or
+	// at a different inode, the recorded entity is stale and it's safe
+	// to take over its ID. Otherwise, re-issue.
+	existingAbs, err := s.absPathFromEntity(existing)
+	if err != nil || existingAbs == absPath {
+		return id, nil
+	}
+	existingInfo, err := s.store.Stat(existingAbs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Recorded entity's path is gone — stale, take it over.
+			return id, nil
+		}
+		// Other stat errors (permission, transient IO, weird FS): be
+		// conservative and re-issue. Letting the new path silently take
+		// over the existing ID on a flaky stat would let a duplicate
+		// xattr clobber the live original.
+		return s.mintAndSetID(absPath)
+	}
+	existingDev, existingIno, _ := fileInodeIdentity(existingInfo)
+	if existingDev == existing.Device && existingIno == existing.Inode {
+		// Confirmed conflict: another live path owns this xattr ID at a
+		// different inode. Mint a fresh ID for our path so we don't
+		// trample the original's identity.
+		return s.mintAndSetID(absPath)
+	}
+	// Recorded path's inode shifted — entity is stale, take it over.
+	return id, nil
+}
+
+// mintAndSetID generates a fresh UUID v7, writes it to absPath's xattr,
+// and returns it. Used both for first-time indexing and for re-issue on
+// xattr-conflict.
+func (s *Service) mintAndSetID(absPath string) (FileID, error) {
+	id, err := newID()
+	if err != nil {
+		return FileID{}, err
+	}
+	if err := s.store.SetID(absPath, id); err != nil {
+		return FileID{}, err
+	}
+	return id, nil
+}
+
+// absPathFromEntity reconstructs the absolute filesystem path that an
+// entity record claims to live at, by walking parent IDs to a known mount
+// root. Returns ErrNotFound if the parent chain is broken.
+func (s *Service) absPathFromEntity(e *Entity) (string, error) {
+	if e == nil {
+		return "", ErrNotFound
+	}
+	if e.ParentID.IsZero() {
+		// Mount root.
+		return s.ResolveAbsPath(e.ID)
+	}
+	parentAbs, err := s.ResolveAbsPath(e.ParentID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parentAbs, e.Name), nil
+}
+
 func (s *Service) syncSingle(absPath string) error {
 	linfo, err := os.Lstat(absPath)
 	if err != nil {
@@ -1952,18 +2039,9 @@ func (s *Service) syncSingle(absPath string) error {
 		return err
 	}
 
-	id, err := s.store.GetID(absPath)
+	id, err := s.resolveOrReissueID(absPath, info)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		id, err = newID()
-		if err != nil {
-			return err
-		}
-		if err := s.store.SetID(absPath, id); err != nil {
-			return err
-		}
+		return err
 	}
 
 	parentAbs := filepath.Dir(absPath)
@@ -2011,82 +2089,11 @@ func (s *Service) syncSingle(absPath string) error {
 	}
 	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: absPath, At: time.Now()})
 
-	// Inode-based reconciliation: after this entity has settled in the
-	// index, look for other entities claiming the same (device, inode).
-	// External rename within the same mount produces a stale Index entry
-	// at the old path that the regular sync flow has no signal to clean
-	// up; reconcileByInode is that signal.
-	if reconErr := s.reconcileByInode(absPath, entity.Device, entity.Inode, entity.Nlink, id); reconErr != nil {
-		log.Printf("[filegate] reconcileByInode after sync of %q: %v", absPath, reconErr)
-	}
-	return nil
-}
-
-// reconcileByInode walks every entity that claims the given (device, inode)
-// tuple and drops the ones whose stored path no longer points at this inode
-// on disk. Called from syncSingle after a successful entity write to detect
-// stale entries left behind by external renames.
-//
-// Skipped silently when:
-//   - device and inode are both zero (caller had no stat info — e.g. mount
-//     root entries created before the inode-tracking field landed)
-//   - nlink > 1 (file is hard-linked; multiple paths legitimately share the
-//     inode and removing any of them would corrupt the index)
-//
-// keepID is the entity that just succeeded; it is excluded from the candidate
-// list. All other claimants are stat-checked: if their stored path is gone
-// or now points to a different inode they are deleted via deleteSubtree.
-func (s *Service) reconcileByInode(currentAbsPath string, device, inode uint64, nlink uint32, keepID FileID) error {
-	if device == 0 && inode == 0 {
-		return nil
-	}
-	if nlink > 1 {
-		return nil
-	}
-	candidates, err := s.idx.LookupByInode(device, inode)
-	if err != nil {
-		return err
-	}
-	for _, candidateID := range candidates {
-		if candidateID == keepID {
-			continue
-		}
-		oldAbs, err := s.ResolveAbsPath(candidateID)
-		if err != nil {
-			// Resolve failed (e.g. dangling parent chain). The entity is
-			// already wedged; let deleteSubtree clean up using the ID alone.
-			if delErr := s.deleteSubtree(candidateID); delErr != nil {
-				log.Printf("[filegate] reconcileByInode: delete dangling %s failed: %v", candidateID, delErr)
-			}
-			continue
-		}
-		// Skip if the stale candidate path is the one we just synced — this
-		// guards against false positives if ResolveAbsPath returns the same
-		// path through a cache.
-		if filepath.Clean(oldAbs) == filepath.Clean(currentAbsPath) {
-			continue
-		}
-		// Re-stat the candidate path. If it's gone or its inode doesn't
-		// match the one we hold for it, the entity is stale.
-		info, statErr := s.store.Stat(oldAbs)
-		if statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				if delErr := s.deleteSubtree(candidateID); delErr != nil {
-					log.Printf("[filegate] reconcileByInode: delete vanished %s (%s) failed: %v", candidateID, oldAbs, delErr)
-				}
-			}
-			// Other stat errors (permission, IO): leave the entity alone
-			// rather than risk false deletion.
-			continue
-		}
-		curDev, curIno, _ := fileInodeIdentity(info)
-		if curDev != device || curIno != inode {
-			if delErr := s.deleteSubtree(candidateID); delErr != nil {
-				log.Printf("[filegate] reconcileByInode: delete stale %s (%s, dev=%d ino=%d) failed: %v",
-					candidateID, oldAbs, curDev, curIno, delErr)
-			}
-		}
-	}
+	// Stale child-entry cleanup is the responsibility of the consumer's
+	// directory-sync pass (Service.ReconcileDirectory), not syncSingle.
+	// That separation lets snapshot/cp-a duplicates coexist as separate
+	// entities without the per-sync inode reconciler stomping over the
+	// shared-name conflict.
 	return nil
 }
 
@@ -2196,6 +2203,128 @@ func (s *Service) listAllChildren(parentID FileID) ([]DirEntry, error) {
 		cursor = chunk[len(chunk)-1].Name
 	}
 	return out, nil
+}
+
+// ReconcileDirectory enforces the invariant that Children[parent_id] equals
+// readdir(parent_abs_path). It walks the directory on disk, walks the
+// indexed children, and drops any indexed name that no longer exists. New
+// names on disk are picked up through the normal syncSingle path triggered
+// by the detector — ReconcileDirectory does not synthesize sync calls for
+// them.
+//
+// This is the cheap correctness primitive that lets the detector consumer
+// catch stale namespace edges left behind by external operations the inode
+// stream alone cannot describe (hardlink unlink, in-subvol rename, etc.).
+// Called by cli.consumeDetectorEvents after each batch for every parent
+// dir touched by an event.
+//
+// Skipped silently when:
+//   - parentAbsPath isn't inside any watched mount (e.g. /tmp leaks),
+//   - the parent directory itself doesn't exist on disk,
+//   - the parent isn't indexed (we have nothing to reconcile against).
+func (s *Service) ReconcileDirectory(parentAbsPath string) error {
+	parentAbsPath = filepath.Clean(strings.TrimSpace(parentAbsPath))
+	if parentAbsPath == "" {
+		return nil
+	}
+	// Only reconcile inside a mount.
+	if _, _, _, ok := s.mountForAbsPath(parentAbsPath); !ok {
+		return nil
+	}
+	parentID, err := s.store.GetID(parentAbsPath)
+	if err != nil {
+		// Parent not indexed — nothing to reconcile from this side. The
+		// next sync of any child will also walk up and index the parent.
+		return nil
+	}
+	diskEntries, err := s.store.ReadDir(parentAbsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Parent went away while we were processing — let the next
+			// detector batch handle it.
+			return nil
+		}
+		return err
+	}
+	// Build a lookup of names that exist on disk. Symlinks are skipped to
+	// match Filegate's overall symlink-rejection policy.
+	onDisk := make(map[string]struct{}, len(diskEntries))
+	for _, e := range diskEntries {
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		onDisk[e.Name()] = struct{}{}
+	}
+
+	// Two-way reconcile:
+	//   1. Index entries with no on-disk counterpart -> stale, drop the
+	//      child edge (not the entity — it may be referenced from another
+	//      parent via a hardlink).
+	//   2. On-disk entries with no index counterpart -> new, sync them.
+	//      This catches operations the detector's inode stream misses
+	//      (in-subvol hardlink rename, mkdir on btrfs without contents,
+	//      etc.).
+	indexed, err := s.listAllChildren(parentID)
+	if err != nil {
+		return err
+	}
+	indexedByName := make(map[string]struct{}, len(indexed))
+	for _, c := range indexed {
+		indexedByName[c.Name] = struct{}{}
+	}
+	stale := make([]DirEntry, 0)
+	for _, child := range indexed {
+		if _, ok := onDisk[child.Name]; ok {
+			continue
+		}
+		stale = append(stale, child)
+	}
+	if len(stale) > 0 {
+		if err := s.idx.Batch(func(b Batch) error {
+			for _, c := range stale {
+				b.DelChild(parentID, c.Name)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		parentVP, vpErr := s.VirtualPath(parentID)
+		for _, c := range stale {
+			s.invalidateCacheByID(c.ID)
+			if vpErr == nil {
+				s.InvalidatePathCache(parentVP + "/" + c.Name)
+			}
+			// Note: EventDeleted here describes a namespace-edge removal,
+			// not necessarily the underlying entity going away. Subscribers
+			// that want entity-lifecycle semantics need to GetEntity(id)
+			// to confirm.
+			s.bus.Publish(Event{Type: EventDeleted, ID: c.ID, Path: filepath.Join(parentAbsPath, c.Name), At: time.Now()})
+		}
+		if vpErr == nil {
+			s.InvalidatePathCache(parentVP)
+		}
+	}
+
+	// Add on-disk entries that the index doesn't know about. syncSingle
+	// handles xattr conflict resolution and entity creation. We log and
+	// continue on per-child errors so one broken file doesn't block the
+	// rest of the directory.
+	for _, e := range diskEntries {
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if _, ok := indexedByName[e.Name()]; ok {
+			continue
+		}
+		childAbs := filepath.Join(parentAbsPath, e.Name())
+		if syncErr := s.syncSingle(childAbs); syncErr != nil && !errors.Is(syncErr, ErrNotFound) && !errors.Is(syncErr, ErrForbidden) {
+			// Non-trivial errors get swallowed with a log so an
+			// unstattable child doesn't poison the whole directory sync.
+			// The next ReconcileDirectory call will retry.
+			continue
+		}
+	}
+	return nil
 }
 
 func (s *Service) deleteSubtree(rootID FileID) error {
@@ -2394,30 +2523,21 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 				return nil
 			}
 
-			id, err := s.store.GetID(current)
-			if err != nil {
-				if !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				id, err = newID()
-				if err != nil {
-					return err
-				}
-				if err := s.store.SetID(current, id); err != nil {
-					// File may have been removed between WalkDir enumerating
-					// it and us writing the xattr. That is an inevitable race
-					// during a live rescan and must not abort the scan — the
-					// caller would lose every other file in the tree.
-					if errors.Is(err, os.ErrNotExist) {
-						return nil
-					}
-					return err
-				}
-			}
-
 			info, err := d.Info()
 			if err != nil {
 				return nil
+			}
+			// Use resolveOrReissueID so the xattr-conflict path applies
+			// during a Rescan too — without this, walking a directory
+			// containing an original AND its `cp -a` copy would let both
+			// paths claim the same stable ID and the second PutEntity
+			// would silently overwrite the first.
+			id, err := s.resolveOrReissueID(current, info)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
 			}
 			seen[id] = struct{}{}
 			pathToID[current] = id

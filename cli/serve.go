@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -292,6 +293,29 @@ func applyDetectorBatch(svc *domain.Service, batch []detect.Event) error {
 				continue
 			}
 			return err
+		}
+	}
+
+	// Directory-sync: every parent dir touched by an event in this batch
+	// gets a readdir-driven reconcile pass. This is the cheap correctness
+	// primitive that catches stale namespace edges left behind by
+	// operations the inode stream alone can't describe — hardlink unlink,
+	// in-subvol rename, recursive deletes whose intermediate children
+	// vanished without their own delete events, etc.
+	//
+	// For directory events we reconcile BOTH the parent (to catch the
+	// dir's own rename/removal at the parent level) AND the dir itself
+	// (to catch new/stale entries inside the touched dir).
+	dirtyDirs := make(map[string]struct{}, len(byPath))
+	for abs, ev := range byPath {
+		dirtyDirs[filepath.Dir(abs)] = struct{}{}
+		if ev.IsDir {
+			dirtyDirs[abs] = struct{}{}
+		}
+	}
+	for dir := range dirtyDirs {
+		if err := svc.ReconcileDirectory(dir); err != nil {
+			log.Printf("[filegate] ReconcileDirectory(%q) failed: %v", dir, err)
 		}
 	}
 

@@ -67,14 +67,17 @@ type Entity struct {
 	UID      uint32
 	GID      uint32
 	Mode     uint32
-	// Device and Inode together identify a file on disk independent of its
-	// path. Used by the inode-based reconciliation pass to detect external
-	// renames where a path moves but the inode (and xattr ID) stays the
-	// same. Zero means "unknown" — written entries without stat info.
+	// Device and Inode together identify a file on disk independent of
+	// its path. Persisted so resolveOrReissueID can detect xattr-clone
+	// duplicates (snapshot, cp -a) by comparing the entity's recorded
+	// inode against the path being synced — when they differ, a fresh
+	// UUID is minted for the new path. Zero means "unknown" (e.g. mount
+	// roots created without stat info).
 	Device uint64
 	Inode  uint64
-	// Nlink is the hard-link count. Reconciliation must skip when Nlink > 1
-	// because the inode is legitimately shared by multiple paths.
+	// Nlink is the hard-link count. PutEntity skips its same-id stale-
+	// child cleanup when nlink > 1 — hard-link siblings legitimately
+	// share an entity record across multiple (parent, name) pairs.
 	Nlink    uint32
 	MimeType string
 	Exif     map[string]string
