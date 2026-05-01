@@ -7,10 +7,6 @@ import (
 	"sync/atomic"
 )
 
-type dirSyncer interface {
-	Sync(dir string) error
-}
-
 type dirSyncFlight struct {
 	done chan struct{}
 	err  error
@@ -26,7 +22,7 @@ type coalescedDirSyncer struct {
 	syncFn   func(string) error
 }
 
-func newDirSyncer() dirSyncer {
+func newDirSyncer() *coalescedDirSyncer {
 	return &coalescedDirSyncer{
 		inflight: make(map[string]*dirSyncFlight),
 		syncFn:   syncDirPath,

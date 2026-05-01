@@ -46,7 +46,7 @@ type Service struct {
 	cache         *lru.Cache[string, pathCacheEntry]
 	idPathCache   *lru.Cache[FileID, string]
 	pathCacheSize int
-	dirSync       dirSyncer
+	dirSync       *coalescedDirSyncer
 	mu            sync.RWMutex
 	rescanMu      sync.Mutex
 }
