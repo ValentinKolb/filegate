@@ -593,7 +593,19 @@ func (s *Service) computeDirectorySizeByIDBudget(dirID FileID, remainingNodes *i
 		if err != nil {
 			continue
 		}
+		// Each enumerated child is one unit of work — decrementing only
+		// per popped directory lets a single huge directory consume an
+		// unbounded number of GetEntity calls under one budget tick.
 		for _, child := range children {
+			if remainingNodes != nil {
+				if *remainingNodes <= 0 {
+					return 0, false
+				}
+				*remainingNodes--
+			}
+			if !deadline.IsZero() && time.Now().After(deadline) {
+				return 0, false
+			}
 			if child.IsDir {
 				stack = append(stack, child.ID)
 				continue
