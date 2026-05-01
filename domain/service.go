@@ -2217,8 +2217,8 @@ func (s *Service) listAllChildren(parentID FileID) ([]DirEntry, error) {
 // This is the cheap correctness primitive that lets the detector consumer
 // catch stale namespace edges left behind by external operations the inode
 // stream alone cannot describe (hardlink unlink, in-subvol rename, etc.).
-// Called by cli.consumeDetectorEvents after each batch for every parent
-// dir touched by an event.
+// Intended to run after a detector batch for every parent dir touched by
+// an event; safe to call any time under load.
 //
 // Skipped silently when:
 //   - parentAbsPath isn't inside any watched mount (e.g. /tmp leaks),

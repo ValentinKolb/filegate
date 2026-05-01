@@ -41,6 +41,20 @@ var ErrIndexClosed = errors.New("index closed")
 // ErrIndexUnavailable is returned when a fatal Pebble error has been recorded.
 var ErrIndexUnavailable = errors.New("index unavailable")
 
+// IsTerminalError reports whether err signals that the index is no longer
+// usable and the caller's loop should stop. Recognises ErrIndexClosed,
+// ErrIndexUnavailable, and the raw "pebble: closed" string returned by
+// background pebble goroutines that bypass the index runOp wrapper.
+func IsTerminalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrIndexClosed) || errors.Is(err, ErrIndexUnavailable) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "pebble: closed")
+}
+
 var indexFormatVersionKey = []byte{0x00, 'f', 'g', ':', 'i', 'd', 'x', ':', 'f', 'm', 't'}
 
 // Index is a thread-safe metadata store backed by a Pebble database.

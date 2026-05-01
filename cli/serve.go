@@ -358,9 +358,5 @@ func isDetectorTerminalError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return true
 	}
-	if errors.Is(err, indexpebble.ErrIndexClosed) || errors.Is(err, indexpebble.ErrIndexUnavailable) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "pebble: closed")
+	return indexpebble.IsTerminalError(err)
 }
