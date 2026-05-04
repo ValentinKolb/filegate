@@ -144,6 +144,44 @@ func registerVersionRoutes(handleV1 func(string, http.HandlerFunc), svc *domain.
 		writeJSON(w, http.StatusOK, versionResponse(*updated))
 	})
 
+	handleV1("POST /v1/nodes/{id}/versions/{vid}/restore", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseID(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		vid, err := domain.ParseVersionID(r.PathValue("vid"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid version id")
+			return
+		}
+		var body apiv1.VersionRestoreRequest
+		if r.ContentLength > 0 {
+			if ok := decodeJSONBody(w, r, &body); !ok {
+				return
+			}
+		}
+		meta, asNew, err := svc.RestoreVersion(id, vid, domain.RestoreOptions{
+			AsNewFile: body.AsNewFile,
+			Name:      body.Name,
+		})
+		if err != nil {
+			if errors.Is(err, domain.ErrUnsupportedFS) {
+				writeErr(w, http.StatusNotFound, "versioning not supported on this mount")
+				return
+			}
+			if errors.Is(err, domain.ErrConflict) {
+				writeErr(w, http.StatusConflict, "could not place restored file (suffix space exhausted)")
+				return
+			}
+			statusFromErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, apiv1.VersionRestoreResponse{
+			Node:  nodeResponse(meta),
+			AsNew: asNew,
+		})
+	})
+
 	handleV1("GET /v1/nodes/{id}/versions/{vid}/content", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseID(w, r.PathValue("id"))
 		if !ok {

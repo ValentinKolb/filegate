@@ -186,6 +186,24 @@ type VersionPinRequest struct {
 	Label *string `json:"label,omitempty"`
 }
 
+// VersionRestoreRequest is the body for POST /v1/nodes/{id}/versions/{vid}/restore.
+// Both fields are optional. AsNewFile=false (default) does an in-place
+// restore — current bytes get snapshotted, then replaced. AsNewFile=true
+// places the version's bytes into a fresh sibling file; Name overrides
+// the default `<base>-restored<ext>` and gets a `-N` suffix on conflict.
+type VersionRestoreRequest struct {
+	AsNewFile bool   `json:"asNewFile,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
+// VersionRestoreResponse is returned after a successful restore.
+// AsNew is true for as-new restores, false for in-place. Node holds the
+// resulting file (the source for in-place, the new sibling for as-new).
+type VersionRestoreResponse struct {
+	Node  Node `json:"node"`
+	AsNew bool `json:"asNew"`
+}
+
 // GlobSearchResponse is returned by GET /v1/search/glob.
 type GlobSearchResponse struct {
 	Results []Node            `json:"results"`
