@@ -49,6 +49,13 @@ type Service struct {
 	dirSync       *coalescedDirSyncer
 	mu            sync.RWMutex
 	rescanMu      sync.Mutex
+
+	// Versioning subsystem. EnableVersioning wires these from cli config
+	// after NewService; default-zero means "feature off" so existing
+	// callers (incl. legacy tests) keep working without changes.
+	versioningEnabled bool
+	versioningCfg     VersioningConfig
+	versionLocks      *fileLockMap
 }
 
 // NewService creates a Service with the given infrastructure adapters and mount paths.
@@ -78,6 +85,7 @@ func NewService(idx Index, store Store, bus EventBus, basePaths []string, pathCa
 		idPathCache:   idPathCache,
 		pathCacheSize: effectivePathCacheSize,
 		dirSync:       newDirSyncer(),
+		versionLocks:  newFileLockMap(),
 	}
 
 	for _, p := range basePaths {
@@ -1023,6 +1031,10 @@ func (s *Service) WriteContent(id FileID, body io.Reader) error {
 	}
 
 	preserveID := meta.ID
+	// Snapshot the existing bytes BEFORE the atomic write clobbers them.
+	// captureBeforeOverwrite is best-effort and never fails the user's
+	// write — the worst-case is a missed version, not a missed mutation.
+	s.captureBeforeOverwrite(id, abs)
 	if err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false); err != nil {
 		return err
 	}
@@ -1081,6 +1093,12 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 	existingID, err := s.store.GetID(targetPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
+	}
+	// Pre-overwrite snapshot of the existing target's bytes so the
+	// previous content is recoverable. If existingID is zero this is a
+	// fresh slot and there are no bytes to capture.
+	if !existingID.IsZero() {
+		s.captureBeforeOverwrite(existingID, targetPath)
 	}
 	sourceID, err := s.store.GetID(srcPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1149,6 +1167,10 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 		eventType = EventUpdated
 	}
 	s.bus.Publish(Event{Type: eventType, ID: id, Path: targetPath, At: time.Now()})
+	if eventType == EventCreated {
+		// Auto V1 for the freshly-placed file (subject to the size floor).
+		s.captureFirstVersion(id, targetPath)
+	}
 	return s.GetFile(id)
 }
 

@@ -43,4 +43,10 @@ type Store interface {
 	OpenWrite(path string, perm os.FileMode) (io.WriteCloser, error)
 	SetID(path string, id FileID) error
 	GetID(path string) (FileID, error)
+	// CloneFile copies srcPath to dstPath using FICLONE on btrfs (cheap,
+	// constant-time) or a byte copy fallback. dstPath must not exist;
+	// callers create the parent directory first. Returns true when the
+	// reflink fast-path was used. Used by the versioning subsystem to
+	// snapshot file bytes without paying double the storage on btrfs.
+	CloneFile(srcPath, dstPath string) (reflinked bool, err error)
 }

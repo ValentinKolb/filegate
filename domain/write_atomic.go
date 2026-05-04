@@ -67,6 +67,8 @@ func (s *Service) createAndWriteContent(parentID FileID, fileName string, body i
 		return nil, err
 	}
 	s.bus.Publish(Event{Type: EventCreated, ID: id, Path: targetAbs, At: time.Now()})
+	// Auto V1 for the freshly-uploaded file (subject to the size floor).
+	s.captureFirstVersion(id, targetAbs)
 	return s.GetFile(id)
 }
 

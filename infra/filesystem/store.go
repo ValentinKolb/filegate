@@ -76,3 +76,7 @@ func (s *Store) SetID(path string, id domain.FileID) error {
 func (s *Store) GetID(path string) (domain.FileID, error) {
 	return getID(path)
 }
+
+func (s *Store) CloneFile(srcPath, dstPath string) (bool, error) {
+	return CloneFile(srcPath, dstPath)
+}
