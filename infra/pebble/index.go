@@ -21,15 +21,18 @@ import (
 const (
 	familyEntity byte = 0x01
 	familyChild  byte = 0x02
+	// 0x03 is intentionally skipped — the legacy inode keyspace lived
+	// there before its removal at format version 6. Reusing 0x03 would
+	// risk collisions with stale bytes on indexes that didn't get a
+	// clean rebuild between bumps.
+	familyVersion byte = 0x04
 
-	// currentIndexFormatVersion was bumped from 5 to 6 when the secondary
-	// inode keyspace was removed. The directory-sync reconciliation pass
-	// (Service.ReconcileDirectory) plus the xattr-conflict re-issue rule
-	// (Service.resolveOrReissueID) together do the work the inode index
-	// used to do, with simpler write-path semantics. Older indexes carry
-	// dead bytes under family 0x03 that this build will never read; the
-	// version bump forces a clean rebuild.
-	currentIndexFormatVersion uint16 = 6
+	// currentIndexFormatVersion was bumped from 6 to 7 when the per-file
+	// versioning subsystem (`familyVersion`) was added. The bump forces
+	// a clean rebuild so old indexes don't surface partial data; the new
+	// keyspace is empty after the rebuild and gets populated as files
+	// are written or manually snapshotted.
+	currentIndexFormatVersion uint16 = 7
 )
 
 // ErrUnsupportedIndexFormat is returned when the on-disk index version is incompatible.
@@ -314,6 +317,57 @@ func decodeChild(name string, value []byte) (domain.DirEntry, error) {
 	}, nil
 }
 
+// versionPrefix returns the key prefix for all versions of fileID. Used for
+// "list all versions of file X" iterations.
+func versionPrefix(fileID domain.FileID) []byte {
+	prefix := make([]byte, 1+16)
+	prefix[0] = familyVersion
+	copy(prefix[1:], fileID[:])
+	return prefix
+}
+
+// versionKey returns the full Pebble key for a single version. The
+// VersionID is a UUIDv7, whose first 6 bytes are the BigEndian unix-ms
+// timestamp — appending it to the file prefix gives natural chronological
+// sort within a file with the random tail breaking ms collisions.
+func versionKey(fileID domain.FileID, versionID domain.VersionID) []byte {
+	key := make([]byte, 1+16+16)
+	key[0] = familyVersion
+	copy(key[1:17], fileID[:])
+	copy(key[17:], versionID[:])
+	return key
+}
+
+func encodeVersion(meta domain.VersionMeta) ([]byte, error) {
+	return fgbin.EncodeVersion(fgbin.Version{
+		VersionID: [16]byte(meta.VersionID),
+		FileID:    [16]byte(meta.FileID),
+		Timestamp: meta.Timestamp,
+		Size:      meta.Size,
+		Mode:      meta.Mode,
+		DeletedAt: meta.DeletedAt,
+		Pinned:    meta.Pinned,
+		Label:     []byte(meta.Label),
+	})
+}
+
+func decodeVersion(value []byte) (domain.VersionMeta, error) {
+	rec, err := fgbin.DecodeVersion(value)
+	if err != nil {
+		return domain.VersionMeta{}, err
+	}
+	return domain.VersionMeta{
+		VersionID: domain.VersionID(rec.VersionID),
+		FileID:    domain.FileID(rec.FileID),
+		Timestamp: rec.Timestamp,
+		Size:      rec.Size,
+		Mode:      rec.Mode,
+		Pinned:    rec.Pinned,
+		Label:     string(rec.Label),
+		DeletedAt: rec.DeletedAt,
+	}, nil
+}
+
 func (i *Index) GetEntity(id domain.FileID) (out *domain.Entity, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -484,6 +538,168 @@ func (i *Index) ForEachEntity(fn func(domain.Entity) error) error {
 	return retErr
 }
 
+// GetVersion returns the metadata for a single version, or domain.ErrNotFound.
+func (i *Index) GetVersion(fileID domain.FileID, versionID domain.VersionID) (out *domain.VersionMeta, err error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	defer i.recoverIntoError(&err)
+	v, closer, err := i.db.Get(versionKey(fileID, versionID))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, domain.ErrNotFound
+		}
+		return nil, normalizeIndexErr(err)
+	}
+	defer closer.Close()
+	meta, err := decodeVersion(v)
+	if err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+// ListVersions returns versions of fileID, ordered by Timestamp ascending
+// (oldest first). The `after` cursor is the VersionID returned at the end
+// of the previous page; pass the zero VersionID to start from the beginning.
+// limit ≤ 0 defaults to 100, limit > 1000 caps to 1000.
+func (i *Index) ListVersions(fileID domain.FileID, after domain.VersionID, limit int) ([]domain.VersionMeta, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	prefix := versionPrefix(fileID)
+	start := prefix
+	if !after.IsZero() {
+		// Strict-greater-than: skip past the cursor's exact key. SeekGE
+		// to the cursor and skip it on the first iteration would also
+		// work but adds a branch in the hot loop.
+		startKey := versionKey(fileID, after)
+		start = append(append([]byte(nil), startKey...), 0x00)
+	}
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := i.db.NewIter(iterOpts)
+	if err != nil {
+		return nil, normalizeIndexErr(err)
+	}
+	defer iter.Close()
+
+	out := make([]domain.VersionMeta, 0, limit)
+	for ok := iter.SeekGE(start); ok && iter.Valid() && len(out) < limit; ok = iter.Next() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, prefix) || len(k) != 1+16+16 {
+			break
+		}
+		meta, err := decodeVersion(iter.Value())
+		if err != nil {
+			continue
+		}
+		out = append(out, meta)
+	}
+	return out, retErr
+}
+
+// LatestVersionTimestamp returns the Timestamp of the newest version of
+// fileID, or 0 if no versions exist. Used by the cooldown check on the
+// auto-capture path. The Pebble keys are sorted by VersionID ascending,
+// which (because UUIDv7's leading bytes are BigEndian unix-ms) is the
+// same as Timestamp ascending — the last key in the prefix is the newest.
+func (i *Index) LatestVersionTimestamp(fileID domain.FileID) (ts int64, err error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return 0, normalizeIndexErr(stateErr)
+	}
+	defer i.recoverIntoError(&err)
+	prefix := versionPrefix(fileID)
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, ierr := i.db.NewIter(iterOpts)
+	if ierr != nil {
+		return 0, normalizeIndexErr(ierr)
+	}
+	defer iter.Close()
+	if !iter.SeekLT(iterOpts.UpperBound) {
+		return 0, nil
+	}
+	k := iter.Key()
+	if !bytes.HasPrefix(k, prefix) || len(k) != 1+16+16 {
+		return 0, nil
+	}
+	meta, derr := decodeVersion(iter.Value())
+	if derr != nil {
+		return 0, derr
+	}
+	return meta.Timestamp, nil
+}
+
+// MarkVersionsDeleted sets DeletedAt = deletedAt on every version of
+// fileID whose DeletedAt is currently zero. Idempotent: re-running with a
+// later timestamp does not bump already-marked entries (the original
+// transition time wins, so the grace period is measured from when the
+// file actually went away, not from a re-mark). Returns the number of
+// rows updated.
+func (i *Index) MarkVersionsDeleted(fileID domain.FileID, deletedAt int64) (n int, err error) {
+	if deletedAt <= 0 {
+		return 0, domain.ErrInvalidArgument
+	}
+	versions, err := i.ListVersions(fileID, domain.VersionID{}, 0)
+	if err != nil {
+		return 0, err
+	}
+	pending := make([]domain.VersionMeta, 0, len(versions))
+	for _, v := range versions {
+		if v.DeletedAt == 0 {
+			v.DeletedAt = deletedAt
+			pending = append(pending, v)
+		}
+	}
+	for len(versions) == 1000 {
+		// Page through if the file has many versions. ListVersions caps
+		// at 1000 per call.
+		next, lerr := i.ListVersions(fileID, versions[len(versions)-1].VersionID, 0)
+		if lerr != nil {
+			return 0, lerr
+		}
+		versions = next
+		for _, v := range versions {
+			if v.DeletedAt == 0 {
+				v.DeletedAt = deletedAt
+				pending = append(pending, v)
+			}
+		}
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+	if err := i.Batch(func(b domain.Batch) error {
+		for _, v := range pending {
+			b.PutVersion(v)
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return len(pending), nil
+}
+
 type batch struct {
 	b   pebbleBatchReadWriter
 	err error
@@ -597,6 +813,29 @@ func (b *batch) DelEntity(id domain.FileID) {
 		return
 	}
 	b.setErr(b.b.Delete(entityKey(id), nil))
+}
+
+func (b *batch) PutVersion(meta domain.VersionMeta) {
+	if b.err != nil {
+		return
+	}
+	if meta.FileID.IsZero() || meta.VersionID.IsZero() {
+		b.setErr(domain.ErrInvalidArgument)
+		return
+	}
+	payload, err := encodeVersion(meta)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(versionKey(meta.FileID, meta.VersionID), payload, nil))
+}
+
+func (b *batch) DelVersion(fileID domain.FileID, versionID domain.VersionID) {
+	if b.err != nil {
+		return
+	}
+	b.setErr(b.b.Delete(versionKey(fileID, versionID), nil))
 }
 
 func (i *Index) Batch(fn func(domain.Batch) error) error {

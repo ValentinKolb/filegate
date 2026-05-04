@@ -126,3 +126,13 @@ func (f *fakeIndex) ForEachEntity(fn func(Entity) error) error {
 func (f *fakeIndex) Batch(fn func(Batch) error) error { return fn(nil) }
 
 func (f *fakeIndex) Close() error { return nil }
+
+// Versioning surface — not exercised by the budget test, satisfies the
+// Index port so &Service{idx: f} compiles.
+func (f *fakeIndex) GetVersion(FileID, VersionID) (*VersionMeta, error) { return nil, ErrNotFound }
+
+func (f *fakeIndex) ListVersions(FileID, VersionID, int) ([]VersionMeta, error) { return nil, nil }
+
+func (f *fakeIndex) LatestVersionTimestamp(FileID) (int64, error) { return 0, nil }
+
+func (f *fakeIndex) MarkVersionsDeleted(FileID, int64) (int, error) { return 0, nil }

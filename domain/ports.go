@@ -12,6 +12,10 @@ type Index interface {
 	ListChildren(parentID FileID, after string, limit int) ([]DirEntry, error)
 	ListEntities() ([]Entity, error)
 	ForEachEntity(func(Entity) error) error
+	GetVersion(fileID FileID, versionID VersionID) (*VersionMeta, error)
+	ListVersions(fileID FileID, after VersionID, limit int) ([]VersionMeta, error)
+	LatestVersionTimestamp(fileID FileID) (int64, error)
+	MarkVersionsDeleted(fileID FileID, deletedAt int64) (int, error)
 	Batch(fn func(Batch) error) error
 	Close() error
 }
@@ -22,6 +26,8 @@ type Batch interface {
 	PutChild(parentID FileID, name string, entry DirEntry)
 	DelChild(parentID FileID, name string)
 	DelEntity(id FileID)
+	PutVersion(meta VersionMeta)
+	DelVersion(fileID FileID, versionID VersionID)
 }
 
 // Store is the port interface for filesystem I/O operations.
