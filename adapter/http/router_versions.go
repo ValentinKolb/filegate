@@ -62,6 +62,88 @@ func registerVersionRoutes(handleV1 func(string, http.HandlerFunc), svc *domain.
 		writeJSON(w, http.StatusOK, out)
 	})
 
+	handleV1("POST /v1/nodes/{id}/versions/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseID(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		var body apiv1.VersionSnapshotRequest
+		// Body is optional; an empty request still means "snapshot now".
+		if r.ContentLength > 0 {
+			if ok := decodeJSONBody(w, r, &body); !ok {
+				return
+			}
+		}
+		meta, err := svc.SnapshotVersion(id, body.Label)
+		if err != nil {
+			if errors.Is(err, domain.ErrUnsupportedFS) {
+				writeErr(w, http.StatusNotFound, "versioning not supported on this mount")
+				return
+			}
+			if errors.Is(err, domain.ErrConflict) {
+				writeErr(w, http.StatusConflict, "max pinned versions reached for this file")
+				return
+			}
+			statusFromErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, versionResponse(*meta))
+	})
+
+	handleV1("POST /v1/nodes/{id}/versions/{vid}/pin", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseID(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		vid, err := domain.ParseVersionID(r.PathValue("vid"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid version id")
+			return
+		}
+		var body apiv1.VersionPinRequest
+		if r.ContentLength > 0 {
+			if ok := decodeJSONBody(w, r, &body); !ok {
+				return
+			}
+		}
+		updated, err := svc.PinVersion(id, vid, body.Label)
+		if err != nil {
+			if errors.Is(err, domain.ErrUnsupportedFS) {
+				writeErr(w, http.StatusNotFound, "versioning not supported on this mount")
+				return
+			}
+			if errors.Is(err, domain.ErrConflict) {
+				writeErr(w, http.StatusConflict, "max pinned versions reached for this file")
+				return
+			}
+			statusFromErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, versionResponse(*updated))
+	})
+
+	handleV1("POST /v1/nodes/{id}/versions/{vid}/unpin", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseID(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		vid, err := domain.ParseVersionID(r.PathValue("vid"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid version id")
+			return
+		}
+		updated, err := svc.UnpinVersion(id, vid)
+		if err != nil {
+			if errors.Is(err, domain.ErrUnsupportedFS) {
+				writeErr(w, http.StatusNotFound, "versioning not supported on this mount")
+				return
+			}
+			statusFromErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, versionResponse(*updated))
+	})
+
 	handleV1("GET /v1/nodes/{id}/versions/{vid}/content", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseID(w, r.PathValue("id"))
 		if !ok {

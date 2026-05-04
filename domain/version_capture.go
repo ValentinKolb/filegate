@@ -263,6 +263,146 @@ func (s *Service) ListVersions(fileID FileID, cursor VersionID, limit int) (*Lis
 	return out, nil
 }
 
+// SnapshotVersion captures the current bytes of fileID as a pinned
+// version regardless of cooldown or size floor. The optional label is
+// stored opaquely on the version. Returns ErrUnsupportedFS when
+// versioning is disabled, ErrNotFound when the file doesn't exist,
+// ErrInvalidArgument when the label exceeds MaxLabelBytes, and
+// ErrConflict when the per-file pinned cap is already reached.
+func (s *Service) SnapshotVersion(fileID FileID, label string) (*VersionMeta, error) {
+	if !s.VersioningEnabled() {
+		return nil, ErrUnsupportedFS
+	}
+	cfg := s.versioningSnapshot()
+	if cfg.MaxLabelBytes > 0 && len(label) > cfg.MaxLabelBytes {
+		return nil, ErrInvalidArgument
+	}
+	srcAbs, err := s.ResolveAbsPath(fileID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.enforcePinnedCap(fileID, cfg, VersionID{}); err != nil {
+		return nil, err
+	}
+	return s.captureCurrentBytes(fileID, srcAbs, captureOptions{
+		ignoreCooldown:     true,
+		honourMinSizeFloor: false,
+		pinned:             true,
+		label:              label,
+	})
+}
+
+// PinVersion marks an existing version as pinned and optionally updates
+// its label. Idempotent: re-pinning an already-pinned version succeeds
+// and overwrites the label only when label != nil.
+//
+// Returns ErrUnsupportedFS when versioning is disabled, ErrNotFound when
+// the file or version doesn't exist, ErrInvalidArgument when the label
+// is too long, ErrConflict when pinning would exceed the per-file
+// pinned cap (re-pinning an already-pinned version is allowed even at
+// the cap because it doesn't add a new pin).
+func (s *Service) PinVersion(fileID FileID, versionID VersionID, label *string) (*VersionMeta, error) {
+	if !s.VersioningEnabled() {
+		return nil, ErrUnsupportedFS
+	}
+	cfg := s.versioningSnapshot()
+	if label != nil && cfg.MaxLabelBytes > 0 && len(*label) > cfg.MaxLabelBytes {
+		return nil, ErrInvalidArgument
+	}
+
+	mu := s.versionLocks.Acquire(fileID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	current, err := s.idx.GetVersion(fileID, versionID)
+	if err != nil {
+		return nil, err
+	}
+	// If we'd be transitioning unpinned -> pinned, check the cap. The
+	// already-pinned re-pin is exempt because the count doesn't change.
+	if !current.Pinned {
+		if err := s.enforcePinnedCap(fileID, cfg, versionID); err != nil {
+			return nil, err
+		}
+	}
+	updated := *current
+	updated.Pinned = true
+	if label != nil {
+		updated.Label = *label
+	}
+	if err := s.idx.Batch(func(b Batch) error {
+		b.PutVersion(updated)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// UnpinVersion clears the pinned flag, allowing the bucket pruner to
+// reclaim the version per the retention policy. Idempotent: calling on
+// an already-unpinned version is a no-op success.
+func (s *Service) UnpinVersion(fileID FileID, versionID VersionID) (*VersionMeta, error) {
+	if !s.VersioningEnabled() {
+		return nil, ErrUnsupportedFS
+	}
+	mu := s.versionLocks.Acquire(fileID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	current, err := s.idx.GetVersion(fileID, versionID)
+	if err != nil {
+		return nil, err
+	}
+	if !current.Pinned {
+		return current, nil
+	}
+	updated := *current
+	updated.Pinned = false
+	if err := s.idx.Batch(func(b Batch) error {
+		b.PutVersion(updated)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// enforcePinnedCap returns ErrConflict when adding a new pinned version
+// to fileID would exceed the configured cap. exceptID is excluded from
+// the count so re-pinning an already-pinned version isn't blocked.
+//
+// MaxPinnedPerFile <= 0 disables the cap (unbounded; operator opt-in).
+func (s *Service) enforcePinnedCap(fileID FileID, cfg VersioningConfig, exceptID VersionID) error {
+	if cfg.MaxPinnedPerFile <= 0 {
+		return nil
+	}
+	count := 0
+	cursor := VersionID{}
+	for {
+		page, err := s.idx.ListVersions(fileID, cursor, 1000)
+		if err != nil {
+			return err
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, v := range page {
+			if v.Pinned && v.VersionID != exceptID {
+				count++
+				if count >= cfg.MaxPinnedPerFile {
+					return ErrConflict
+				}
+			}
+		}
+		if len(page) < 1000 {
+			break
+		}
+		cursor = page[len(page)-1].VersionID
+	}
+	return nil
+}
+
 // OpenVersionContent opens the byte payload for a specific version.
 // Returns ErrNotFound if the file or version doesn't exist. The returned
 // reader MUST be closed by the caller.

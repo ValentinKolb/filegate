@@ -173,6 +173,19 @@ type ListVersionsResponse struct {
 	NextCursor string            `json:"nextCursor,omitempty"`
 }
 
+// VersionSnapshotRequest is the body for POST /v1/nodes/{id}/versions/snapshot.
+// Both fields are optional. Label is opaque server-side, capped at the
+// configured max_label_bytes.
+type VersionSnapshotRequest struct {
+	Label string `json:"label,omitempty"`
+}
+
+// VersionPinRequest is the body for POST /v1/nodes/{id}/versions/{vid}/pin.
+// Label is optional; nil leaves the existing label unchanged, "" clears it.
+type VersionPinRequest struct {
+	Label *string `json:"label,omitempty"`
+}
+
 // GlobSearchResponse is returned by GET /v1/search/glob.
 type GlobSearchResponse struct {
 	Results []Node            `json:"results"`
