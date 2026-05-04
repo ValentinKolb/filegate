@@ -6,6 +6,16 @@ export type { GetPathOptions, PathPutResponse, PutPathOptions } from "./paths.js
 export type { ThumbnailOptions } from "./nodes.js";
 export type { ChunkedSendResult } from "./uploads.js";
 export type { GlobOptions } from "./search.js";
+export type {
+  ListVersionsOptions,
+  ListVersionsResponse,
+  RestoreOptions,
+  VersionPinRequest,
+  VersionResponse,
+  VersionRestoreRequest,
+  VersionRestoreResponse,
+  VersionSnapshotRequest,
+} from "./versions.js";
 
 export type { FileConflictMode, MkdirConflictMode } from "./types.js";
 

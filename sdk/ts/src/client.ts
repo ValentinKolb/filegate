@@ -6,6 +6,7 @@ import { SearchClient } from "./search.js";
 import { StatsClient } from "./stats.js";
 import { TransfersClient } from "./transfers.js";
 import { UploadsClient } from "./uploads.js";
+import { VersionsClient } from "./versions.js";
 
 export interface FilegateConfig {
   baseUrl: string;
@@ -26,6 +27,7 @@ export class Filegate {
   readonly search: SearchClient;
   readonly index: IndexClient;
   readonly stats: StatsClient;
+  readonly versions: VersionsClient;
 
   readonly baseUrl: string;
 
@@ -49,6 +51,7 @@ export class Filegate {
     this.search = new SearchClient(core);
     this.index = new IndexClient(core);
     this.stats = new StatsClient(core);
+    this.versions = new VersionsClient(core);
   }
 }
 
