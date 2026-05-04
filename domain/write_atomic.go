@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func ownershipFromFileMeta(meta *FileMeta) *Ownership {
@@ -65,6 +66,7 @@ func (s *Service) createAndWriteContent(parentID FileID, fileName string, body i
 	if err != nil {
 		return nil, err
 	}
+	s.bus.Publish(Event{Type: EventCreated, ID: id, Path: targetAbs, At: time.Now()})
 	return s.GetFile(id)
 }
 

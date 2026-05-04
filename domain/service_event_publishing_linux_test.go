@@ -103,9 +103,11 @@ func TestDeleteSubtreePublishesExactlyOneEventDeleted(t *testing.T) {
 	}
 }
 
-// TestSyncSubtreePublishesBulkEventUpdated pins that syncSubtree emits a
-// single bulk EventUpdated for the subtree root, not per-descendant noise.
-func TestSyncSubtreePublishesBulkEventUpdated(t *testing.T) {
+// TestTransferMoveEmitsSingleEventMoved pins that Transfer move emits one
+// EventMoved for the subtree root and does NOT degenerate into per-
+// descendant noise (5 descendants → not 5+ events). The recursive-ownership
+// path also goes through syncSubtree, which must remain emission-silent.
+func TestTransferMoveEmitsSingleEventMoved(t *testing.T) {
 	svc, bus, cleanup := newServiceWithRecordedBus(t)
 	defer cleanup()
 
@@ -125,8 +127,6 @@ func TestSyncSubtreePublishesBulkEventUpdated(t *testing.T) {
 	}
 	bus.reset()
 
-	// Move with recursiveOwnership triggers syncSubtree for the moved
-	// directory's contents — that's the path we're pinning.
 	recursive := true
 	if _, err := svc.Transfer(domain.TransferRequest{
 		Op:                 "move",
@@ -140,16 +140,18 @@ func TestSyncSubtreePublishesBulkEventUpdated(t *testing.T) {
 		t.Fatalf("transfer: %v", err)
 	}
 
-	updates := filterByType(bus.snapshot(), domain.EventUpdated)
-	// We don't pin the exact number — Transfer.move is a complex op that may
-	// trigger several syncs. We only pin that we DON'T see one event per
-	// descendant: 5 descendants but at most a handful of bulk events.
-	if len(updates) > 4 {
-		t.Fatalf("syncSubtree-level emission produced too many events (%d) — looks like per-descendant emission regressed: %#v",
-			len(updates), updates)
+	moved := filterByType(bus.snapshot(), domain.EventMoved)
+	if len(moved) != 1 {
+		t.Fatalf("expected exactly 1 EventMoved, got %d: %#v", len(moved), moved)
 	}
-	if len(updates) == 0 {
-		t.Fatalf("expected at least one EventUpdated from move (syncSubtree path), got none")
+	if moved[0].ID != src.ID {
+		t.Fatalf("EventMoved.ID = %s, want %s", moved[0].ID, src.ID)
+	}
+	// And — the per-descendant noise guard. No more than a handful total
+	// events even though the subtree has 5 children.
+	if total := len(bus.snapshot()); total > 4 {
+		t.Fatalf("Transfer move produced %d events (per-descendant emission regressed?): %#v",
+			total, bus.snapshot())
 	}
 }
 

@@ -1026,7 +1026,11 @@ func (s *Service) WriteContent(id FileID, body io.Reader) error {
 	if err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false); err != nil {
 		return err
 	}
-	return s.syncSingle(abs)
+	if err := s.syncSingle(abs); err != nil {
+		return err
+	}
+	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: abs, At: time.Now()})
+	return nil
 }
 
 // ReplaceFile places the file at srcPath under parentID/name, honoring the
@@ -1138,6 +1142,13 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 	if err != nil {
 		return nil, err
 	}
+	// existingID was captured BEFORE the rename, so it tells us whether the
+	// target slot was already populated. Replace = update, fresh slot = create.
+	eventType := EventCreated
+	if !existingID.IsZero() {
+		eventType = EventUpdated
+	}
+	s.bus.Publish(Event{Type: eventType, ID: id, Path: targetPath, At: time.Now()})
 	return s.GetFile(id)
 }
 
@@ -1328,6 +1339,11 @@ func (s *Service) MkdirRelative(parentID FileID, relPath string, recursive bool,
 	if err != nil {
 		return nil, err
 	}
+	// Only emit when we actually created the leaf directory. Idempotent
+	// "skip on existing" calls are no-ops semantically and emit nothing.
+	if createdAny {
+		s.bus.Publish(Event{Type: EventCreated, ID: id, Path: targetAbs, At: time.Now()})
+	}
 	return s.GetFile(id)
 }
 
@@ -1483,6 +1499,7 @@ func (s *Service) CreateChild(parentID FileID, name string, isDir bool, ownershi
 	if err != nil {
 		return nil, err
 	}
+	s.bus.Publish(Event{Type: EventCreated, ID: id, Path: abs, At: time.Now()})
 	return s.GetFile(id)
 }
 
@@ -1505,6 +1522,7 @@ func (s *Service) UpdateNode(id FileID, name *string, ownership *Ownership, recu
 		oldCachePath = normalizeCacheKey(vp)
 	}
 
+	renamed := false
 	if name != nil {
 		newName := strings.TrimSpace(*name)
 		if newName == "" || strings.Contains(newName, "/") {
@@ -1515,6 +1533,7 @@ func (s *Service) UpdateNode(id FileID, name *string, ownership *Ownership, recu
 		}
 
 		if newName != entity.Name {
+			renamed = true
 			parentAbs, err := s.ResolveAbsPath(entity.ParentID)
 			if err != nil {
 				return nil, err
@@ -1587,6 +1606,14 @@ func (s *Service) UpdateNode(id FileID, name *string, ownership *Ownership, recu
 		}
 	}
 	s.invalidateCacheByID(id)
+	// Rename → EventMoved (entity stays, path/name changes). Pure
+	// ownership change → EventUpdated. abs has been reassigned to the
+	// post-rename path inside the rename branch.
+	eventType := EventUpdated
+	if renamed {
+		eventType = EventMoved
+	}
+	s.bus.Publish(Event{Type: eventType, ID: id, Path: abs, At: time.Now()})
 	return s.GetFile(id)
 }
 
@@ -1774,6 +1801,9 @@ func (s *Service) Transfer(req TransferRequest) (*FileMeta, error) {
 				return nil, err
 			}
 		}
+		// Move keeps the entity ID; path changed. EventMoved with the new
+		// absolute path.
+		s.bus.Publish(Event{Type: EventMoved, ID: req.SourceID, Path: targetAbs, At: time.Now()})
 		return s.GetFile(req.SourceID)
 	}
 
@@ -1790,6 +1820,10 @@ func (s *Service) Transfer(req TransferRequest) (*FileMeta, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Copy creates a fresh entity at the target path. EventCreated
+	// covers the subtree root; descendants of a copied directory are
+	// already represented under the same root.
+	s.bus.Publish(Event{Type: EventCreated, ID: newID, Path: targetAbs, At: time.Now()})
 	return s.GetFile(newID)
 }
 
@@ -1906,18 +1940,16 @@ func (s *Service) syncSubtree(absPath string) error {
 	}); err != nil {
 		return err
 	}
-	// Publish a single bulk EventUpdated for the subtree root. Subscribers
-	// only need to know "something under this path changed" — emitting one
-	// event per descendant would be wasteful for big subtrees and would
-	// also surprise callers who expect symmetry with the deleteSubtree
-	// publish below.
-	rootID, idErr := s.store.GetID(absPath)
-	if idErr == nil {
+	// Cache invalidation happens here, but no event is emitted: syncSubtree
+	// is a low-level primitive used by both create-style flows (Transfer
+	// copy) and update-style flows (Transfer move with recursive ownership).
+	// The semantic event (Created / Moved / Updated) is emitted by the
+	// public caller for the subtree root.
+	if rootID, idErr := s.store.GetID(absPath); idErr == nil {
 		s.invalidateCacheByID(rootID)
 	} else {
 		s.purgePathCaches()
 	}
-	s.bus.Publish(Event{Type: EventUpdated, ID: rootID, Path: absPath, At: time.Now()})
 	return nil
 }
 
@@ -2107,7 +2139,10 @@ func (s *Service) syncSingle(absPath string) error {
 		// would otherwise keep returning the stale ID via cache.
 		s.InvalidatePathCache(parentVP + "/" + name)
 	}
-	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: absPath, At: time.Now()})
+	// No event emission here — syncSingle is a low-level primitive that
+	// cannot tell create from update from move. The public callers
+	// (CreateChild, WriteContent, Transfer, SyncAbsPath, ...) publish the
+	// semantically-correct event after invoking syncSingle.
 	return nil
 }
 
@@ -2167,7 +2202,35 @@ func (s *Service) SyncAbsPath(absPath string) error {
 	if len(parts) <= 1 {
 		return nil
 	}
-	return s.syncSingle(absPath)
+
+	// Decide create vs update by checking the index BEFORE syncing. If
+	// the path already has an xattr ID and that ID has an index entity,
+	// the sync will be an update. Otherwise — no xattr, no entity, or a
+	// conflict-driven re-issue inside syncSingle — it counts as a fresh
+	// entity from the index's point of view, so EventCreated.
+	preExisted := false
+	if preID, idErr := s.store.GetID(absPath); idErr == nil && !preID.IsZero() {
+		if _, entityErr := s.idx.GetEntity(preID); entityErr == nil {
+			preExisted = true
+		}
+	}
+
+	if err := s.syncSingle(absPath); err != nil {
+		return err
+	}
+
+	postID, err := s.store.GetID(absPath)
+	if err != nil {
+		// Sync succeeded but we can't read back the ID. Skip the event
+		// rather than publish with a zero ID.
+		return nil
+	}
+	eventType := EventCreated
+	if preExisted {
+		eventType = EventUpdated
+	}
+	s.bus.Publish(Event{Type: eventType, ID: postID, Path: absPath, At: time.Now()})
+	return nil
 }
 
 func (s *Service) RemoveAbsPath(absPath string) error {
@@ -2322,7 +2385,8 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 	// Add on-disk entries that the index doesn't know about. syncSingle
 	// handles xattr conflict resolution and entity creation. We log and
 	// continue on per-child errors so one broken file doesn't block the
-	// rest of the directory.
+	// rest of the directory. Each new child is emitted as EventCreated
+	// (we know it's new because it's not in indexedByName).
 	for _, e := range diskEntries {
 		if e.Type()&os.ModeSymlink != 0 {
 			continue
@@ -2336,6 +2400,10 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 			// child must not poison the whole directory sync. The next
 			// ReconcileDirectory pass retries.
 			log.Printf("[filegate] ReconcileDirectory: syncSingle(%q) failed: %v", childAbs, syncErr)
+			continue
+		}
+		if newID, err := s.store.GetID(childAbs); err == nil {
+			s.bus.Publish(Event{Type: EventCreated, ID: newID, Path: childAbs, At: time.Now()})
 		}
 	}
 	return nil
