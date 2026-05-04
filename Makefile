@@ -1,4 +1,4 @@
-.PHONY: test test-race test-short test-detector-linux test-detector-soak test-detector-chaos test-detector-btrfs-real test-detector-btrfs-real-docker fuzz-smoke bench-go bench-http bench-compose check
+.PHONY: test test-race test-short test-detector-linux test-detector-soak test-detector-chaos test-detector-btrfs-real test-detector-btrfs-real-docker test-versioning-btrfs-real-docker fuzz-smoke bench-go bench-http bench-compose check
 
 test:
 	go test ./...
@@ -23,6 +23,9 @@ test-detector-btrfs-real:
 
 test-detector-btrfs-real-docker:
 	./bench/scripts/run-detector-btrfs-real-docker.sh
+
+test-versioning-btrfs-real-docker:
+	./bench/scripts/run-versioning-btrfs-real-docker.sh
 
 fuzz-smoke:
 	go test ./infra/fgbin -run '^$$' -fuzz '^FuzzDecodeEntity$$' -fuzztime=10s

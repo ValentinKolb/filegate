@@ -720,35 +720,35 @@ func (i *Index) ForEachFileVersions(fn func(fileID domain.FileID, versions []dom
 // transition time wins, so the grace period is measured from when the
 // file actually went away, not from a re-mark). Returns the number of
 // rows updated.
+//
+// Pages through ListVersions in 1000-entry chunks. The pagination
+// cursor is the last VersionID of the prior page; ListVersions's
+// strict-greater-than semantics on the cursor advance correctly.
 func (i *Index) MarkVersionsDeleted(fileID domain.FileID, deletedAt int64) (n int, err error) {
 	if deletedAt <= 0 {
 		return 0, domain.ErrInvalidArgument
 	}
-	versions, err := i.ListVersions(fileID, domain.VersionID{}, 0)
-	if err != nil {
-		return 0, err
-	}
-	pending := make([]domain.VersionMeta, 0, len(versions))
-	for _, v := range versions {
-		if v.DeletedAt == 0 {
-			v.DeletedAt = deletedAt
-			pending = append(pending, v)
+	const pageSize = 1000
+	pending := make([]domain.VersionMeta, 0)
+	cursor := domain.VersionID{}
+	for {
+		page, err := i.ListVersions(fileID, cursor, pageSize)
+		if err != nil {
+			return 0, err
 		}
-	}
-	for len(versions) == 1000 {
-		// Page through if the file has many versions. ListVersions caps
-		// at 1000 per call.
-		next, lerr := i.ListVersions(fileID, versions[len(versions)-1].VersionID, 0)
-		if lerr != nil {
-			return 0, lerr
+		if len(page) == 0 {
+			break
 		}
-		versions = next
-		for _, v := range versions {
+		for _, v := range page {
 			if v.DeletedAt == 0 {
 				v.DeletedAt = deletedAt
 				pending = append(pending, v)
 			}
 		}
+		if len(page) < pageSize {
+			break
+		}
+		cursor = page[len(page)-1].VersionID
 	}
 	if len(pending) == 0 {
 		return 0, nil

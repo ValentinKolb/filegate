@@ -261,6 +261,11 @@ func (s *Service) ListVersions(fileID FileID, cursor VersionID, limit int) (*Lis
 // versioning is disabled, ErrNotFound when the file doesn't exist,
 // ErrInvalidArgument when the label exceeds MaxLabelBytes, and
 // ErrConflict when the per-file pinned cap is already reached.
+//
+// The cap check + capture run under the per-file mutation lock to
+// prevent N concurrent snapshots from each passing the cap check
+// simultaneously and producing N+cap pinned versions (a real race
+// observed under load).
 func (s *Service) SnapshotVersion(fileID FileID, label string) (*VersionMeta, error) {
 	if !s.VersioningEnabled() {
 		return nil, ErrUnsupportedFS
@@ -273,6 +278,9 @@ func (s *Service) SnapshotVersion(fileID FileID, label string) (*VersionMeta, er
 	if err != nil {
 		return nil, err
 	}
+	mu := s.versionLocks.Acquire(fileID)
+	mu.Lock()
+	defer mu.Unlock()
 	if err := s.enforcePinnedCap(fileID, cfg, VersionID{}); err != nil {
 		return nil, err
 	}
