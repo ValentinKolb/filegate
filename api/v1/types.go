@@ -151,6 +151,28 @@ type GlobSearchMeta struct {
 	ErrorCount  int    `json:"errorCount"`
 }
 
+// VersionResponse is the JSON shape for a single per-file version. The
+// label is opaque server-side: clients may store plain text or JSON.
+// DeletedAt is non-zero only after the source file has been deleted and
+// the version entered the post-delete grace window.
+type VersionResponse struct {
+	VersionID string `json:"versionId"`
+	FileID    string `json:"fileId"`
+	Timestamp int64  `json:"timestamp"`
+	Size      int64  `json:"size"`
+	Mode      uint32 `json:"mode"`
+	Pinned    bool   `json:"pinned"`
+	Label     string `json:"label,omitempty"`
+	DeletedAt int64  `json:"deletedAt,omitempty"`
+}
+
+// ListVersionsResponse is returned by GET /v1/nodes/{id}/versions.
+// NextCursor is empty when the response covers the final page.
+type ListVersionsResponse struct {
+	Items      []VersionResponse `json:"items"`
+	NextCursor string            `json:"nextCursor,omitempty"`
+}
+
 // GlobSearchResponse is returned by GET /v1/search/glob.
 type GlobSearchResponse struct {
 	Results []Node            `json:"results"`

@@ -211,3 +211,83 @@ func (v VersionID) String() string { return FileID(v).String() }
 func (s *Service) IndexListVersionsForTest(fileID FileID) ([]VersionMeta, error) {
 	return s.idx.ListVersions(fileID, VersionID{}, 0)
 }
+
+// ParseVersionID parses a UUID-formatted string (with or without
+// dashes) into a VersionID. Returns ErrInvalidID on bad input —
+// canonical with ParseFileID since both share the underlying UUID
+// alphabet.
+func ParseVersionID(s string) (VersionID, error) {
+	id, err := ParseFileID(s)
+	if err != nil {
+		return VersionID{}, err
+	}
+	return VersionID(id), nil
+}
+
+// ListedVersions wraps a page of versions plus the cursor needed to
+// fetch the next page. NextCursor is the zero VersionID when the page
+// is final.
+type ListedVersions struct {
+	Items      []VersionMeta
+	NextCursor VersionID
+}
+
+// ListVersions returns versions of fileID in ascending Timestamp order
+// (oldest first). cursor=zero starts at the beginning. limit≤0 defaults
+// to 100; the index caps at 1000 per call. Returns ErrNotFound when the
+// underlying file does not exist (versions for orphans are surfaced via
+// a separate API in Phase 6).
+func (s *Service) ListVersions(fileID FileID, cursor VersionID, limit int) (*ListedVersions, error) {
+	if !s.VersioningEnabled() {
+		return nil, ErrUnsupportedFS
+	}
+	if _, err := s.idx.GetEntity(fileID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	// Fetch one extra to detect "more available" without an explicit
+	// count query. This mirrors ListNodeChildren's pattern.
+	items, err := s.idx.ListVersions(fileID, cursor, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	out := &ListedVersions{}
+	if len(items) > limit {
+		out.Items = items[:limit]
+		out.NextCursor = out.Items[len(out.Items)-1].VersionID
+	} else {
+		out.Items = items
+	}
+	return out, nil
+}
+
+// OpenVersionContent opens the byte payload for a specific version.
+// Returns ErrNotFound if the file or version doesn't exist. The returned
+// reader MUST be closed by the caller.
+func (s *Service) OpenVersionContent(fileID FileID, versionID VersionID) (rc *os.File, meta *VersionMeta, err error) {
+	if !s.VersioningEnabled() {
+		return nil, nil, ErrUnsupportedFS
+	}
+	srcAbs, err := s.ResolveAbsPath(fileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	meta, err = s.idx.GetVersion(fileID, versionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	_, fullPath, err := s.versionStoragePath(fileID, srcAbs, versionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, err
+	}
+	return f, meta, nil
+}

@@ -391,6 +391,8 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	registerVersionRoutes(handleV1, svc)
+
 	handleV1("POST /v1/transfers", func(w http.ResponseWriter, r *http.Request) {
 		recursiveOwnership := parseBoolDefault(r.URL.Query().Get("recursiveOwnership"), true)
 		var body apiv1.TransferRequest
