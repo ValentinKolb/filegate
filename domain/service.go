@@ -1026,6 +1026,15 @@ func (s *Service) OpenContent(id FileID) (io.ReadCloser, int64, bool, error) {
 }
 
 func (s *Service) WriteContent(id FileID, body io.Reader) error {
+	// Lock FIRST, then resolve. If we resolved before locking, a
+	// concurrent Delete could complete between our resolve and our
+	// lock acquire — leaving us holding stale meta/abs and resurrecting
+	// the file at its old ID after the delete. The lock-then-revalidate
+	// pattern is what makes lock coverage actually protect the path.
+	mu := s.versionLocks.Acquire(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	meta, err := s.GetFile(id)
 	if err != nil {
 		return err
@@ -1040,14 +1049,6 @@ func (s *Service) WriteContent(id FileID, body io.Reader) error {
 	}
 
 	preserveID := meta.ID
-	// Hold the per-file mutation lock around the entire capture +
-	// write + sync sequence. Without it, a concurrent RestoreVersion
-	// on the same file could land its atomic rename between this
-	// write's capture and writeFileAtomic — the user's write would be
-	// silently overwritten by the restore.
-	mu := s.versionLocks.Acquire(id)
-	mu.Lock()
-	defer mu.Unlock()
 	// Snapshot the existing bytes BEFORE the atomic write clobbers them.
 	// captureBeforeOverwrite is best-effort and never fails the user's
 	// write — the worst-case is a missed version, not a missed mutation.
@@ -1111,17 +1112,24 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	// Hold the per-file mutation lock for overwrite cases — same race
-	// argument as WriteContent (concurrent restore could land between
-	// capture and rename). Fresh-slot creates have no race window
-	// because there's no version history yet.
+	// Hold the per-file mutation lock for overwrite cases. Race
+	// argument: a concurrent Delete on the existing entity could
+	// complete between our existingID lookup and the rename below,
+	// leaving us about to write to a slot whose entity we believe
+	// still exists. We re-check the entity inside the lock — if
+	// it's been deleted, fall through to fresh-slot create.
 	if !existingID.IsZero() {
 		mu := s.versionLocks.Acquire(existingID)
 		mu.Lock()
 		defer mu.Unlock()
-		// Pre-overwrite snapshot of the existing target's bytes so the
-		// previous content is recoverable.
-		s.captureBeforeOverwrite(existingID, targetPath)
+		// Revalidate inside the lock: if the file got deleted between
+		// the GetID call above and our lock acquire, the existingID
+		// is stale. Treat as a fresh slot.
+		if _, geErr := s.idx.GetEntity(existingID); errors.Is(geErr, ErrNotFound) {
+			existingID = FileID{}
+		} else if geErr == nil {
+			s.captureBeforeOverwrite(existingID, targetPath)
+		}
 	}
 	sourceID, err := s.store.GetID(srcPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1277,6 +1285,26 @@ func (s *Service) isMountRootAbsPath(absPath string) bool {
 	defer s.mu.RUnlock()
 	for _, mountAbs := range s.mountByName {
 		if mountAbs == cleaned {
+			return true
+		}
+	}
+	return false
+}
+
+// isPathInsideVersionsNamespace reports whether absPath sits inside
+// any mount's reserved .fg-versions subtree. Used by every code path
+// that might receive a filesystem-driven path the user shouldn't be
+// able to manipulate via the public API.
+func (s *Service) isPathInsideVersionsNamespace(absPath string) bool {
+	cleaned := filepath.Clean(absPath)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, mountAbs := range s.mountByName {
+		nsRoot := filepath.Join(mountAbs, versionsDirName)
+		if cleaned == nsRoot {
+			return true
+		}
+		if strings.HasPrefix(cleaned, nsRoot+string(filepath.Separator)) {
 			return true
 		}
 	}
@@ -2015,6 +2043,13 @@ func (s *Service) syncSubtree(absPath string) error {
 }
 
 func (s *Service) Delete(id FileID) error {
+	// Lock FIRST so a concurrent WriteContent / RestoreVersion on the
+	// same id can't slip its mutation between our resolve and our
+	// removal. Revalidation happens inside the lock.
+	mu := s.versionLocks.Acquire(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	meta, err := s.GetFile(id)
 	if err != nil {
 		return err
@@ -2026,15 +2061,6 @@ func (s *Service) Delete(id FileID) error {
 	if err != nil {
 		return err
 	}
-	// Hold the per-file mutation lock around the delete + orphan-mark
-	// sequence. A concurrent SnapshotVersion would otherwise race the
-	// MarkVersionsDeleted in deleteSubtree and leave a live (un-marked)
-	// version metadata for a file that no longer exists. Locking only
-	// the file id, not its descendants — directory deletes are wider
-	// but each child's versions are an independent contention domain.
-	mu := s.versionLocks.Acquire(id)
-	mu.Lock()
-	defer mu.Unlock()
 	if err := s.store.RemoveAll(abs); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
@@ -2150,6 +2176,15 @@ func (s *Service) claimedAbsPath(e *Entity) (string, error) {
 }
 
 func (s *Service) syncSingle(absPath string) error {
+	// .fg-versions is a reserved internal namespace. Detector-driven
+	// SyncAbsPath calls land here for any path the FS reports —
+	// including the version blobs we own. Without this guard, a
+	// freshly-written blob would get an entity record + child edge
+	// in the index, exposing it through the public path API. Same
+	// rationale as the rescan SkipDir.
+	if s.isPathInsideVersionsNamespace(absPath) {
+		return nil
+	}
 	// Lstat is sufficient for the symlink check AND the metadata path.
 	// For non-symlinks Lstat == Stat, and we already reject symlinks
 	// here — so the second Stat call would be a redundant syscall.
@@ -2554,12 +2589,25 @@ func (s *Service) deleteSubtree(rootID FileID) error {
 	}
 
 	// Mark every deleted file's versions as orphans so the pruner can
-	// apply the post-delete grace policy. Best-effort: a stale version
-	// that survives a partial mark is still picked up by the next pass.
+	// apply the post-delete grace policy. The mark runs under each
+	// descendant's per-file lock so a concurrent SnapshotVersion on
+	// the same id can't slip a fresh DeletedAt=0 version in between
+	// our list-versions and put-versions phases. Root is already
+	// locked by the public caller (Delete) — locking it again here
+	// would deadlock on the non-reentrant sync.Mutex.
 	if s.VersioningEnabled() {
 		now := time.Now().UnixMilli()
 		for _, e := range order {
 			if e.IsDir {
+				continue
+			}
+			if e.ID != rootID {
+				childMu := s.versionLocks.Acquire(e.ID)
+				childMu.Lock()
+				if _, err := s.idx.MarkVersionsDeleted(e.ID, now); err != nil {
+					log.Printf("[filegate] versioning: orphan-mark %s failed: %v", e.ID, err)
+				}
+				childMu.Unlock()
 				continue
 			}
 			if _, err := s.idx.MarkVersionsDeleted(e.ID, now); err != nil {

@@ -54,12 +54,29 @@ func (s *Service) PruneVersions() (PruneStats, error) {
 		// post-lock state, not the snapshot we got from the iter.
 		mu := s.versionLocks.Acquire(fileID)
 		mu.Lock()
-		fresh, fetchErr := s.idx.ListVersions(fileID, VersionID{}, 1000)
-		if fetchErr != nil {
-			mu.Unlock()
-			stats.Errors++
-			log.Printf("[filegate] versioning prune: re-fetch %s failed: %v", fileID, fetchErr)
-			return nil
+		// Page through the entire version set inside the lock — files
+		// with > pageSize versions would otherwise be partially-pruned
+		// because pruneDecisions would only see the first page. The
+		// page size matches the index's per-call cap.
+		fresh := make([]VersionMeta, 0, len(versions))
+		cursor := VersionID{}
+		const pageSize = 1000
+		for {
+			page, fetchErr := s.idx.ListVersions(fileID, cursor, pageSize)
+			if fetchErr != nil {
+				mu.Unlock()
+				stats.Errors++
+				log.Printf("[filegate] versioning prune: re-fetch %s failed: %v", fileID, fetchErr)
+				return nil
+			}
+			if len(page) == 0 {
+				break
+			}
+			fresh = append(fresh, page...)
+			if len(page) < pageSize {
+				break
+			}
+			cursor = page[len(page)-1].VersionID
 		}
 		toDelete := pruneDecisions(fresh, cfg, now)
 		stats.VersionsKept += len(fresh) - len(toDelete)

@@ -51,6 +51,15 @@ func (s *Service) RestoreVersion(fileID FileID, versionID VersionID, opts Restor
 		}
 		opts.Name = trimmed
 	}
+
+	// Lock FIRST, then resolve. Same race argument as WriteContent/Delete:
+	// a concurrent Delete that finishes between our resolve and our
+	// lock acquire would leave us holding stale paths and risk
+	// resurrecting the file with its old ID.
+	mu := s.versionLocks.Acquire(fileID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	srcAbs, err := s.ResolveAbsPath(fileID)
 	if err != nil {
 		return nil, false, err
@@ -77,22 +86,19 @@ func (s *Service) RestoreVersion(fileID FileID, versionID VersionID, opts Restor
 		}
 		return meta, true, nil
 	}
-	meta, err := s.restoreInPlace(fileID, version, srcAbs, blobPath)
+	meta, err := s.restoreInPlaceLocked(fileID, version, srcAbs, blobPath)
 	if err != nil {
 		return nil, false, err
 	}
 	return meta, false, nil
 }
 
-// restoreInPlace replaces the live file's bytes with version. Atomic via
-// reflink-to-tmp + rename; the per-file lock makes the
-// snapshot-current-then-load sequence indivisible from any concurrent
-// WriteContent on the same file.
-func (s *Service) restoreInPlace(fileID FileID, version *VersionMeta, srcAbs string, blobPath string) (*FileMeta, error) {
-	mu := s.versionLocks.Acquire(fileID)
-	mu.Lock()
-	defer mu.Unlock()
-
+// restoreInPlaceLocked replaces the live file's bytes with version.
+// Atomic via reflink-to-tmp + rename. Caller MUST already hold
+// versionLocks.Acquire(fileID); this function does not lock so the
+// resolve-then-restore sequence in RestoreVersion stays a single
+// critical section.
+func (s *Service) restoreInPlaceLocked(fileID FileID, version *VersionMeta, srcAbs string, blobPath string) (*FileMeta, error) {
 	// Snapshot the current bytes BEFORE replacing them so a misclicked
 	// restore is itself undoable. Best-effort: if the snapshot fails
 	// (cooldown swallow doesn't apply here because captureBeforeOverwrite

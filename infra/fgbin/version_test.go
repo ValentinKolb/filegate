@@ -107,6 +107,43 @@ func TestVersionRejectsUnsupportedVersionByte(t *testing.T) {
 	}
 }
 
+// TestVersionDecodesPreMountNameRecord pins the codec's
+// backward compatibility contract: records written before MountName was
+// added MUST still decode (with empty MountName) — otherwise an upgrade
+// silently drops every existing version on disk.
+//
+// The byte string below is what the pre-MountName encoder would have
+// produced for an empty-label record: 4-byte header + 16+16+8+8+4+8
+// fixed fields + 2-byte zero label length, with no trailing bytes.
+func TestVersionDecodesPreMountNameRecord(t *testing.T) {
+	// Manually assemble a pre-MountName V1 record (66 bytes).
+	rec := make([]byte, 4+16+16+8+8+4+8+2)
+	rec[0] = versionRecordVersionV1
+	rec[1] = recordTypeVersion
+	// flags=0, reserved=0, IDs zero, ints zero, labelLen=0
+	out, err := DecodeVersion(rec)
+	if err != nil {
+		t.Fatalf("decode pre-MountName record: %v", err)
+	}
+	if len(out.MountName) != 0 {
+		t.Fatalf("MountName non-empty on legacy record: %q", out.MountName)
+	}
+}
+
+// TestVersionEncodeOmitsMountTrailerWhenEmpty pins that the encoder
+// produces a byte-identical record to the pre-MountName format when
+// MountName is empty. This is what makes the round-trip with old
+// records lossless.
+func TestVersionEncodeOmitsMountTrailerWhenEmpty(t *testing.T) {
+	blob, err := EncodeVersion(Version{})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(blob) != versionMinLenV1 {
+		t.Fatalf("empty-MountName record len=%d, want %d (no trailer)", len(blob), versionMinLenV1)
+	}
+}
+
 func TestVersionRejectsUnknownFlagBit(t *testing.T) {
 	blob, _ := EncodeVersion(Version{})
 	blob[2] = 0x80

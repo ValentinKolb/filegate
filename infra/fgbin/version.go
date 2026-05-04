@@ -12,8 +12,12 @@ const (
 	flagVersionPinned byte = 0x01
 
 	// versionMinLenV1 is the byte length of the fixed-width portion of a
-	// V1 version record before the variable-length Label and MountName.
-	versionMinLenV1 = 4 + 16 + 16 + 8 + 8 + 4 + 8 + 2 + 2
+	// V1 version record up through the Label-length field. The
+	// MountName field is a backward-compatible trailing addition: the
+	// decoder reads it only when there are bytes left after the
+	// label. Records written before MountName was introduced have
+	// no trailing bytes and decode with empty MountName.
+	versionMinLenV1 = 4 + 16 + 16 + 8 + 8 + 4 + 8 + 2
 
 	// MaxVersionLabelBytes caps the on-wire Label size. The same cap is
 	// enforced at the API layer so the encoded record stays well below
@@ -64,7 +68,15 @@ func EncodeVersion(v Version) ([]byte, error) {
 	if len(v.MountName) > MaxVersionMountNameBytes {
 		return nil, ErrExtensionTooLong
 	}
-	out := make([]byte, versionMinLenV1+len(v.Label)+len(v.MountName))
+	// MountName trailer is omitted when empty so the on-wire shape
+	// matches pre-MountName records exactly. New writes always carry
+	// a non-empty MountName (caller's invariant), so this branch only
+	// fires for synthetic test inputs.
+	trailer := 0
+	if len(v.MountName) > 0 {
+		trailer = 2 + len(v.MountName)
+	}
+	out := make([]byte, versionMinLenV1+len(v.Label)+trailer)
 	pos := 0
 
 	out[pos] = versionRecordVersionV1
@@ -91,9 +103,11 @@ func EncodeVersion(v Version) ([]byte, error) {
 	pos += 2
 	copy(out[pos:pos+len(v.Label)], v.Label)
 	pos += len(v.Label)
-	binary.LittleEndian.PutUint16(out[pos:pos+2], uint16(len(v.MountName)))
-	pos += 2
-	copy(out[pos:pos+len(v.MountName)], v.MountName)
+	if len(v.MountName) > 0 {
+		binary.LittleEndian.PutUint16(out[pos:pos+2], uint16(len(v.MountName)))
+		pos += 2
+		copy(out[pos:pos+len(v.MountName)], v.MountName)
+	}
 	return out, nil
 }
 
@@ -135,7 +149,7 @@ func DecodeVersion(in []byte) (Version, error) {
 	if labelLen > MaxVersionLabelBytes {
 		return out, ErrInvalidRecord
 	}
-	if pos+labelLen+2 > len(in) {
+	if pos+labelLen > len(in) {
 		return out, ErrInvalidRecord
 	}
 	if labelLen > 0 {
@@ -143,6 +157,16 @@ func DecodeVersion(in []byte) (Version, error) {
 		copy(out.Label, in[pos:pos+labelLen])
 	}
 	pos += labelLen
+
+	// MountName is a backward-compatible trailing addition. Records
+	// written before it existed end exactly here; records written
+	// after carry a uint16 length + bytes. Either layout decodes.
+	if pos == len(in) {
+		return out, nil
+	}
+	if pos+2 > len(in) {
+		return out, ErrInvalidRecord
+	}
 	mountLen := int(binary.LittleEndian.Uint16(in[pos : pos+2]))
 	pos += 2
 	if mountLen > MaxVersionMountNameBytes {
