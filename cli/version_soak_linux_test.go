@@ -8,7 +8,10 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,7 +47,24 @@ func TestVersioningSoak(t *testing.T) {
 		}
 	}
 
-	baseDir := t.TempDir()
+	// Allow the test driver to point base storage at a real btrfs
+	// mount. Without the override we use a fresh tmpfs t.TempDir(),
+	// which exercises the copy-fallback path (no FICLONE). The
+	// btrfs-real soak script sets FILEGATE_VERSIONING_SOAK_BASE_DIR
+	// to a freshly-created subvolume to drive the reflink path under
+	// load.
+	var baseDir string
+	if raw := strings.TrimSpace(os.Getenv("FILEGATE_VERSIONING_SOAK_BASE_DIR")); raw != "" {
+		baseDir = raw
+		if err := os.MkdirAll(baseDir, 0o755); err != nil {
+			t.Fatalf("ensure base dir %s: %v", baseDir, err)
+		}
+		// Clean any leftover .fg-versions from a previous run so the
+		// final blob/metadata accounting starts from zero.
+		_ = os.RemoveAll(filepath.Join(baseDir, ".fg-versions"))
+	} else {
+		baseDir = t.TempDir()
+	}
 	indexDir := t.TempDir()
 	idx, err := indexpebble.Open(indexDir, 32<<20)
 	if err != nil {
@@ -76,15 +96,21 @@ func TestVersioningSoak(t *testing.T) {
 
 	// Bounded pool of files exercised concurrently. Keeping the pool
 	// small ensures every file accumulates a meaningful version
-	// history during the soak window.
-	const filePool = 8
+	// history during the soak window. Override via env for stress
+	// scenarios (e.g. 32-128 files for race-detector runs).
+	filePool := 8
+	if raw := strings.TrimSpace(os.Getenv("FILEGATE_VERSIONING_SOAK_FILE_POOL")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 1024 {
+			filePool = n
+		}
+	}
 	type fileSlot struct {
-		id   domain.FileID
+		id   atomic.Pointer[domain.FileID]
 		path string
 	}
-	pool := make([]fileSlot, 0, filePool)
+	pool := make([]*fileSlot, 0, filePool)
 	for i := 0; i < filePool; i++ {
-		path := fmt.Sprintf("soak-%02d.bin", i)
+		path := fmt.Sprintf("soak-%03d.bin", i)
 		meta, _, err := svc.WriteContentByVirtualPath(
 			"/"+rootName+"/"+path,
 			strings.NewReader(fmt.Sprintf("seed-%d", i)),
@@ -93,8 +119,18 @@ func TestVersioningSoak(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed file %d: %v", i, err)
 		}
-		pool = append(pool, fileSlot{id: meta.ID, path: path})
+		slot := &fileSlot{path: path}
+		id := meta.ID
+		slot.id.Store(&id)
+		pool = append(pool, slot)
 	}
+
+	// Capture goroutine baseline AFTER setup so the seed-write
+	// goroutines and Pebble's startup goroutines don't show up as
+	// "leaks" at the end. Capture twice with a small sleep so any
+	// transient goroutine from the index init has settled.
+	time.Sleep(50 * time.Millisecond)
+	baselineGoroutines := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
@@ -106,13 +142,32 @@ func TestVersioningSoak(t *testing.T) {
 		snapshots atomic.Int64
 		pins      atomic.Int64
 		restores  atomic.Int64
+		deletes   atomic.Int64
+		recreates atomic.Int64
 		errs      atomic.Int64
 	)
 
+	// Worker count scales with the file pool so contention stays
+	// meaningful at larger scales. Default 4; cap at 16 to avoid
+	// overwhelming small CI runners.
+	workers := 4
+	if filePool > 32 {
+		workers = 8
+	}
+	if filePool > 128 {
+		workers = 16
+	}
+
+	// poolMu protects pool slot reassignment when the delete worker
+	// recreates a file under the same path with a fresh ID. Workers
+	// load the slot's id atomically, so no lock needed for the common
+	// read path.
+	var poolMu sync.RWMutex
+
 	// Workers do a random mix of writes / snapshots / pin / unpin /
-	// restore. Each operation has a small built-in jitter so we don't
-	// degenerate into a tight loop on one file.
-	const workers = 4
+	// restore / delete+recreate. The delete+recreate branch exercises
+	// the deleteSubtree orphan-mark path under load — previously this
+	// op-mix only added versions, never tore down files.
 	doneWorkers := make(chan struct{}, workers)
 	for w := 0; w < workers; w++ {
 		go func(seed int64) {
@@ -124,17 +179,24 @@ func TestVersioningSoak(t *testing.T) {
 					return
 				default:
 				}
+				poolMu.RLock()
 				slot := pool[rnd.Intn(len(pool))]
-				switch rnd.Intn(10) {
-				case 0, 1, 2, 3, 4, 5: // 60% writes
+				poolMu.RUnlock()
+				idPtr := slot.id.Load()
+				if idPtr == nil {
+					continue
+				}
+				slotID := *idPtr
+				switch rnd.Intn(20) {
+				case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10: // ~55% writes
 					body := fmt.Sprintf("write-%d", rnd.Int63())
-					if err := svc.WriteContent(slot.id, strings.NewReader(body)); err != nil {
+					if err := svc.WriteContent(slotID, strings.NewReader(body)); err != nil {
 						errs.Add(1)
 						continue
 					}
 					writes.Add(1)
-				case 6, 7: // 20% manual snapshots
-					if _, err := svc.SnapshotVersion(slot.id, "soak"); err != nil {
+				case 11, 12, 13, 14: // 20% manual snapshots
+					if _, err := svc.SnapshotVersion(slotID, "soak"); err != nil {
 						if err == domain.ErrConflict { // cap reached
 							continue
 						}
@@ -142,31 +204,52 @@ func TestVersioningSoak(t *testing.T) {
 						continue
 					}
 					snapshots.Add(1)
-				case 8: // 10% pin/unpin shuffle
-					listed, err := svc.ListVersions(slot.id, domain.VersionID{}, 100)
+				case 15, 16: // 10% pin/unpin shuffle
+					listed, err := svc.ListVersions(slotID, domain.VersionID{}, 100)
 					if err != nil || len(listed.Items) == 0 {
 						continue
 					}
 					target := listed.Items[rnd.Intn(len(listed.Items))]
 					if rnd.Intn(2) == 0 {
 						label := "soak-pin"
-						if _, err := svc.PinVersion(slot.id, target.VersionID, &label); err == nil {
+						if _, err := svc.PinVersion(slotID, target.VersionID, &label); err == nil {
 							pins.Add(1)
 						}
 					} else {
-						_, _ = svc.UnpinVersion(slot.id, target.VersionID)
+						_, _ = svc.UnpinVersion(slotID, target.VersionID)
 					}
-				case 9: // 10% restore in-place
-					listed, err := svc.ListVersions(slot.id, domain.VersionID{}, 100)
+				case 17, 18: // 10% restore in-place
+					listed, err := svc.ListVersions(slotID, domain.VersionID{}, 100)
 					if err != nil || len(listed.Items) == 0 {
 						continue
 					}
 					target := listed.Items[rnd.Intn(len(listed.Items))]
-					if _, _, err := svc.RestoreVersion(slot.id, target.VersionID, domain.RestoreOptions{}); err != nil {
+					if _, _, err := svc.RestoreVersion(slotID, target.VersionID, domain.RestoreOptions{}); err != nil {
 						errs.Add(1)
 						continue
 					}
 					restores.Add(1)
+				case 19: // 5% delete + recreate same path
+					// Concurrent deletes hit the orphan-mark path
+					// (deleteSubtree's per-descendant lock) and also
+					// expose any race between in-flight ops on slot.id.
+					if err := svc.Delete(slotID); err != nil {
+						errs.Add(1)
+						continue
+					}
+					deletes.Add(1)
+					meta, _, err := svc.WriteContentByVirtualPath(
+						"/"+rootName+"/"+slot.path,
+						strings.NewReader("recreated"),
+						domain.ConflictError,
+					)
+					if err != nil {
+						errs.Add(1)
+						continue
+					}
+					newID := meta.ID
+					slot.id.Store(&newID)
+					recreates.Add(1)
 				}
 				time.Sleep(time.Duration(rnd.Intn(5)) * time.Millisecond)
 			}
@@ -179,32 +262,93 @@ func TestVersioningSoak(t *testing.T) {
 	cancel()
 	<-prunerDone
 
-	// Final invariant check: blob count == metadata count for each file.
-	totalBlobs, totalMeta := 0, 0
-	for _, slot := range pool {
-		listed, err := svc.ListVersions(slot.id, domain.VersionID{}, 1000)
-		if err != nil {
-			t.Fatalf("ListVersions %s: %v", slot.id, err)
-		}
-		totalMeta += len(listed.Items)
-		blobDir := filepath.Join(baseDir, ".fg-versions", slot.id.String())
-		entries, err := os.ReadDir(blobDir)
-		if err != nil && !os.IsNotExist(err) {
-			t.Fatalf("read versions dir %s: %v", blobDir, err)
-		}
-		// Blob count must be >= metadata count. The pruner removes
-		// metadata first then the blob; we may briefly observe a stale
-		// blob during the racing window. Drift > 5 is a real leak.
-		if len(entries)-len(listed.Items) > 5 {
-			t.Fatalf("blob/metadata drift for %s: blobs=%d meta=%d",
-				slot.path, len(entries), len(listed.Items))
-		}
-		totalBlobs += len(entries)
+	// Run one final pruner pass synchronously so any blobs whose
+	// metadata was just deleted in the last 200ms get removed before
+	// we measure consistency. Without this, the assertion below
+	// observes a window where metadata is gone but blob is still on
+	// disk, giving false-positive "drift" warnings under heavy load.
+	if _, err := svc.PruneVersions(); err != nil {
+		t.Logf("final prune: %v", err)
 	}
 
-	t.Logf("soak summary: duration=%s writes=%d snapshots=%d pins=%d restores=%d errs=%d totalMeta=%d totalBlobs=%d",
-		duration, writes.Load(), snapshots.Load(), pins.Load(), restores.Load(),
-		errs.Load(), totalMeta, totalBlobs)
+	// Final invariant check: blob count == metadata count for each
+	// LIVE file. After delete+recreate ops the original file IDs are
+	// orphans whose blobs may still be in the grace window — we walk
+	// the .fg-versions tree directly to make sure even those are
+	// accounted for.
+	currentLiveIDs := make(map[domain.FileID]struct{}, len(pool))
+	totalMeta := 0
+	for _, slot := range pool {
+		idPtr := slot.id.Load()
+		if idPtr == nil {
+			continue
+		}
+		currentLiveIDs[*idPtr] = struct{}{}
+		listed, err := svc.ListVersions(*idPtr, domain.VersionID{}, 1000)
+		if err != nil {
+			t.Fatalf("ListVersions %s: %v", *idPtr, err)
+		}
+		totalMeta += len(listed.Items)
+	}
+
+	// Walk every per-file blob directory under .fg-versions and
+	// count what's still on disk. For each file-id directory, the
+	// blob count must not exceed the metadata count by more than a
+	// few entries (the pruner's delete-metadata-then-delete-blob
+	// pattern allows a small in-flight window).
+	versionsRoot := filepath.Join(baseDir, ".fg-versions")
+	totalBlobs := 0
+	if entries, err := os.ReadDir(versionsRoot); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			fid, err := domain.ParseFileID(e.Name())
+			if err != nil {
+				t.Logf("unexpected non-uuid entry under .fg-versions: %s", e.Name())
+				continue
+			}
+			blobDir := filepath.Join(versionsRoot, e.Name())
+			blobs, err := os.ReadDir(blobDir)
+			if err != nil {
+				t.Fatalf("read blob dir %s: %v", blobDir, err)
+			}
+			totalBlobs += len(blobs)
+
+			meta, err := svc.ListVersions(fid, domain.VersionID{}, 1000)
+			metaCount := 0
+			if err == nil {
+				metaCount = len(meta.Items)
+			} else if !strings.Contains(err.Error(), "not found") {
+				t.Fatalf("ListVersions for %s: %v", fid, err)
+			}
+			// "not found" is expected for a fully-pruned + deleted
+			// file id whose blob dir hasn't been GC'd yet — that's
+			// the expected steady state, not a bug. The drift check
+			// against the on-disk blob count still applies.
+			drift := len(blobs) - metaCount
+			if drift > 5 {
+				_, isLive := currentLiveIDs[fid]
+				t.Fatalf("blob/metadata drift for %s (live=%v): blobs=%d meta=%d",
+					fid, isLive, len(blobs), metaCount)
+			}
+		}
+	}
+
+	// Goroutine leak check: every worker + the pruner have signalled
+	// done at this point. Allow some slack for runtime/Pebble
+	// background goroutines that take a moment to settle.
+	time.Sleep(100 * time.Millisecond)
+	postGoroutines := runtime.NumGoroutine()
+	if postGoroutines > baselineGoroutines+5 {
+		t.Errorf("goroutine leak: baseline=%d post=%d (delta=%d)",
+			baselineGoroutines, postGoroutines, postGoroutines-baselineGoroutines)
+	}
+
+	t.Logf("soak summary: duration=%s pool=%d workers=%d writes=%d snapshots=%d pins=%d restores=%d deletes=%d recreates=%d errs=%d totalMeta=%d totalBlobs=%d goroutines=%d->%d",
+		duration, filePool, workers, writes.Load(), snapshots.Load(), pins.Load(),
+		restores.Load(), deletes.Load(), recreates.Load(), errs.Load(),
+		totalMeta, totalBlobs, baselineGoroutines, postGoroutines)
 
 	// Bucket retention should have kept the per-file version count well
 	// below the unconstrained "every write captures" upper bound. With
@@ -212,9 +356,20 @@ func TestVersioningSoak(t *testing.T) {
 	// per-file ceiling is 65. Use a generous 80 to absorb scheduling
 	// noise.
 	for _, slot := range pool {
-		listed, _ := svc.ListVersions(slot.id, domain.VersionID{}, 1000)
+		idPtr := slot.id.Load()
+		if idPtr == nil {
+			continue
+		}
+		listed, err := svc.ListVersions(*idPtr, domain.VersionID{}, 1000)
+		if err != nil {
+			// Slot may have been deleted by a worker without
+			// recreate completing; skip — the on-disk drift
+			// check above already covers correctness.
+			continue
+		}
 		if len(listed.Items) > 80 {
-			t.Fatalf("file %s has %d versions — pruner did not bound retention", slot.path, len(listed.Items))
+			t.Fatalf("file %s has %d versions — pruner did not bound retention",
+				slot.path, len(listed.Items))
 		}
 	}
 }
