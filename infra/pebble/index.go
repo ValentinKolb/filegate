@@ -650,6 +650,70 @@ func (i *Index) LatestVersionTimestamp(fileID domain.FileID) (ts int64, err erro
 	return meta.Timestamp, nil
 }
 
+// ForEachFileVersions iterates the versions keyspace and groups
+// adjacent rows by FileID. fn is invoked once per file with all its
+// versions in ascending Timestamp order. Memory is bounded to one
+// file's versions at a time, which makes the pass safe even on indexes
+// with millions of versions across many files.
+func (i *Index) ForEachFileVersions(fn func(fileID domain.FileID, versions []domain.VersionMeta) error) error {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+
+	prefix := []byte{familyVersion}
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := i.db.NewIter(iterOpts)
+	if err != nil {
+		return normalizeIndexErr(err)
+	}
+	defer iter.Close()
+
+	var current domain.FileID
+	var batch []domain.VersionMeta
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := fn(current, batch); err != nil {
+			return err
+		}
+		batch = batch[:0]
+		return nil
+	}
+	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, prefix) || len(k) != 1+16+16 {
+			break
+		}
+		var fid domain.FileID
+		copy(fid[:], k[1:17])
+		if len(batch) == 0 {
+			current = fid
+		} else if fid != current {
+			if err := flush(); err != nil {
+				return err
+			}
+			current = fid
+		}
+		meta, derr := decodeVersion(iter.Value())
+		if derr != nil {
+			continue
+		}
+		batch = append(batch, meta)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	return retErr
+}
+
 // MarkVersionsDeleted sets DeletedAt = deletedAt on every version of
 // fileID whose DeletedAt is currently zero. Idempotent: re-running with a
 // later timestamp does not bump already-marked entries (the original

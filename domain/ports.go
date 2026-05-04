@@ -16,6 +16,11 @@ type Index interface {
 	ListVersions(fileID FileID, after VersionID, limit int) ([]VersionMeta, error)
 	LatestVersionTimestamp(fileID FileID) (int64, error)
 	MarkVersionsDeleted(fileID FileID, deletedAt int64) (int, error)
+	// ForEachFileVersions calls fn once per file that has at least one
+	// version, with all versions of that file in ascending Timestamp
+	// order. Used by the background pruner to apply retention per file
+	// without buffering the whole keyspace in memory.
+	ForEachFileVersions(fn func(fileID FileID, versions []VersionMeta) error) error
 	Batch(fn func(Batch) error) error
 	Close() error
 }

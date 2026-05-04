@@ -182,6 +182,27 @@ func registerVersionRoutes(handleV1 func(string, http.HandlerFunc), svc *domain.
 		})
 	})
 
+	handleV1("DELETE /v1/nodes/{id}/versions/{vid}", func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseID(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		vid, err := domain.ParseVersionID(r.PathValue("vid"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid version id")
+			return
+		}
+		if err := svc.DeleteVersion(id, vid); err != nil {
+			if errors.Is(err, domain.ErrUnsupportedFS) {
+				writeErr(w, http.StatusNotFound, "versioning not supported on this mount")
+				return
+			}
+			statusFromErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	handleV1("GET /v1/nodes/{id}/versions/{vid}/content", func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseID(w, r.PathValue("id"))
 		if !ok {

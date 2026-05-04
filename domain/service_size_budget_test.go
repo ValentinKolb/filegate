@@ -136,3 +136,5 @@ func (f *fakeIndex) ListVersions(FileID, VersionID, int) ([]VersionMeta, error) 
 func (f *fakeIndex) LatestVersionTimestamp(FileID) (int64, error) { return 0, nil }
 
 func (f *fakeIndex) MarkVersionsDeleted(FileID, int64) (int, error) { return 0, nil }
+
+func (f *fakeIndex) ForEachFileVersions(func(FileID, []VersionMeta) error) error { return nil }

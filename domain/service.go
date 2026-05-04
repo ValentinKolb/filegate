@@ -2498,6 +2498,22 @@ func (s *Service) deleteSubtree(rootID FileID) error {
 	} else {
 		s.purgePathCaches()
 	}
+
+	// Mark every deleted file's versions as orphans so the pruner can
+	// apply the post-delete grace policy. Best-effort: a stale version
+	// that survives a partial mark is still picked up by the next pass.
+	if s.VersioningEnabled() {
+		now := time.Now().UnixMilli()
+		for _, e := range order {
+			if e.IsDir {
+				continue
+			}
+			if _, err := s.idx.MarkVersionsDeleted(e.ID, now); err != nil {
+				log.Printf("[filegate] versioning: orphan-mark %s failed: %v", e.ID, err)
+			}
+		}
+	}
+
 	// Single bulk EventDeleted for the subtree root. Callers (Delete,
 	// RemoveAbsPath, Transfer overwrite) used to publish this themselves
 	// — that's now centralised here so no caller can forget.
