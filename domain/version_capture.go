@@ -104,6 +104,10 @@ func (s *Service) captureCurrentBytes(fileID FileID, srcAbs string, opts capture
 		return nil, err
 	}
 
+	mountName, _, ok := s.mountForAbsPath(srcAbs)
+	if !ok {
+		return nil, errors.New("versioning: source path is outside any watched mount")
+	}
 	dstDir, dstPath, err := s.versionStoragePath(fileID, srcAbs, versionID)
 	if err != nil {
 		return nil, err
@@ -118,6 +122,18 @@ func (s *Service) captureCurrentBytes(fileID FileID, srcAbs string, opts capture
 	if _, err := s.store.CloneFile(srcAbs, dstPath); err != nil {
 		return nil, err
 	}
+	// Durability: fsync the blob and its parent directory before we
+	// commit the metadata to Pebble. A crash between the index commit
+	// and these fsyncs would leave Pebble pointing at a path the
+	// filesystem doesn't yet promise to keep. Best-effort: a fsync
+	// failure is logged and capture proceeds — the next prune will
+	// catch any inconsistency, but the audit trail records the issue.
+	if err := syncFilePath(dstPath); err != nil {
+		log.Printf("[filegate] versioning: fsync blob %s failed: %v", dstPath, err)
+	}
+	if err := syncDirPath(dstDir); err != nil {
+		log.Printf("[filegate] versioning: fsync dir %s failed: %v", dstDir, err)
+	}
 
 	meta := VersionMeta{
 		VersionID: versionID,
@@ -127,6 +143,7 @@ func (s *Service) captureCurrentBytes(fileID FileID, srcAbs string, opts capture
 		Mode:      uint32(info.Mode().Perm()),
 		Pinned:    opts.pinned,
 		Label:     opts.label,
+		MountName: mountName,
 	}
 	if err := s.idx.Batch(func(b Batch) error {
 		b.PutVersion(meta)
@@ -171,6 +188,17 @@ func (s *Service) versionStoragePath(fileID FileID, srcAbs string, vid VersionID
 	mountName, _, ok := s.mountForAbsPath(srcAbs)
 	if !ok {
 		return "", "", errors.New("versioning: source path is outside any watched mount")
+	}
+	return s.versionStoragePathByMount(fileID, mountName, vid)
+}
+
+// versionStoragePathByMount resolves the storage location given the
+// mount name directly. Used by the orphan-purge path where the source
+// file's entity is gone and ResolveAbsPath / mountForAbsPath can't
+// help — the mount is recovered from VersionMeta.MountName.
+func (s *Service) versionStoragePathByMount(fileID FileID, mountName string, vid VersionID) (dir, full string, err error) {
+	if mountName == "" {
+		return "", "", errors.New("versioning: empty mount name")
 	}
 	s.mu.RLock()
 	mountAbs := s.mountByName[mountName]
@@ -226,15 +254,16 @@ type ListedVersions struct {
 
 // ListVersions returns versions of fileID in ascending Timestamp order
 // (oldest first). cursor=zero starts at the beginning. limit≤0 defaults
-// to 100; the index caps at 1000 per call. Returns ErrNotFound when the
-// underlying file does not exist (versions for orphans are surfaced via
-// a separate API in Phase 6).
+// to 100; the index caps at 1000 per call.
+//
+// Orphan-aware: works for both live files (entity exists) and files
+// that have been deleted but still have versions in the
+// pinned_grace_after_delete window. Returns ErrNotFound only when the
+// fileID has no versions AND no live entity — a zero result for a
+// known-live file is an empty list, not an error.
 func (s *Service) ListVersions(fileID FileID, cursor VersionID, limit int) (*ListedVersions, error) {
 	if !s.VersioningEnabled() {
 		return nil, ErrUnsupportedFS
-	}
-	if _, err := s.idx.GetEntity(fileID); err != nil {
-		return nil, err
 	}
 	if limit <= 0 {
 		limit = 100
@@ -244,6 +273,13 @@ func (s *Service) ListVersions(fileID FileID, cursor VersionID, limit int) (*Lis
 	items, err := s.idx.ListVersions(fileID, cursor, limit+1)
 	if err != nil {
 		return nil, err
+	}
+	if len(items) == 0 {
+		// No versions. Distinguish "fileID is unknown" from "live
+		// fileID has no versions yet" so callers can branch cleanly.
+		if _, entityErr := s.idx.GetEntity(fileID); entityErr != nil {
+			return nil, entityErr
+		}
 	}
 	out := &ListedVersions{}
 	if len(items) > limit {
@@ -404,23 +440,25 @@ func (s *Service) enforcePinnedCap(fileID FileID, cfg VersioningConfig, exceptID
 }
 
 // OpenVersionContent opens the byte payload for a specific version.
-// Returns ErrNotFound if the file or version doesn't exist. The returned
+// Returns ErrNotFound if the version doesn't exist. The returned
 // reader MUST be closed by the caller.
+//
+// Orphan-aware: when the source file has been deleted but the version
+// is still within pinned_grace_after_delete, the blob is located via
+// VersionMeta.MountName instead of the (gone) live entity path —
+// recovery from accidental deletes is the whole point of the grace
+// window.
 func (s *Service) OpenVersionContent(fileID FileID, versionID VersionID) (rc *os.File, meta *VersionMeta, err error) {
 	if !s.VersioningEnabled() {
 		return nil, nil, ErrUnsupportedFS
-	}
-	srcAbs, err := s.ResolveAbsPath(fileID)
-	if err != nil {
-		return nil, nil, err
 	}
 	meta, err = s.idx.GetVersion(fileID, versionID)
 	if err != nil {
 		return nil, nil, err
 	}
-	_, fullPath, err := s.versionStoragePath(fileID, srcAbs, versionID)
-	if err != nil {
-		return nil, nil, err
+	fullPath := s.resolveVersionBlobPath(*meta)
+	if fullPath == "" {
+		return nil, nil, ErrNotFound
 	}
 	f, err := os.Open(fullPath)
 	if err != nil {

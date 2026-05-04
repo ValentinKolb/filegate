@@ -159,6 +159,13 @@ func buildCore(cfg domain.Config) (*indexpebble.Index, *domain.Service, error) {
 	idx, err := indexpebble.Open(cfg.Storage.IndexPath, 128<<20)
 	if err != nil && errors.Is(err, indexpebble.ErrUnsupportedIndexFormat) {
 		log.Printf("[filegate] index format mismatch, rebuilding index at %s", cfg.Storage.IndexPath)
+		// Pre-rebuild check: if any watched mount already has a
+		// .fg-versions directory, the upcoming RemoveAll will detach
+		// it from its index records — version blobs will linger as
+		// untracked storage. Surface this loudly so the operator can
+		// decide (typically: rm -rf the .fg-versions dirs after
+		// confirming they don't need recovery).
+		warnOrphanVersionDirs(cfg.Storage.BasePaths)
 		if rmErr := os.RemoveAll(cfg.Storage.IndexPath); rmErr != nil {
 			return nil, nil, rmErr
 		}

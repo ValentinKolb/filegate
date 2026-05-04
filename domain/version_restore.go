@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,11 +126,21 @@ func (s *Service) restoreInPlace(fileID FileID, version *VersionMeta, srcAbs str
 			return nil, err
 		}
 	}
+	// Durability: fsync the tmp file before rename so the post-rename
+	// inode's contents survive a crash. Without this, the rename can
+	// be visible while the file's data isn't yet on stable storage.
+	if err := syncFilePath(tmpPath); err != nil {
+		return nil, err
+	}
 
 	if err := s.store.Rename(tmpPath, srcAbs); err != nil {
 		return nil, err
 	}
 	cleanupTmp = false
+	// fsync the parent dir so the rename itself is durable.
+	if err := syncDirPath(parentDir); err != nil {
+		log.Printf("[filegate] versioning restore: dir fsync %s failed: %v", parentDir, err)
+	}
 
 	if err := s.syncSingle(srcAbs); err != nil {
 		return nil, err
@@ -174,6 +185,14 @@ func (s *Service) restoreAsNewFile(fileID FileID, version *VersionMeta, srcAbs s
 		}
 	}
 
+	// Durability: fsync the tmp blob before placing it. commitNoReplace
+	// only renames/links — neither flushes the file's data — so without
+	// this a crash between commit and a later flush could leave an
+	// empty inode at the user-visible path.
+	if err := syncFilePath(tmpPath); err != nil {
+		return nil, err
+	}
+
 	// Try the default name first (suffix=0), then -1, -2, ... commitNoReplace
 	// returns ErrConflict when the candidate already exists; any other
 	// error aborts.
@@ -191,6 +210,11 @@ func (s *Service) restoreAsNewFile(fileID FileID, version *VersionMeta, srcAbs s
 	}
 	if finalAbs == "" {
 		return nil, ErrConflict
+	}
+	// fsync the parent dir so the new directory entry is durable
+	// alongside the file's data.
+	if err := syncDirPath(parentDir); err != nil {
+		log.Printf("[filegate] versioning restore-as-new: dir fsync %s failed: %v", parentDir, err)
 	}
 
 	if err := s.syncSingle(finalAbs); err != nil {

@@ -348,6 +348,7 @@ func encodeVersion(meta domain.VersionMeta) ([]byte, error) {
 		DeletedAt: meta.DeletedAt,
 		Pinned:    meta.Pinned,
 		Label:     []byte(meta.Label),
+		MountName: []byte(meta.MountName),
 	})
 }
 
@@ -365,6 +366,7 @@ func decodeVersion(value []byte) (domain.VersionMeta, error) {
 		Pinned:    rec.Pinned,
 		Label:     string(rec.Label),
 		DeletedAt: rec.DeletedAt,
+		MountName: string(rec.MountName),
 	}, nil
 }
 

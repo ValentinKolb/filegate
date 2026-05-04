@@ -35,6 +35,13 @@ type VersionMeta struct {
 	Pinned    bool
 	Label     string
 	DeletedAt int64 // 0 while file lives; unix-ms when entered grace
+	// MountName is the configured mount this version's blob belongs
+	// to. Persisted so the pruner can locate (and remove) the blob
+	// after the source file's entity is deleted — ResolveAbsPath
+	// no longer works once the parent chain is gone, but the mount
+	// path is stable and the per-mount layout (.fg-versions/<id>/
+	// <vid>.bin) is deterministic.
+	MountName string
 }
 
 // IsOrphan reports whether the source file has been deleted and the

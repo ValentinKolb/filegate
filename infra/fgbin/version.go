@@ -12,13 +12,18 @@ const (
 	flagVersionPinned byte = 0x01
 
 	// versionMinLenV1 is the byte length of the fixed-width portion of a
-	// V1 version record before the variable-length Label.
-	versionMinLenV1 = 4 + 16 + 16 + 8 + 8 + 4 + 8 + 2
+	// V1 version record before the variable-length Label and MountName.
+	versionMinLenV1 = 4 + 16 + 16 + 8 + 8 + 4 + 8 + 2 + 2
 
 	// MaxVersionLabelBytes caps the on-wire Label size. The same cap is
 	// enforced at the API layer so the encoded record stays well below
 	// any reasonable index value-size limits.
 	MaxVersionLabelBytes = 2048
+
+	// MaxVersionMountNameBytes caps the on-wire MountName size. Mount
+	// names are operator-controlled and short (e.g. "data"), so 256 is
+	// generous.
+	MaxVersionMountNameBytes = 256
 )
 
 // Version is the binary record representation of a single file version.
@@ -31,29 +36,35 @@ type Version struct {
 	DeletedAt int64 // 0 while file lives; unix-ms when entered grace
 	Pinned    bool
 	Label     []byte // opaque, ≤ MaxVersionLabelBytes
+	MountName []byte // mount-name bytes, ≤ MaxVersionMountNameBytes
 }
 
 // EncodeVersion serializes a Version into its binary record format.
 //
 // Layout:
 //
-//	[0]    recordVersionRecordV1
-//	[1]    recordTypeVersion
-//	[2]    flags (bit 0 = pinned)
-//	[3]    reserved (must be 0)
-//	[4:20] VersionID
-//	[20:36]FileID
-//	[36:44]Timestamp (int64 LE)
-//	[44:52]Size      (int64 LE)
-//	[52:56]Mode      (uint32 LE)
-//	[56:64]DeletedAt (int64 LE)
-//	[64:66]LabelLen  (uint16 LE)
-//	[66:..]Label bytes
+//	[0]      recordVersionRecordV1
+//	[1]      recordTypeVersion
+//	[2]      flags (bit 0 = pinned)
+//	[3]      reserved (must be 0)
+//	[4:20]   VersionID
+//	[20:36]  FileID
+//	[36:44]  Timestamp (int64 LE)
+//	[44:52]  Size      (int64 LE)
+//	[52:56]  Mode      (uint32 LE)
+//	[56:64]  DeletedAt (int64 LE)
+//	[64:66]  LabelLen     (uint16 LE)
+//	[66:..]  Label bytes
+//	[..:..]  MountNameLen (uint16 LE)
+//	[..:..]  MountName bytes
 func EncodeVersion(v Version) ([]byte, error) {
 	if len(v.Label) > MaxVersionLabelBytes {
 		return nil, ErrExtensionTooLong
 	}
-	out := make([]byte, versionMinLenV1+len(v.Label))
+	if len(v.MountName) > MaxVersionMountNameBytes {
+		return nil, ErrExtensionTooLong
+	}
+	out := make([]byte, versionMinLenV1+len(v.Label)+len(v.MountName))
 	pos := 0
 
 	out[pos] = versionRecordVersionV1
@@ -79,6 +90,10 @@ func EncodeVersion(v Version) ([]byte, error) {
 	binary.LittleEndian.PutUint16(out[pos:pos+2], uint16(len(v.Label)))
 	pos += 2
 	copy(out[pos:pos+len(v.Label)], v.Label)
+	pos += len(v.Label)
+	binary.LittleEndian.PutUint16(out[pos:pos+2], uint16(len(v.MountName)))
+	pos += 2
+	copy(out[pos:pos+len(v.MountName)], v.MountName)
 	return out, nil
 }
 
@@ -120,12 +135,25 @@ func DecodeVersion(in []byte) (Version, error) {
 	if labelLen > MaxVersionLabelBytes {
 		return out, ErrInvalidRecord
 	}
-	if pos+labelLen != len(in) {
+	if pos+labelLen+2 > len(in) {
 		return out, ErrInvalidRecord
 	}
 	if labelLen > 0 {
 		out.Label = make([]byte, labelLen)
 		copy(out.Label, in[pos:pos+labelLen])
+	}
+	pos += labelLen
+	mountLen := int(binary.LittleEndian.Uint16(in[pos : pos+2]))
+	pos += 2
+	if mountLen > MaxVersionMountNameBytes {
+		return out, ErrInvalidRecord
+	}
+	if pos+mountLen != len(in) {
+		return out, ErrInvalidRecord
+	}
+	if mountLen > 0 {
+		out.MountName = make([]byte, mountLen)
+		copy(out.MountName, in[pos:pos+mountLen])
 	}
 	return out, nil
 }

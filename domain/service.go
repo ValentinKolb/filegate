@@ -252,6 +252,15 @@ func sanitizeRelativePath(relPath string) (string, error) {
 		if seg == "" || seg == "." || seg == ".." {
 			return "", ErrInvalidArgument
 		}
+		// .fg-versions is a reserved internal namespace inside every
+		// mount. Reject the name anywhere in the path — at the mount
+		// root it's where version blobs live, deeper down it would
+		// reflect a user accidentally using the same name. Both cases
+		// are safer to refuse outright than to allow a path that
+		// shadows the namespace.
+		if seg == versionsDirName {
+			return "", ErrForbidden
+		}
 	}
 	return rel, nil
 }
@@ -1031,6 +1040,14 @@ func (s *Service) WriteContent(id FileID, body io.Reader) error {
 	}
 
 	preserveID := meta.ID
+	// Hold the per-file mutation lock around the entire capture +
+	// write + sync sequence. Without it, a concurrent RestoreVersion
+	// on the same file could land its atomic rename between this
+	// write's capture and writeFileAtomic — the user's write would be
+	// silently overwritten by the restore.
+	mu := s.versionLocks.Acquire(id)
+	mu.Lock()
+	defer mu.Unlock()
 	// Snapshot the existing bytes BEFORE the atomic write clobbers them.
 	// captureBeforeOverwrite is best-effort and never fails the user's
 	// write — the worst-case is a missed version, not a missed mutation.
@@ -1094,10 +1111,16 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	// Pre-overwrite snapshot of the existing target's bytes so the
-	// previous content is recoverable. If existingID is zero this is a
-	// fresh slot and there are no bytes to capture.
+	// Hold the per-file mutation lock for overwrite cases — same race
+	// argument as WriteContent (concurrent restore could land between
+	// capture and rename). Fresh-slot creates have no race window
+	// because there's no version history yet.
 	if !existingID.IsZero() {
+		mu := s.versionLocks.Acquire(existingID)
+		mu.Lock()
+		defer mu.Unlock()
+		// Pre-overwrite snapshot of the existing target's bytes so the
+		// previous content is recoverable.
 		s.captureBeforeOverwrite(existingID, targetPath)
 	}
 	sourceID, err := s.store.GetID(srcPath)
@@ -1242,6 +1265,22 @@ func (s *Service) isMountRoot(id FileID) bool {
 		return false
 	}
 	return e.ParentID.IsZero()
+}
+
+// isMountRootAbsPath reports whether absPath is exactly the on-disk
+// path of one of the configured mount roots. Used to apply mount-root-
+// only invariants (e.g. excluding the .fg-versions namespace from
+// reconcile passes).
+func (s *Service) isMountRootAbsPath(absPath string) bool {
+	cleaned := filepath.Clean(absPath)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, mountAbs := range s.mountByName {
+		if mountAbs == cleaned {
+			return true
+		}
+	}
+	return false
 }
 
 // MkdirRelative creates relPath under parentID. The leaf segment respects
@@ -1987,6 +2026,15 @@ func (s *Service) Delete(id FileID) error {
 	if err != nil {
 		return err
 	}
+	// Hold the per-file mutation lock around the delete + orphan-mark
+	// sequence. A concurrent SnapshotVersion would otherwise race the
+	// MarkVersionsDeleted in deleteSubtree and leave a live (un-marked)
+	// version metadata for a file that no longer exists. Locking only
+	// the file id, not its descendants — directory deletes are wider
+	// but each child's versions are an independent contention domain.
+	mu := s.versionLocks.Acquire(id)
+	mu.Lock()
+	defer mu.Unlock()
 	if err := s.store.RemoveAll(abs); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrNotFound
@@ -2346,10 +2394,16 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 		return err
 	}
 	// Build a lookup of names that exist on disk. Symlinks are skipped to
-	// match Filegate's overall symlink-rejection policy.
+	// match Filegate's overall symlink-rejection policy. The reserved
+	// .fg-versions namespace is filtered at the mount root — the
+	// versioning subsystem owns it, public reconcile must not index it.
+	mountRoot := s.isMountRootAbsPath(parentAbsPath)
 	onDisk := make(map[string]struct{}, len(diskEntries))
 	for _, e := range diskEntries {
 		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if mountRoot && e.Name() == versionsDirName {
 			continue
 		}
 		onDisk[e.Name()] = struct{}{}
@@ -2637,6 +2691,14 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 			}
 			if current == basePath {
 				return nil
+			}
+			// .fg-versions is a reserved internal namespace at the
+			// mount root. Exposing it through rescan would let users
+			// list/delete their own version blobs through the public
+			// path API and would index megabytes of binary data as
+			// regular files. SkipDir prunes the whole subtree.
+			if d.IsDir() && current == filepath.Join(basePath, versionsDirName) {
+				return filepath.SkipDir
 			}
 			if d.Type()&os.ModeSymlink != 0 {
 				return nil

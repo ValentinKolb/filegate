@@ -46,9 +46,18 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v.SetDefault("versioning.max_pinned_per_file", 100)
 	v.SetDefault("versioning.pinned_grace_after_delete", "720h") // 30 days
 	v.SetDefault("versioning.max_label_bytes", 2048)
-	// retention_buckets has no scalar default — leaving it empty means
-	// "keep everything for live versions". Operators define their own
-	// bucketed exponential-decay schedule in conf.yaml.
+	// retention_buckets defaults to a sane bucketed exponential-decay
+	// schedule. Without this, an operator who enables versioning but
+	// forgets to define buckets would silently accumulate versions
+	// forever (every write captures a new one). Operators can disable
+	// retention by passing an explicitly empty list AND understanding
+	// the storage-growth implications.
+	v.SetDefault("versioning.retention_buckets", []map[string]any{
+		{"keep_for": "1h", "max_count": -1}, // all in last hour
+		{"keep_for": "24h", "max_count": 24},
+		{"keep_for": "720h", "max_count": 30},  // ~daily for last 30d
+		{"keep_for": "8760h", "max_count": 12}, // ~monthly for last 1y
+	})
 
 	configFile = strings.TrimSpace(configFile)
 	if configFile == "" {
@@ -183,8 +192,11 @@ func loadConfig(configFile string) (domain.Config, error) {
 	if cfg.Versioning.MaxLabelBytes <= 0 {
 		cfg.Versioning.MaxLabelBytes = 2048
 	}
+	// max_pinned_per_file: negative is rejected outright because 0 is the
+	// "no cap" sentinel. Silently normalising negative -> 0 would let a
+	// typo remove the safety limit a careful operator chose.
 	if cfg.Versioning.MaxPinnedPerFile < 0 {
-		cfg.Versioning.MaxPinnedPerFile = 0
+		return cfg, fmt.Errorf("versioning.max_pinned_per_file must be >= 0 (use 0 explicitly to disable the cap)")
 	}
 	if cfg.Versioning.MinSizeForAutoV1 < 0 {
 		cfg.Versioning.MinSizeForAutoV1 = 0

@@ -45,8 +45,24 @@ func (s *Service) PruneVersions() (PruneStats, error) {
 
 	err := s.idx.ForEachFileVersions(func(fileID FileID, versions []VersionMeta) error {
 		stats.FilesScanned++
-		toDelete := pruneDecisions(versions, cfg, now)
-		stats.VersionsKept += len(versions) - len(toDelete)
+		// Per-file lock around the read-decide-delete sequence. Without
+		// it, a concurrent PinVersion can flip Pinned=true on a row
+		// the pruner has already selected for deletion, leaving a
+		// pinned metadata row whose blob the pruner then removes
+		// (resulting in 200 OK on list / 404 on content). Re-fetch
+		// the versions inside the lock so the decision sees the
+		// post-lock state, not the snapshot we got from the iter.
+		mu := s.versionLocks.Acquire(fileID)
+		mu.Lock()
+		fresh, fetchErr := s.idx.ListVersions(fileID, VersionID{}, 1000)
+		if fetchErr != nil {
+			mu.Unlock()
+			stats.Errors++
+			log.Printf("[filegate] versioning prune: re-fetch %s failed: %v", fileID, fetchErr)
+			return nil
+		}
+		toDelete := pruneDecisions(fresh, cfg, now)
+		stats.VersionsKept += len(fresh) - len(toDelete)
 		for _, v := range toDelete {
 			if v.IsOrphan() {
 				stats.OrphansPurged++
@@ -60,6 +76,7 @@ func (s *Service) PruneVersions() (PruneStats, error) {
 			stats.VersionsDeleted++
 			stats.BlobsDeleted++
 		}
+		mu.Unlock()
 		return nil
 	})
 	return stats, err
@@ -84,26 +101,51 @@ func (s *Service) DeleteVersion(fileID FileID, versionID VersionID) error {
 }
 
 // deleteVersionBlobAndRecord removes the on-disk blob and the Pebble
-// entry. Blob deletion is best-effort: a missing blob doesn't block the
-// index cleanup (the version is then "already gone" from the user's
-// perspective and the next snapshot reshuffles state correctly).
+// entry. Blob deletion is best-effort but is now possible even after
+// the source file's entity is gone — VersionMeta.MountName carries the
+// mount info so the blob can be located without ResolveAbsPath.
+//
+// Older records (written before MountName was added to the codec)
+// degrade gracefully: we fall back to the live-entity lookup, and if
+// that also fails we leave the blob behind and log it. Operators can
+// run a one-shot cleanup against any leftover blobs.
 func (s *Service) deleteVersionBlobAndRecord(meta VersionMeta) error {
-	srcAbs, err := s.ResolveAbsPath(meta.FileID)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	if srcAbs != "" {
-		_, blobPath, perr := s.versionStoragePath(meta.FileID, srcAbs, meta.VersionID)
-		if perr == nil {
-			if rmErr := os.Remove(blobPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-				log.Printf("[filegate] versioning: blob remove %s failed: %v", blobPath, rmErr)
-			}
+	blobPath := s.resolveVersionBlobPath(meta)
+	if blobPath != "" {
+		if rmErr := os.Remove(blobPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Printf("[filegate] versioning: blob remove %s failed: %v", blobPath, rmErr)
 		}
+	} else {
+		log.Printf("[filegate] versioning: cannot resolve blob path for orphan version %s/%s — skipping blob removal",
+			meta.FileID, meta.VersionID)
 	}
 	return s.idx.Batch(func(b Batch) error {
 		b.DelVersion(meta.FileID, meta.VersionID)
 		return nil
 	})
+}
+
+// resolveVersionBlobPath returns the on-disk blob path for meta, using
+// the persisted MountName when available and falling back to the
+// live-entity lookup otherwise. Returns "" only when both paths fail
+// (extremely rare — would require an orphan record for a record that
+// pre-dates the MountName field).
+func (s *Service) resolveVersionBlobPath(meta VersionMeta) string {
+	if meta.MountName != "" {
+		_, full, err := s.versionStoragePathByMount(meta.FileID, meta.MountName, meta.VersionID)
+		if err == nil {
+			return full
+		}
+	}
+	srcAbs, err := s.ResolveAbsPath(meta.FileID)
+	if err != nil {
+		return ""
+	}
+	_, full, perr := s.versionStoragePath(meta.FileID, srcAbs, meta.VersionID)
+	if perr != nil {
+		return ""
+	}
+	return full
 }
 
 // pruneDecisions decides which versions to delete for one file. Pure

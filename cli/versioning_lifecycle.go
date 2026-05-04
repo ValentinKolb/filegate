@@ -3,11 +3,37 @@ package cli
 import (
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/valentinkolb/filegate/domain"
 	"github.com/valentinkolb/filegate/infra/detect"
 )
+
+// versionsDirName mirrors domain.versionsDirName — kept here so the CLI
+// orphan-warning check doesn't need to import an unexported domain
+// constant. Both must stay in sync.
+const versionsDirName = ".fg-versions"
+
+// warnOrphanVersionDirs scans every base path for a leftover
+// .fg-versions directory before the Pebble index is rebuilt. Detached
+// blobs aren't fatal but do leak storage; the warning is loud so the
+// operator notices and either copies the blobs out for recovery or
+// removes them.
+func warnOrphanVersionDirs(basePaths []string) {
+	for _, base := range basePaths {
+		dir := filepath.Join(base, versionsDirName)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue // no orphan dir, no problem
+		}
+		log.Printf("[filegate] WARNING: index rebuild detached version blobs at %s (%d files). "+
+			"After Filegate starts, the orphans cannot be reattached automatically. "+
+			"Consider copying the blobs out before they are reclaimed, or `rm -rf %s` to free the storage.",
+			dir, len(entries), dir)
+	}
+}
 
 // versioningShouldEnable resolves the operator's versioning.enabled
 // setting to a definitive on/off boolean.
