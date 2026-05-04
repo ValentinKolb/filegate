@@ -229,20 +229,37 @@ func TestVersioningDisabledNoOps(t *testing.T) {
 	// Versioning never enabled.
 
 	root := mountRootName(t, svc)
-	meta, _, err := svc.WriteContentByVirtualPath(
+	if _, _, err := svc.WriteContentByVirtualPath(
 		"/"+root+"/x.bin",
 		strings.NewReader(strings.Repeat("X", 64*1024)),
 		domain.ConflictError,
-	)
-	if err != nil {
+	); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if got := serviceListVersions(t, svc, meta.ID); len(got) != 0 {
-		t.Fatalf("expected 0 versions when versioning disabled, got %d", len(got))
+	if svc.VersioningEnabled() {
+		t.Fatalf("VersioningEnabled() must be false after NewService without EnableVersioning")
 	}
-	if !svc.VersioningEnabled() {
-		// expected
+	// And no .fg-versions directory must have been created.
+	rootAbs := versionsRootBase(t, svc)
+	if _, err := os.Stat(rootAbs); err == nil {
+		t.Fatalf("versioning produced %s despite being disabled", rootAbs)
 	}
+}
+
+// versionsRootBase returns the .fg-versions directory at the test mount
+// (without the per-file subdir). Used by TestVersioningDisabledNoOps to
+// assert the directory was never created.
+func versionsRootBase(t *testing.T, svc *domain.Service) string {
+	t.Helper()
+	roots := svc.ListRoot()
+	if len(roots) != 1 {
+		t.Fatalf("expected 1 mount root, got %d", len(roots))
+	}
+	mountAbs, err := svc.ResolveAbsPath(roots[0].ID)
+	if err != nil {
+		t.Fatalf("ResolveAbsPath mount root: %v", err)
+	}
+	return filepath.Join(mountAbs, ".fg-versions")
 }
 
 func TestReplaceFileOverwriteCapturesPrevious(t *testing.T) {
@@ -282,14 +299,14 @@ func TestReplaceFileOverwriteCapturesPrevious(t *testing.T) {
 	}
 }
 
-// serviceListVersions is a tiny test helper that talks to the index port
-// directly. The public ListVersions API ships in Phase 3; until then
-// tests need a way to introspect captured state.
+// serviceListVersions returns every captured version for a file via the
+// public ListVersions API. Tests use this for introspection without
+// poking at the Pebble index directly.
 func serviceListVersions(t *testing.T, svc *domain.Service, fileID domain.FileID) []domain.VersionMeta {
 	t.Helper()
-	got, err := svc.IndexListVersionsForTest(fileID)
+	listed, err := svc.ListVersions(fileID, domain.VersionID{}, 1000)
 	if err != nil {
-		t.Fatalf("IndexListVersionsForTest: %v", err)
+		t.Fatalf("ListVersions: %v", err)
 	}
-	return got
+	return listed.Items
 }

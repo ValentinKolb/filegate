@@ -204,14 +204,6 @@ func newVersionID() (VersionID, error) {
 // FileID's existing formatting so blob filenames are human-readable.
 func (v VersionID) String() string { return FileID(v).String() }
 
-// IndexListVersionsForTest exposes the index-port version listing for
-// tests in the Phase 2 cycle. The public listing API ships in Phase 3
-// (HTTP endpoint + GoSDK + TS SDK); this helper goes away when the
-// public surface lands. Do not call from production code.
-func (s *Service) IndexListVersionsForTest(fileID FileID) ([]VersionMeta, error) {
-	return s.idx.ListVersions(fileID, VersionID{}, 0)
-}
-
 // ParseVersionID parses a UUID-formatted string (with or without
 // dashes) into a VersionID. Returns ErrInvalidID on bad input —
 // canonical with ParseFileID since both share the underlying UUID

@@ -61,6 +61,19 @@ func newDaemonServeCmd() *cobra.Command {
 				consumeDetectorEvents(ctx, svc, detector.Events())
 			}()
 
+			versioningEnabled := versioningShouldEnable(cfg.Versioning, cfg.Storage.BasePaths)
+			svc.EnableVersioning(cfg.Versioning, versioningEnabled)
+			prunerDone := make(chan struct{})
+			if versioningEnabled {
+				log.Printf("[filegate] versioning: enabled (cooldown=%s, pruner_interval=%s)",
+					cfg.Versioning.Cooldown, cfg.Versioning.PrunerInterval)
+				go runVersioningPruner(ctx, svc, cfg.Versioning.PrunerInterval, prunerDone)
+			} else {
+				close(prunerDone)
+				log.Printf("[filegate] versioning: disabled (config=%q, btrfs check failed for at least one mount)",
+					cfg.Versioning.Enabled)
+			}
+
 			router := httpadapter.NewRouter(svc, httpadapter.RouterOptions{
 				BearerToken:              cfg.Auth.BearerToken,
 				AccessLogEnabled:         cfg.Server.AccessLogEnabled,
@@ -112,6 +125,7 @@ func newDaemonServeCmd() *cobra.Command {
 					cancel()
 					detector.Close()
 					<-detectorDone
+					<-prunerDone
 					if routerCloser != nil {
 						_ = routerCloser.Close()
 					}
@@ -126,6 +140,7 @@ func newDaemonServeCmd() *cobra.Command {
 			cancel()
 			detector.Close()
 			<-detectorDone
+			<-prunerDone
 			if routerCloser != nil {
 				_ = routerCloser.Close()
 			}

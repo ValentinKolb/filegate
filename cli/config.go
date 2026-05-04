@@ -39,6 +39,16 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v.SetDefault("thumbnail.lru_cache_size", 1024)
 	v.SetDefault("thumbnail.max_source_bytes", int64(64*1024*1024))
 	v.SetDefault("thumbnail.max_pixels", int64(40*1024*1024))
+	v.SetDefault("versioning.enabled", "auto")
+	v.SetDefault("versioning.cooldown", "15m")
+	v.SetDefault("versioning.min_size_for_auto_v1", int64(64*1024))
+	v.SetDefault("versioning.pruner_interval", "5m")
+	v.SetDefault("versioning.max_pinned_per_file", 100)
+	v.SetDefault("versioning.pinned_grace_after_delete", "720h") // 30 days
+	v.SetDefault("versioning.max_label_bytes", 2048)
+	// retention_buckets has no scalar default — leaving it empty means
+	// "keep everything for live versions". Operators define their own
+	// bucketed exponential-decay schedule in conf.yaml.
 
 	configFile = strings.TrimSpace(configFile)
 	if configFile == "" {
@@ -148,6 +158,36 @@ func loadConfig(configFile string) (domain.Config, error) {
 	}
 	if cfg.Thumbnail.MaxPixels <= 0 {
 		cfg.Thumbnail.MaxPixels = int64(40 * 1024 * 1024)
+	}
+
+	cfg.Versioning.Cooldown = v.GetDuration("versioning.cooldown")
+	cfg.Versioning.PrunerInterval = v.GetDuration("versioning.pruner_interval")
+	cfg.Versioning.PinnedGraceAfterDelete = v.GetDuration("versioning.pinned_grace_after_delete")
+	cfg.Versioning.Enabled = strings.ToLower(strings.TrimSpace(cfg.Versioning.Enabled))
+	switch cfg.Versioning.Enabled {
+	case "", "auto":
+		cfg.Versioning.Enabled = "auto"
+	case "on", "off":
+	default:
+		return cfg, fmt.Errorf("versioning.enabled must be one of: auto, on, off")
+	}
+	if cfg.Versioning.Cooldown <= 0 {
+		cfg.Versioning.Cooldown = 15 * time.Minute
+	}
+	if cfg.Versioning.PrunerInterval <= 0 {
+		cfg.Versioning.PrunerInterval = 5 * time.Minute
+	}
+	if cfg.Versioning.PinnedGraceAfterDelete <= 0 {
+		cfg.Versioning.PinnedGraceAfterDelete = 30 * 24 * time.Hour
+	}
+	if cfg.Versioning.MaxLabelBytes <= 0 {
+		cfg.Versioning.MaxLabelBytes = 2048
+	}
+	if cfg.Versioning.MaxPinnedPerFile < 0 {
+		cfg.Versioning.MaxPinnedPerFile = 0
+	}
+	if cfg.Versioning.MinSizeForAutoV1 < 0 {
+		cfg.Versioning.MinSizeForAutoV1 = 0
 	}
 
 	return cfg, nil

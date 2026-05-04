@@ -88,6 +88,36 @@ mkdir). For directory replacement use `POST /v1/transfers` with `overwrite`.
   - Query: `recursiveOwnership=true|false` (default `true`)
   - Body: `TransferRequest`
 
+## Versions
+
+Per-file version history for HTTP-mediated writes. btrfs-only via
+reflinks; ext4 mounts return `404` with `versioning_unsupported`. See
+[versioning.md](versioning.md) for behaviour, retention, and operator
+notes.
+
+- `GET /v1/nodes/{id}/versions`
+  - Cursor-paginated list of captured versions (oldest first)
+  - Query: `cursor=<vid>`, `limit=<n>` (default 100, max 1000)
+- `GET /v1/nodes/{id}/versions/{vid}/content`
+  - Streams version bytes (`application/octet-stream`)
+- `POST /v1/nodes/{id}/versions/snapshot`
+  - Body (optional): `{ "label"?: "..." }` (capped at `max_label_bytes`)
+  - Captures current bytes immediately, ignoring cooldown. Pinned.
+  - `409` if `max_pinned_per_file` would be exceeded
+- `POST /v1/nodes/{id}/versions/{vid}/pin`
+  - Body (optional): `{ "label"?: "..." | null }`
+  - Pins version, optionally updates label. Idempotent
+- `POST /v1/nodes/{id}/versions/{vid}/unpin`
+  - Clears pinned flag. Label preserved. Idempotent
+- `POST /v1/nodes/{id}/versions/{vid}/restore`
+  - Body (optional): `{ "asNewFile"?: bool, "name"?: string }`
+  - Default = in-place: snapshot current, then load target. File ID
+    preserved
+  - `asNewFile=true` = sibling file (`<base>-restored<ext>` or `name`,
+    with `-N` conflict suffix). New File ID
+- `DELETE /v1/nodes/{id}/versions/{vid}`
+  - Manual purge. Works on any version (including pinned) → 204
+
 ## Search
 
 - `GET /v1/search/glob`
