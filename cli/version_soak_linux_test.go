@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -144,8 +145,26 @@ func TestVersioningSoak(t *testing.T) {
 		restores  atomic.Int64
 		deletes   atomic.Int64
 		recreates atomic.Int64
-		errs      atomic.Int64
+		// Error counters split by class so we can see which failure
+		// dominates. ErrNotFound and ErrConflict are expected fallout
+		// from the unsynchronised op-mix (stale slot.id after a
+		// concurrent delete+recreate, or a recreate that lost the race
+		// to another worker). errsOther is the bug-signal bucket — any
+		// non-zero value means we hit something we don't understand.
+		errsNotFound atomic.Int64
+		errsConflict atomic.Int64
+		errsOther    atomic.Int64
 	)
+	classify := func(err error) {
+		switch {
+		case errors.Is(err, domain.ErrNotFound):
+			errsNotFound.Add(1)
+		case errors.Is(err, domain.ErrConflict):
+			errsConflict.Add(1)
+		default:
+			errsOther.Add(1)
+		}
+	}
 
 	// Worker count scales with the file pool so contention stays
 	// meaningful at larger scales. Default 4; cap at 16 to avoid
@@ -191,16 +210,13 @@ func TestVersioningSoak(t *testing.T) {
 				case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10: // ~55% writes
 					body := fmt.Sprintf("write-%d", rnd.Int63())
 					if err := svc.WriteContent(slotID, strings.NewReader(body)); err != nil {
-						errs.Add(1)
+						classify(err)
 						continue
 					}
 					writes.Add(1)
 				case 11, 12, 13, 14: // 20% manual snapshots
 					if _, err := svc.SnapshotVersion(slotID, "soak"); err != nil {
-						if err == domain.ErrConflict { // cap reached
-							continue
-						}
-						errs.Add(1)
+						classify(err)
 						continue
 					}
 					snapshots.Add(1)
@@ -225,7 +241,7 @@ func TestVersioningSoak(t *testing.T) {
 					}
 					target := listed.Items[rnd.Intn(len(listed.Items))]
 					if _, _, err := svc.RestoreVersion(slotID, target.VersionID, domain.RestoreOptions{}); err != nil {
-						errs.Add(1)
+						classify(err)
 						continue
 					}
 					restores.Add(1)
@@ -234,7 +250,7 @@ func TestVersioningSoak(t *testing.T) {
 					// (deleteSubtree's per-descendant lock) and also
 					// expose any race between in-flight ops on slot.id.
 					if err := svc.Delete(slotID); err != nil {
-						errs.Add(1)
+						classify(err)
 						continue
 					}
 					deletes.Add(1)
@@ -244,7 +260,7 @@ func TestVersioningSoak(t *testing.T) {
 						domain.ConflictError,
 					)
 					if err != nil {
-						errs.Add(1)
+						classify(err)
 						continue
 					}
 					newID := meta.ID
@@ -345,10 +361,24 @@ func TestVersioningSoak(t *testing.T) {
 			baselineGoroutines, postGoroutines, postGoroutines-baselineGoroutines)
 	}
 
-	t.Logf("soak summary: duration=%s pool=%d workers=%d writes=%d snapshots=%d pins=%d restores=%d deletes=%d recreates=%d errs=%d totalMeta=%d totalBlobs=%d goroutines=%d->%d",
+	totalOps := writes.Load() + snapshots.Load() + pins.Load() + restores.Load() + deletes.Load() + recreates.Load()
+	totalErrs := errsNotFound.Load() + errsConflict.Load() + errsOther.Load()
+	t.Logf("soak summary: duration=%s pool=%d workers=%d writes=%d snapshots=%d pins=%d restores=%d deletes=%d recreates=%d errs=%d (notFound=%d conflict=%d other=%d) totalMeta=%d totalBlobs=%d goroutines=%d->%d",
 		duration, filePool, workers, writes.Load(), snapshots.Load(), pins.Load(),
-		restores.Load(), deletes.Load(), recreates.Load(), errs.Load(),
+		restores.Load(), deletes.Load(), recreates.Load(),
+		totalErrs, errsNotFound.Load(), errsConflict.Load(), errsOther.Load(),
 		totalMeta, totalBlobs, baselineGoroutines, postGoroutines)
+
+	// errsOther is the bug-signal bucket — anything other than
+	// ErrNotFound/ErrConflict means we hit a failure mode we don't
+	// expect from the unsynchronised op-mix. Allow a tiny absolute
+	// floor (3) to absorb genuine flake (e.g. transient i/o), but
+	// fail the test if the rate exceeds 0.5% of total ops.
+	otherCount := errsOther.Load()
+	if otherCount > 3 && otherCount*200 > totalOps {
+		t.Errorf("unexpected error rate: errsOther=%d / totalOps=%d (>0.5%%) — investigate test logs",
+			otherCount, totalOps)
+	}
 
 	// Bucket retention should have kept the per-file version count well
 	// below the unconstrained "every write captures" upper bound. With
