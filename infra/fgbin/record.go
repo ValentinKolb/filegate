@@ -25,8 +25,32 @@ const (
 	entityMinLenV2 = 4 + 16 + 16 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 4 + 2 + 2 + 2
 )
 
+// Extension field IDs for the entity record.
+//
+// IDs are persisted on disk and form a stable wire-format contract — once
+// assigned, they must never be reused for a different meaning. Decoders
+// tolerate unknown IDs by skipping (forward compatibility), so adding a
+// new ID is safe; reusing an old one for new semantics is not.
+//
+// Encoders must emit extensions in strictly-increasing FieldID order;
+// duplicates are rejected (ErrNonCanonicalExt). See EncodeEntity.
+//
+// Reserved IDs:
+//   1 — EXIF (existing)
+//   2 — RFC1864 MD5 of file body, lowercase hex; cross-protocol ETag
+//   3 — composite multipart ETag (S3); "<MD5-of-concatenated-part-MD5s>-<N>"
+//   4 — explicit Content-Type when set by S3 PUT (overrides filename-derived)
+//   5 — Content-Encoding HTTP header round-trip (S3)
+//   6 — Content-Disposition HTTP header round-trip (S3)
+//   7 — opaque blob: serialized x-amz-meta-* user metadata (S3)
 const (
-	FieldEXIF uint16 = 1
+	FieldEXIF               uint16 = 1
+	FieldETagMD5            uint16 = 2
+	FieldMultipartETag      uint16 = 3
+	FieldContentType        uint16 = 4
+	FieldContentEncoding    uint16 = 5
+	FieldContentDisposition uint16 = 6
+	FieldS3UserMetadata     uint16 = 7
 )
 
 var (

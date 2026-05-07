@@ -27,12 +27,13 @@ const (
 	// clean rebuild between bumps.
 	familyVersion byte = 0x04
 
-	// currentIndexFormatVersion was bumped from 6 to 7 when the per-file
-	// versioning subsystem (`familyVersion`) was added. The bump forces
-	// a clean rebuild so old indexes don't surface partial data; the new
-	// keyspace is empty after the rebuild and gets populated as files
-	// are written or manually snapshotted.
-	currentIndexFormatVersion uint16 = 7
+	// currentIndexFormatVersion was bumped from 7 to 8 when the entity
+	// record gained ETag and S3-metadata extension fields (FieldETagMD5
+	// through FieldS3UserMetadata in infra/fgbin). The bump forces a
+	// clean rebuild so existing rows pick up ETagMD5 via the rescan walk;
+	// without the bump, legacy rows would have an empty ETag forever and
+	// S3 GET/HEAD would have to lazy-compute on every cold read.
+	currentIndexFormatVersion uint16 = 8
 )
 
 // ErrUnsupportedIndexFormat is returned when the on-disk index version is incompatible.
@@ -251,6 +252,46 @@ func encodeEntity(e domain.Entity) ([]byte, error) {
 			Value:   exifJSON,
 		})
 	}
+	// Optional fields: only emitted when set, so legacy rows and entities
+	// that never went through an S3 write encode to the same bytes as
+	// before. Encoder sorts by FieldID and rejects duplicates, so order
+	// here doesn't matter — but keeping it monotonic helps reviewers.
+	if e.ETagMD5 != "" {
+		rec.Extensions = append(rec.Extensions, fgbin.Extension{
+			FieldID: fgbin.FieldETagMD5,
+			Value:   []byte(e.ETagMD5),
+		})
+	}
+	if e.MultipartETag != "" {
+		rec.Extensions = append(rec.Extensions, fgbin.Extension{
+			FieldID: fgbin.FieldMultipartETag,
+			Value:   []byte(e.MultipartETag),
+		})
+	}
+	if e.ContentType != "" {
+		rec.Extensions = append(rec.Extensions, fgbin.Extension{
+			FieldID: fgbin.FieldContentType,
+			Value:   []byte(e.ContentType),
+		})
+	}
+	if e.ContentEncoding != "" {
+		rec.Extensions = append(rec.Extensions, fgbin.Extension{
+			FieldID: fgbin.FieldContentEncoding,
+			Value:   []byte(e.ContentEncoding),
+		})
+	}
+	if e.ContentDisposition != "" {
+		rec.Extensions = append(rec.Extensions, fgbin.Extension{
+			FieldID: fgbin.FieldContentDisposition,
+			Value:   []byte(e.ContentDisposition),
+		})
+	}
+	if len(e.S3UserMetadata) > 0 {
+		rec.Extensions = append(rec.Extensions, fgbin.Extension{
+			FieldID: fgbin.FieldS3UserMetadata,
+			Value:   append([]byte(nil), e.S3UserMetadata...),
+		})
+	}
 	return fgbin.EncodeEntity(rec)
 }
 
@@ -272,21 +313,52 @@ func decodeEntity(id domain.FileID, value []byte) (domain.Entity, error) {
 			exif = nil
 		}
 	}
+
+	// Optional S3-related fields. ExtensionByID returns (nil, false) for
+	// missing IDs, so legacy rows decode with empty strings/slices for
+	// all of these — semantically the same as "never set".
+	var etagMD5, multipartETag, contentType, contentEncoding, contentDisposition string
+	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldETagMD5); ok {
+		etagMD5 = string(raw)
+	}
+	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldMultipartETag); ok {
+		multipartETag = string(raw)
+	}
+	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldContentType); ok {
+		contentType = string(raw)
+	}
+	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldContentEncoding); ok {
+		contentEncoding = string(raw)
+	}
+	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldContentDisposition); ok {
+		contentDisposition = string(raw)
+	}
+	var s3Meta []byte
+	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldS3UserMetadata); ok {
+		s3Meta = raw // ExtensionByID already returns a fresh copy
+	}
+
 	return domain.Entity{
-		ID:       id,
-		ParentID: domain.FileID(rec.ParentID),
-		Name:     rec.Name,
-		IsDir:    rec.IsDir,
-		Size:     rec.Size,
-		Mtime:    rec.MtimeNs / int64(1_000_000),
-		UID:      rec.UID,
-		GID:      rec.GID,
-		Mode:     rec.Mode,
-		Device:   rec.Device,
-		Inode:    rec.Inode,
-		Nlink:    rec.Nlink,
-		MimeType: rec.MimeType,
-		Exif:     exif,
+		ID:                 id,
+		ParentID:           domain.FileID(rec.ParentID),
+		Name:               rec.Name,
+		IsDir:              rec.IsDir,
+		Size:               rec.Size,
+		Mtime:              rec.MtimeNs / int64(1_000_000),
+		UID:                rec.UID,
+		GID:                rec.GID,
+		Mode:               rec.Mode,
+		Device:             rec.Device,
+		Inode:              rec.Inode,
+		Nlink:              rec.Nlink,
+		MimeType:           rec.MimeType,
+		Exif:               exif,
+		ETagMD5:            etagMD5,
+		MultipartETag:      multipartETag,
+		ContentType:        contentType,
+		ContentEncoding:    contentEncoding,
+		ContentDisposition: contentDisposition,
+		S3UserMetadata:     s3Meta,
 	}, nil
 }
 

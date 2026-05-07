@@ -76,6 +76,85 @@ func TestDecodeEntityRejectsDuplicateExtensions(t *testing.T) {
 	}
 }
 
+func TestEntityRoundTripWithS3Extensions(t *testing.T) {
+	var id [16]byte
+	copy(id[:], []byte("0123456789abcdef"))
+	in := Entity{
+		ID:       id,
+		ParentID: id,
+		Size:     1024,
+		MtimeNs:  1,
+		Name:     "obj.bin",
+		MimeType: "application/octet-stream",
+		Extensions: []Extension{
+			{FieldID: FieldEXIF, Value: []byte(`{"k":"v"}`)},
+			{FieldID: FieldETagMD5, Value: []byte("d41d8cd98f00b204e9800998ecf8427e")},
+			{FieldID: FieldMultipartETag, Value: []byte("abc-3")},
+			{FieldID: FieldContentType, Value: []byte("image/png")},
+			{FieldID: FieldContentEncoding, Value: []byte("gzip")},
+			{FieldID: FieldContentDisposition, Value: []byte(`attachment; filename="x.bin"`)},
+			{FieldID: FieldS3UserMetadata, Value: []byte("user-meta-blob")},
+		},
+	}
+	blob, err := EncodeEntity(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err := DecodeEntity(blob)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Extensions must round-trip in canonical (FieldID-ascending) order.
+	if len(out.Extensions) != 7 {
+		t.Fatalf("ext count=%d, want 7", len(out.Extensions))
+	}
+	wantOrder := []uint16{
+		FieldEXIF, FieldETagMD5, FieldMultipartETag, FieldContentType,
+		FieldContentEncoding, FieldContentDisposition, FieldS3UserMetadata,
+	}
+	for i, ext := range out.Extensions {
+		if ext.FieldID != wantOrder[i] {
+			t.Fatalf("ext[%d].FieldID=%d, want %d", i, ext.FieldID, wantOrder[i])
+		}
+	}
+	if got, _ := ExtensionByID(out.Extensions, FieldETagMD5); string(got) != "d41d8cd98f00b204e9800998ecf8427e" {
+		t.Fatalf("ETagMD5 round-trip: got %q", got)
+	}
+	if got, _ := ExtensionByID(out.Extensions, FieldMultipartETag); string(got) != "abc-3" {
+		t.Fatalf("MultipartETag round-trip: got %q", got)
+	}
+}
+
+// TestEntityWithoutS3ExtensionsDecodes verifies that entity records
+// emitted before the S3 schema additions still decode cleanly. This
+// is the forward-compat property the codec relies on: encoding adds
+// extensions only when set, so legacy rows produce minimal records
+// that any future decoder reads as zero-valued extra fields.
+func TestEntityWithoutS3ExtensionsDecodes(t *testing.T) {
+	var id [16]byte
+	in := Entity{
+		ID:       id,
+		ParentID: id,
+		Size:     0,
+		Name:     "legacy.txt",
+		// No extensions at all — pre-schema-bump record shape.
+	}
+	blob, err := EncodeEntity(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err := DecodeEntity(blob)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Extensions) != 0 {
+		t.Fatalf("ext count=%d, want 0", len(out.Extensions))
+	}
+	if got, ok := ExtensionByID(out.Extensions, FieldETagMD5); ok {
+		t.Fatalf("FieldETagMD5 unexpectedly present in legacy record: %q", got)
+	}
+}
+
 func TestChildRoundTrip(t *testing.T) {
 	var id [16]byte
 	copy(id[:], []byte("1234567890abcdef"))

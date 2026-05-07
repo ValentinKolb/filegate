@@ -81,6 +81,31 @@ type Entity struct {
 	Nlink    uint32
 	MimeType string
 	Exif     map[string]string
+	// ETagMD5 is the lowercase hex RFC1864 MD5 of the file body, computed
+	// during writes and surfaced to S3 clients as the object ETag. Empty
+	// for directories, for files written before the schema introduced the
+	// field, and for files only seen by the FS detector path. Index
+	// rescan populates it for any file it walks. The S3 read path may
+	// also lazily compute and persist it on first access.
+	ETagMD5 string
+	// MultipartETag is set on files uploaded via S3 multipart Complete:
+	// "<hex(MD5(concat-of-part-MD5-bytes))>-<N>". When non-empty, S3
+	// GET/HEAD return it (quoted) instead of the single-MD5 ETag. Cleared
+	// by REST overwrites (any non-S3 write resets the file to single-MD5
+	// identity).
+	MultipartETag string
+	// ContentType, when non-empty, overrides the filename-derived MIME
+	// type for S3 GET/HEAD responses. Set explicitly by S3 PutObject;
+	// REST writes leave it empty (read paths fall back to MimeType).
+	ContentType string
+	// ContentEncoding and ContentDisposition are HTTP headers round-tripped
+	// through S3 PutObject → GetObject. Empty for non-S3-originated files.
+	ContentEncoding    string
+	ContentDisposition string
+	// S3UserMetadata is the opaque serialized x-amz-meta-* blob from a
+	// PutObject. Empty for non-S3-originated files. Format is internal —
+	// the S3 adapter is the only producer/consumer.
+	S3UserMetadata []byte
 }
 
 // DirEntry is a compact listing entry for a child of a directory.
@@ -105,7 +130,12 @@ type FileMeta struct {
 	Mode     uint32            `json:"mode"`
 	MimeType string            `json:"mimeType,omitempty"`
 	Exif     map[string]string `json:"exif"`
-	IsRoot   bool              `json:"-"`
+	// ETag is the lowercase hex MD5 of the file body, populated by writes
+	// (REST + S3) and by index rescan. Empty for directories and for files
+	// that haven't been hashed yet (pre-schema legacy rows that never had
+	// a rescan or write since the upgrade).
+	ETag   string `json:"etag,omitempty"`
+	IsRoot bool   `json:"-"`
 }
 
 // Ownership specifies optional permission overrides for file operations.

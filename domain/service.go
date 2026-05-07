@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -506,6 +508,49 @@ func buildEntityMetadata(id, parentID FileID, name, absPath string, info os.File
 	}
 }
 
+// preserveS3Metadata copies the ETag and S3-only metadata fields from
+// src onto dst. buildEntityMetadata constructs an Entity purely from
+// filesystem stat info and would otherwise wipe these fields on any
+// rename/move/sync — preserveS3Metadata gives callers that already
+// hold the prior entity a way to keep them across the rebuild.
+//
+// Callers that legitimately want to clear the fields (REST overwrite
+// of an S3-uploaded file via syncSingleAfterLocalWrite) skip this and
+// let the fields default to zero.
+func preserveS3Metadata(dst *Entity, src *Entity) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.ETagMD5 = src.ETagMD5
+	dst.MultipartETag = src.MultipartETag
+	dst.ContentType = src.ContentType
+	dst.ContentEncoding = src.ContentEncoding
+	dst.ContentDisposition = src.ContentDisposition
+	dst.S3UserMetadata = src.S3UserMetadata
+}
+
+// hashFileMD5 reads absPath and returns the lowercase hex MD5 of its
+// bytes. Returns "" with no error for non-regular files (callers
+// shouldn't compute ETags for directories, symlinks, or device files).
+// Used by the rescan path to populate ETagMD5 for files that pre-date
+// the schema or were created by external writes the detector picked up.
+func hashFileMD5(absPath string, info os.FileInfo) (string, error) {
+	if info != nil && !info.Mode().IsRegular() {
+		return "", nil
+	}
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := md5.New()
+	buf := make([]byte, 128*1024)
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func fileMetaFromEntity(entity *Entity, vp string) *FileMeta {
 	meta := &FileMeta{
 		ID:       entity.ID,
@@ -519,6 +564,7 @@ func fileMetaFromEntity(entity *Entity, vp string) *FileMeta {
 		Mode:     entity.Mode,
 		MimeType: entity.MimeType,
 		Exif:     entity.Exif,
+		ETag:     entity.ETagMD5,
 		IsRoot:   entity.ParentID.IsZero(),
 	}
 	if entity.IsDir {
@@ -1053,10 +1099,11 @@ func (s *Service) WriteContent(id FileID, body io.Reader) error {
 	// captureBeforeOverwrite is best-effort and never fails the user's
 	// write — the worst-case is a missed version, not a missed mutation.
 	s.captureBeforeOverwrite(id, abs)
-	if err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false); err != nil {
+	md5Hex, err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false)
+	if err != nil {
 		return err
 	}
-	if err := s.syncSingle(abs); err != nil {
+	if err := s.syncSingleAfterLocalWrite(abs, md5Hex); err != nil {
 		return err
 	}
 	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: abs, At: time.Now()})
@@ -1934,6 +1981,11 @@ func (s *Service) reParentNode(id FileID, oldName string, newParentID FileID, ne
 	}
 
 	updated := buildEntityMetadata(id, newParentID, newName, newAbs, info)
+	// reParentNode rebuilds the entity purely from filesystem stat
+	// info, so without this the ETag and any S3-uploaded metadata
+	// would be wiped on every rename/move. The bytes haven't changed,
+	// only the path, so we preserve the prior ETag and S3 fields.
+	preserveS3Metadata(&updated, entity)
 	if err := s.idx.Batch(func(b Batch) error {
 		b.DelChild(oldParentID, oldName)
 		b.PutEntity(updated)
@@ -2249,6 +2301,56 @@ func (s *Service) syncSingle(absPath string) error {
 	// (CreateChild, WriteContent, Transfer, SyncAbsPath, ...) publish the
 	// semantically-correct event after invoking syncSingle.
 	return nil
+}
+
+// syncSingleAfterLocalWrite runs syncSingle, then persists the
+// caller-supplied md5Hex on the entity as ETagMD5 and clears all
+// S3-only metadata fields. Call this from REST/non-S3 write paths
+// immediately after writeFileAtomic so the entity row carries an ETag
+// and the S3-overwrite-clear-semantics from the plan are honoured.
+//
+// Cost: one extra Pebble Get + one extra batched Set vs plain
+// syncSingle. The extra round-trip is acceptable for the consistency
+// win (every local write produces an indexed ETag, and any prior
+// multipart_etag from an earlier S3 multipart upload is dropped — the
+// honest signal that the file changed via a non-S3 protocol).
+//
+// md5Hex must be the lowercase hex MD5 of the bytes that were just
+// written. Pass "" for directory writes or other paths where the
+// concept doesn't apply (the function then becomes a plain syncSingle
+// with the S3-field-clear still applied — useful when the file is
+// being recreated as a non-content event).
+func (s *Service) syncSingleAfterLocalWrite(absPath string, md5Hex string) error {
+	if err := s.syncSingle(absPath); err != nil {
+		return err
+	}
+	id, err := s.store.GetID(absPath)
+	if err != nil {
+		return err
+	}
+	return s.idx.Batch(func(b Batch) error {
+		entity, err := s.idx.GetEntity(id)
+		if err != nil {
+			return err
+		}
+		if entity == nil {
+			// File was deleted between syncSingle and the follow-up
+			// read. Harmless — nothing to update.
+			return nil
+		}
+		entity.ETagMD5 = md5Hex
+		// REST/non-S3 overwrite semantics: clear all S3-only fields.
+		// See plan §7 rule 4. If a future S3 write wants to set them,
+		// it will use a different domain entry-point that preserves
+		// or sets explicitly.
+		entity.MultipartETag = ""
+		entity.ContentType = ""
+		entity.ContentEncoding = ""
+		entity.ContentDisposition = ""
+		entity.S3UserMetadata = nil
+		b.PutEntity(*entity)
+		return nil
+	})
 }
 
 func (s *Service) mountForAbsPath(absPath string) (mountName, rel string, ok bool) {
@@ -2779,6 +2881,39 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 				dirAbsPathsVisited = append(dirAbsPathsVisited, current)
 			}
 			entity := buildEntityMetadata(id, parentID, d.Name(), current, info)
+			// Rescan is the authoritative ETag-population path for any
+			// file whose ETag isn't already correct (legacy, externally
+			// added, or rebuilt index). Operators run rescan when they
+			// want eager population — accept the extra read pass per
+			// regular file.
+			//
+			// We also prefer an existing index ETag when the file hasn't
+			// changed since it was last indexed. This skips the hash for
+			// the common case where rescan is run repeatedly against an
+			// unchanged dataset.
+			if !d.IsDir() && info.Mode().IsRegular() {
+				prior, _ := s.idx.GetEntity(id)
+				if prior != nil && prior.ETagMD5 != "" && prior.Size == info.Size() && prior.Mtime == info.ModTime().UnixMilli() {
+					preserveS3Metadata(&entity, prior)
+				} else {
+					md5Hex, hashErr := hashFileMD5(current, info)
+					if hashErr != nil {
+						log.Printf("[filegate] rescan: hash failed for %s: %v", current, hashErr)
+					} else if md5Hex != "" {
+						entity.ETagMD5 = md5Hex
+					}
+					// Preserve S3-only fields if any prior row exists,
+					// even when we recomputed the ETag (the S3-set
+					// fields are independent of body bytes).
+					if prior != nil {
+						entity.MultipartETag = prior.MultipartETag
+						entity.ContentType = prior.ContentType
+						entity.ContentEncoding = prior.ContentEncoding
+						entity.ContentDisposition = prior.ContentDisposition
+						entity.S3UserMetadata = prior.S3UserMetadata
+					}
+				}
+			}
 			collected = append(collected, scanned{
 				entity: entity,
 				entry: DirEntry{
