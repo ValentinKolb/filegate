@@ -52,13 +52,50 @@ func (s *Service) RestoreVersion(fileID FileID, versionID VersionID, opts Restor
 		opts.Name = trimmed
 	}
 
-	// Lock FIRST, then resolve. Same race argument as WriteContent/Delete:
-	// a concurrent Delete that finishes between our resolve and our
-	// lock acquire would leave us holding stale paths and risk
-	// resurrecting the file with its old ID.
+	// Path-lock acquisition depends on flavor:
+	//   * in-place: a single point-lock on the source path is enough.
+	//   * as-new-file: the candidate sibling name is generated under
+	//     a uniquification scan that touches sibling-existence state
+	//     and then commitNoReplace creates a NEW path in the same
+	//     parent. Lock the parent as a SUBTREE so candidate selection
+	//     and create are atomic against any other namespace mutation
+	//     at any sibling.
+	srcKey, srcKeyOK := s.pathLockKeyForID(fileID)
+	if !srcKeyOK {
+		return nil, false, ErrForbidden
+	}
+	var pathRel func()
+	if opts.AsNewFile {
+		// Need the source's parent path for the subtree lock.
+		entity, err := s.idx.GetEntity(fileID)
+		if err != nil {
+			return nil, false, err
+		}
+		if entity.ParentID.IsZero() {
+			return nil, false, ErrForbidden
+		}
+		parentVP, err := s.VirtualPath(entity.ParentID)
+		if err != nil {
+			return nil, false, err
+		}
+		pmount, prel, ok := splitVirtualPath(parentVP)
+		if !ok {
+			return nil, false, ErrInvalidArgument
+		}
+		pathRel = s.pathLocks.AcquireSubtree(pathLockKey(pmount, prel))
+	} else {
+		pathRel = s.pathLocks.AcquirePoint(srcKey)
+	}
+	defer pathRel()
+
 	mu := s.versionLocks.Acquire(fileID)
 	mu.Lock()
 	defer mu.Unlock()
+
+	if currentKey, ok := s.pathLockKeyForID(fileID); !ok || currentKey != srcKey {
+		// File moved or vanished between resolve and lock.
+		return nil, false, ErrNotFound
+	}
 
 	srcAbs, err := s.ResolveAbsPath(fileID)
 	if err != nil {

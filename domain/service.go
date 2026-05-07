@@ -58,6 +58,7 @@ type Service struct {
 	versioningEnabled bool
 	versioningCfg     VersioningConfig
 	versionLocks      *fileLockMap
+	pathLocks         *pathLockManager
 }
 
 // NewService creates a Service with the given infrastructure adapters and mount paths.
@@ -88,6 +89,7 @@ func NewService(idx Index, store Store, bus EventBus, basePaths []string, pathCa
 		pathCacheSize: effectivePathCacheSize,
 		dirSync:       newDirSyncer(),
 		versionLocks:  newFileLockMap(),
+		pathLocks:     newPathLockManager(),
 	}
 
 	for _, p := range basePaths {
@@ -1089,42 +1091,44 @@ func (s *Service) OpenContent(id FileID) (io.ReadCloser, int64, bool, error) {
 }
 
 func (s *Service) WriteContent(id FileID, body io.Reader) error {
-	// Lock FIRST, then resolve. If we resolved before locking, a
-	// concurrent Delete could complete between our resolve and our
-	// lock acquire — leaving us holding stale meta/abs and resurrecting
-	// the file at its old ID after the delete. The lock-then-revalidate
-	// pattern is what makes lock coverage actually protect the path.
-	mu := s.versionLocks.Acquire(id)
-	mu.Lock()
-	defer mu.Unlock()
+	// withFilePointLock acquires the path-lock, then the file-id-lock,
+	// then re-resolves the path to verify the file is still where we
+	// thought before letting fn run. This is the "lock then
+	// revalidate" pattern formalised: the path-lock prevents another
+	// path-mutating op (rename, delete, S3 PUT to the same target)
+	// from interleaving, and the revalidate check catches the case
+	// where one already raced ahead between our initial path read
+	// and the lock acquisition.
+	return s.withFilePointLock(id, func() error {
+		meta, err := s.GetFile(id)
+		if err != nil {
+			return err
+		}
+		if meta.Type != "file" {
+			return ErrInvalidArgument
+		}
 
-	meta, err := s.GetFile(id)
-	if err != nil {
-		return err
-	}
-	if meta.Type != "file" {
-		return ErrInvalidArgument
-	}
+		abs, err := s.ResolveAbsPath(id)
+		if err != nil {
+			return err
+		}
 
-	abs, err := s.ResolveAbsPath(id)
-	if err != nil {
-		return err
-	}
-
-	preserveID := meta.ID
-	// Snapshot the existing bytes BEFORE the atomic write clobbers them.
-	// captureBeforeOverwrite is best-effort and never fails the user's
-	// write — the worst-case is a missed version, not a missed mutation.
-	s.captureBeforeOverwrite(id, abs)
-	md5Hex, err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false)
-	if err != nil {
-		return err
-	}
-	if err := s.syncSingleAfterLocalWrite(abs, md5Hex); err != nil {
-		return err
-	}
-	s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: abs, At: time.Now()})
-	return nil
+		preserveID := meta.ID
+		// Snapshot the existing bytes BEFORE the atomic write clobbers
+		// them. captureBeforeOverwrite is best-effort and never fails
+		// the user's write — the worst-case is a missed version, not a
+		// missed mutation.
+		s.captureBeforeOverwrite(id, abs)
+		md5Hex, err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false)
+		if err != nil {
+			return err
+		}
+		if err := s.syncSingleAfterLocalWrite(abs, md5Hex); err != nil {
+			return err
+		}
+		s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: abs, At: time.Now()})
+		return nil
+	})
 }
 
 // ReplaceFile places the file at srcPath under parentID/name, honoring the
@@ -1142,6 +1146,28 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 	if parentMeta.Type != "directory" {
 		return nil, ErrInvalidArgument
 	}
+
+	// Acquire the destination path-lock to serialize against any
+	// concurrent path-mutating op on the same target (S3 PutObject
+	// with the same key, REST PUT to the same virtual path, another
+	// chunked finalize that lost a race). Held for the entire body
+	// of ReplaceFile.
+	parentVP, err := s.VirtualPath(parentID)
+	if err != nil {
+		return nil, err
+	}
+	pmount, prel, vpOK := splitVirtualPath(parentVP)
+	if !vpOK {
+		return nil, ErrInvalidArgument
+	}
+	var dstRel string
+	if prel == "" {
+		dstRel = name
+	} else {
+		dstRel = prel + "/" + name
+	}
+	dstRelease := s.pathLocks.AcquirePoint(pathLockKey(pmount, dstRel))
+	defer dstRelease()
 
 	parentAbs, err := s.ResolveAbsPath(parentID)
 	if err != nil {
@@ -1407,6 +1433,27 @@ func (s *Service) MkdirRelative(parentID FileID, relPath string, recursive bool,
 		return nil, err
 	}
 
+	// Path-lock the LEAF (the deepest path being created). Intermediate
+	// segments use os.MkdirAll which is idempotent under FS-level
+	// race; the leaf is what races with sibling creates / deletes /
+	// renames at the same path.
+	parentVP, err := s.VirtualPath(parentID)
+	if err != nil {
+		return nil, err
+	}
+	pmount, prel, vpOK := splitVirtualPath(parentVP)
+	if !vpOK {
+		return nil, ErrInvalidArgument
+	}
+	var leafRel string
+	if prel == "" {
+		leafRel = rel
+	} else {
+		leafRel = prel + "/" + rel
+	}
+	mkRelease := s.pathLocks.AcquirePoint(pathLockKey(pmount, leafRel))
+	defer mkRelease()
+
 	effectiveOwnership, err := s.effectiveOwnership(parentID, ownership)
 	if err != nil {
 		return nil, err
@@ -1600,6 +1647,26 @@ func (s *Service) CreateChild(parentID FileID, name string, isDir bool, ownershi
 		return nil, ErrInvalidArgument
 	}
 
+	// Path-lock the new child's path so a concurrent CreateChild,
+	// Delete, or rename on the same name can't race with us. The
+	// existence-check + create section runs inside the lock.
+	parentVP, err := s.VirtualPath(parentID)
+	if err != nil {
+		return nil, err
+	}
+	pmount, prel, vpOK := splitVirtualPath(parentVP)
+	if !vpOK {
+		return nil, ErrInvalidArgument
+	}
+	var newRel string
+	if prel == "" {
+		newRel = name
+	} else {
+		newRel = prel + "/" + name
+	}
+	newRelease := s.pathLocks.AcquirePoint(pathLockKey(pmount, newRel))
+	defer newRelease()
+
 	parentAbs, err := s.ResolveAbsPath(parentID)
 	if err != nil {
 		return nil, err
@@ -1661,9 +1728,68 @@ func (s *Service) UpdateNode(id FileID, name *string, ownership *Ownership, recu
 		return nil, ErrInvalidArgument
 	}
 
+	// Pre-lock peek: determine whether this is a rename and (if so)
+	// what old + new path-lock keys to acquire. We read the entity
+	// once here, then take the appropriate locks, then re-resolve
+	// inside the lock to confirm the file is still where we thought
+	// (lock-then-revalidate pattern — see withFilePointLock for the
+	// rationale).
+	peek, err := s.idx.GetEntity(id)
+	if err != nil {
+		return nil, err
+	}
+	if peek.ParentID.IsZero() && name != nil {
+		return nil, ErrForbidden
+	}
+	oldKey, oldKeyOK := s.pathLockKeyForID(id)
+	if !oldKeyOK {
+		return nil, ErrForbidden
+	}
+	var release func()
+	if name != nil && strings.TrimSpace(*name) != peek.Name {
+		newName := strings.TrimSpace(*name)
+		// Compute the new lock key — same parent, new leaf name.
+		parentVP, perr := s.VirtualPath(peek.ParentID)
+		if perr != nil {
+			return nil, perr
+		}
+		pmount, prel, ok := splitVirtualPath(parentVP)
+		if !ok {
+			return nil, ErrInvalidArgument
+		}
+		var newRel string
+		if prel == "" {
+			newRel = newName
+		} else {
+			newRel = prel + "/" + newName
+		}
+		newKey := pathLockKey(pmount, newRel)
+		if peek.IsDir {
+			release = s.pathLocks.AcquireSubtreePair(oldKey, newKey)
+		} else {
+			release = s.pathLocks.AcquirePointPair(oldKey, newKey)
+		}
+	} else if peek.IsDir && recursiveOwnership {
+		// Recursive ownership update touches every descendant —
+		// take a subtree lock so concurrent path-mutating ops on
+		// the descendants serialize.
+		release = s.pathLocks.AcquireSubtree(oldKey)
+	} else {
+		release = s.pathLocks.AcquirePoint(oldKey)
+	}
+	defer release()
+
+	fileMu := s.versionLocks.Acquire(id)
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
 	entity, err := s.idx.GetEntity(id)
 	if err != nil {
 		return nil, err
+	}
+	if currentKey, ok := s.pathLockKeyForID(id); !ok || currentKey != oldKey {
+		// File moved or vanished between the peek and the lock.
+		return nil, ErrNotFound
 	}
 
 	abs, err := s.ResolveAbsPath(id)
@@ -1879,12 +2005,61 @@ func (s *Service) Transfer(req TransferRequest) (*FileMeta, error) {
 		recursiveOwnership = *req.RecursiveOwnership
 	}
 
+	// Peek both endpoints to determine lock flavor (point vs subtree)
+	// before acquiring. The locks are released via defer below; lock-
+	// then-revalidate pattern means we re-check the source's path
+	// after lock acquisition before acting.
+	sourcePeek, err := s.idx.GetEntity(req.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	if sourcePeek.ParentID.IsZero() {
+		return nil, ErrForbidden
+	}
+	parentPeek, err := s.idx.GetEntity(req.TargetParentID)
+	if err != nil {
+		return nil, err
+	}
+	if !parentPeek.IsDir {
+		return nil, ErrInvalidArgument
+	}
+	srcKey, srcOK := s.pathLockKeyForID(req.SourceID)
+	if !srcOK {
+		return nil, ErrForbidden
+	}
+	parentVP, err := s.VirtualPath(req.TargetParentID)
+	if err != nil {
+		return nil, err
+	}
+	parentMount, parentRel, vpOK := splitVirtualPath(parentVP)
+	if !vpOK {
+		return nil, ErrInvalidArgument
+	}
+	var dstRel string
+	if parentRel == "" {
+		dstRel = req.TargetName
+	} else {
+		dstRel = parentRel + "/" + req.TargetName
+	}
+	dstKey := pathLockKey(parentMount, dstRel)
+	// Always subtree-pair regardless of source flavor: ConflictOverwrite
+	// can call deleteSubtree on a destination directory, and the dest
+	// shape isn't known until we Stat under the lock. Point-locks on a
+	// directory destination would let descendants be racily mutated
+	// during the overwrite-delete. Pessimistic — Transfer is rare.
+	release := s.pathLocks.AcquireSubtreePair(srcKey, dstKey)
+	defer release()
+
 	sourceMeta, err := s.GetFile(req.SourceID)
 	if err != nil {
 		return nil, err
 	}
 	if sourceMeta.IsRoot {
 		return nil, ErrForbidden
+	}
+	if currentKey, ok := s.pathLockKeyForID(req.SourceID); !ok || currentKey != srcKey {
+		// Source moved or was deleted between peek and lock.
+		return nil, ErrNotFound
 	}
 	parentMeta, err := s.GetFile(req.TargetParentID)
 	if err != nil {
@@ -2121,35 +2296,47 @@ func (s *Service) syncSubtree(absPath string) error {
 }
 
 func (s *Service) Delete(id FileID) error {
-	// Lock FIRST so a concurrent WriteContent / RestoreVersion on the
-	// same id can't slip its mutation between our resolve and our
-	// removal. Revalidation happens inside the lock.
-	mu := s.versionLocks.Acquire(id)
-	mu.Lock()
-	defer mu.Unlock()
-
-	meta, err := s.GetFile(id)
+	// Determine point vs subtree lock by reading the entity once
+	// up-front. The result is best-effort — if the file vanished
+	// between the peek and the lock acquire, withFile/Subtree returns
+	// ErrNotFound from the revalidate check inside.
+	entity, err := s.idx.GetEntity(id)
 	if err != nil {
 		return err
 	}
-	if meta.IsRoot {
+	if entity.ParentID.IsZero() {
 		return ErrForbidden
 	}
-	abs, err := s.ResolveAbsPath(id)
-	if err != nil {
-		return err
-	}
-	if err := s.store.RemoveAll(abs); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrNotFound
+
+	doDelete := func() error {
+		meta, err := s.GetFile(id)
+		if err != nil {
+			return err
 		}
-		return err
+		if meta.IsRoot {
+			return ErrForbidden
+		}
+		abs, err := s.ResolveAbsPath(id)
+		if err != nil {
+			return err
+		}
+		if err := s.store.RemoveAll(abs); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if err := s.deleteSubtree(id); err != nil {
+			return err
+		}
+		// EventDeleted is published by deleteSubtree itself.
+		return nil
 	}
-	if err := s.deleteSubtree(id); err != nil {
-		return err
+
+	if entity.IsDir {
+		return s.withSubtreeLockByID(id, doDelete)
 	}
-	// EventDeleted is published by deleteSubtree itself.
-	return nil
+	return s.withFilePointLock(id, doDelete)
 }
 
 // resolveOrReissueID returns the stable ID for absPath. It reads the
