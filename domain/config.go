@@ -13,6 +13,21 @@ type Config struct {
 	Upload     UploadConfig     `mapstructure:"upload"`
 	Thumbnail  ThumbnailConfig  `mapstructure:"thumbnail"`
 	Versioning VersioningConfig `mapstructure:"versioning"`
+	S3         S3Config         `mapstructure:"s3"`
+}
+
+// S3Config controls the optional S3-compatible HTTP frontend. When
+// Enabled is true, every configured mount name must satisfy the
+// S3 bucket-name rules (see ValidateBucketName) — Filegate startup
+// fails loudly if any mount fails the check, so the operator catches
+// the misconfiguration before clients hit it. When Enabled is false
+// (the default), bucket-name validation is skipped — REST-only
+// deployments shouldn't care about DNS-safety of mount names.
+//
+// The remaining S3 fields (listen address, region, access keys) land
+// in M1+ when the listener itself ships.
+type S3Config struct {
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // ServerConfig controls HTTP server behavior.

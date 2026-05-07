@@ -182,6 +182,16 @@ func buildCore(cfg domain.Config) (*indexpebble.Index, *domain.Service, error) {
 		_ = idx.Close()
 		return nil, nil, err
 	}
+	// When S3 is enabled, every mount name must be a valid S3 bucket
+	// name — otherwise the S3 listener (M1+) would refuse requests
+	// or, worse, produce confusing 404s. Fail startup loudly here so
+	// the operator catches the misconfiguration up-front.
+	if cfg.S3.Enabled {
+		if err := svc.ValidateMountsForS3(); err != nil {
+			_ = idx.Close()
+			return nil, nil, err
+		}
+	}
 	return idx, svc, nil
 }
 

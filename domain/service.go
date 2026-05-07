@@ -1066,10 +1066,24 @@ func (s *Service) SearchGlob(req GlobSearchRequest) (*GlobSearchResponse, error)
 }
 
 func (s *Service) OpenContent(id FileID) (io.ReadCloser, int64, bool, error) {
+	// Read consistency: a stat-then-open sequence has a TOCTOU window
+	// where an overwrite (tmp+rename) can swap the inode out from
+	// under us — Content-Length and body would then mismatch on the
+	// wire, which S3 clients (and rclone) treat as integrity
+	// failures. Path-lock alone closes the window only against
+	// filegate-managed writers; an external `mv` over the file would
+	// still race. The robust fix is to OPEN first and derive the
+	// size from the opened fd via Stat(), so the size we report is
+	// guaranteed to match the bytes the fd will deliver — Linux
+	// POSIX semantics guarantee an opened fd keeps reading the
+	// inode it was opened against, regardless of what subsequent
+	// renames do at the same path.
 	abs, err := s.ResolveAbsPath(id)
 	if err != nil {
 		return nil, 0, false, err
 	}
+	// Stat first to detect directories — opening a directory and
+	// trying to read it yields os-specific weirdness on Linux.
 	info, err := s.store.Stat(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1080,14 +1094,22 @@ func (s *Service) OpenContent(id FileID) (io.ReadCloser, int64, bool, error) {
 	if info.IsDir() {
 		return nil, 0, true, nil
 	}
-	r, err := s.store.OpenRead(abs)
+	// Open via os.Open directly so we can derive size from the
+	// fd. The store interface returns an io.ReadCloser, which
+	// hides the underlying *os.File and prevents Stat-on-fd.
+	f, err := os.Open(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, 0, false, ErrNotFound
 		}
 		return nil, 0, false, err
 	}
-	return r, info.Size(), false, nil
+	fdInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, false, err
+	}
+	return f, fdInfo.Size(), false, nil
 }
 
 func (s *Service) WriteContent(id FileID, body io.Reader) error {

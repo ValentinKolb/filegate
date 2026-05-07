@@ -58,6 +58,7 @@ func loadConfig(configFile string) (domain.Config, error) {
 		{"keep_for": "720h", "max_count": 30},  // ~daily for last 30d
 		{"keep_for": "8760h", "max_count": 12}, // ~monthly for last 1y
 	})
+	v.SetDefault("s3.enabled", false)
 
 	configFile = strings.TrimSpace(configFile)
 	if configFile == "" {

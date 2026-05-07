@@ -19,13 +19,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 
 	apiv1 "github.com/valentinkolb/filegate/api/v1"
 	"github.com/valentinkolb/filegate/domain"
+	"github.com/valentinkolb/filegate/infra/filesystem"
 )
 
 var checksumRE = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -151,19 +151,11 @@ func (m *chunkedManager) releaseChunkSlot() {
 	}
 }
 
-func freeBytes(path string) (uint64, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return 0, err
-	}
-	return stat.Bavail * uint64(stat.Bsize), nil
-}
-
 func (m *chunkedManager) ensureSpaceForUpload(stageRoot string, bytesNeeded int64) error {
 	if bytesNeeded <= 0 {
 		return nil
 	}
-	free, err := freeBytes(stageRoot)
+	free, err := filesystem.FreeBytes(stageRoot)
 	if err != nil {
 		return err
 	}
@@ -402,42 +394,6 @@ func (m *chunkedManager) readMeta(uploadID string) (*chunkedUploadMeta, error) {
 	return &meta, nil
 }
 
-func writeFileAtomic(path string, payload []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(payload); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
-
-func syncDir(path string) error {
-	d, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
-
 func (m *chunkedManager) writeMeta(meta *chunkedUploadMeta) error {
 	if err := os.MkdirAll(meta.StageDir, 0o755); err != nil {
 		return err
@@ -449,7 +405,7 @@ func (m *chunkedManager) writeMeta(meta *chunkedUploadMeta) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(manifestPath(meta.StageDir), payload); err != nil {
+	if err := filesystem.WriteFileAtomic(manifestPath(meta.StageDir), payload); err != nil {
 		return err
 	}
 	m.uploadDirs.Store(meta.UploadID, meta.StageDir)
