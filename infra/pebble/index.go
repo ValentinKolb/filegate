@@ -26,14 +26,23 @@ const (
 	// risk collisions with stale bytes on indexes that didn't get a
 	// clean rebuild between bumps.
 	familyVersion byte = 0x04
+	// 0x05 is reserved for future use.
+	//
+	// familyFlatKey is the bucket+relpath → fileID secondary index,
+	// added at format version 9. Keyed as
+	//   0x06 + mount_name_bytes + 0x00 + utf8_rel_path → 16-byte fileID.
+	// Only files have flat-key entries — directories aren't S3 objects.
+	// Mount names cannot contain 0x00 (already a bucket-name rule) so
+	// the separator is unambiguous. The index lets S3 ListObjectsV2 do
+	// O(log n + result) prefix scans, and gives REST path-lookups and
+	// glob-search a free speedup as a bonus.
+	familyFlatKey byte = 0x06
 
-	// currentIndexFormatVersion was bumped from 7 to 8 when the entity
-	// record gained ETag and S3-metadata extension fields (FieldETagMD5
-	// through FieldS3UserMetadata in infra/fgbin). The bump forces a
-	// clean rebuild so existing rows pick up ETagMD5 via the rescan walk;
-	// without the bump, legacy rows would have an empty ETag forever and
-	// S3 GET/HEAD would have to lazy-compute on every cold read.
-	currentIndexFormatVersion uint16 = 8
+	// currentIndexFormatVersion was bumped from 8 to 9 when the
+	// secondary flat-key index was added under familyFlatKey. Existing
+	// rows lose nothing on the bump — the new keyspace is empty after
+	// a rebuild and gets populated as files are written or via rescan.
+	currentIndexFormatVersion uint16 = 9
 )
 
 // ErrUnsupportedIndexFormat is returned when the on-disk index version is incompatible.
@@ -214,6 +223,47 @@ func childKey(parentID domain.FileID, isDir bool, name string) []byte {
 	return append(p, []byte(name)...)
 }
 
+
+// flatKeyMountPrefix returns the byte prefix that bounds all flat-key
+// entries under the named mount: 0x06 + mountName + 0x00.
+func flatKeyMountPrefix(mountName string) []byte {
+	out := make([]byte, 0, 1+len(mountName)+1)
+	out = append(out, familyFlatKey)
+	out = append(out, []byte(mountName)...)
+	out = append(out, 0)
+	return out
+}
+
+// flatKeyForPath returns the byte key for (mountName, relPath).
+// relPath is the file's path within the mount, separated by "/", with
+// no leading slash. Caller is responsible for using a sanitized
+// relPath (no "."/".." segments, no trailing slash).
+func flatKeyForPath(mountName, relPath string) []byte {
+	prefix := flatKeyMountPrefix(mountName)
+	out := make([]byte, len(prefix)+len(relPath))
+	copy(out, prefix)
+	copy(out[len(prefix):], relPath)
+	return out
+}
+
+// flatKeySplit decodes a stored key back into (mountName, relPath).
+// Returns ok=false if the bytes don't have the expected shape.
+func flatKeySplit(key []byte) (mountName, relPath string, ok bool) {
+	if len(key) < 2 || key[0] != familyFlatKey {
+		return "", "", false
+	}
+	sep := -1
+	for i := 1; i < len(key); i++ {
+		if key[i] == 0 {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 {
+		return "", "", false
+	}
+	return string(key[1:sep]), string(key[sep+1:]), true
+}
 
 func prefixUpperBound(prefix []byte) []byte {
 	if len(prefix) == 0 {
@@ -560,6 +610,94 @@ func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) ([
 	return entries, retErr
 }
 
+func (i *Index) LookupByFlatKey(mountName, relPath string) (domain.FileID, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return domain.FileID{}, normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+	v, closer, err := i.db.Get(flatKeyForPath(mountName, relPath))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return domain.FileID{}, domain.ErrNotFound
+		}
+		return domain.FileID{}, normalizeIndexErr(err)
+	}
+	defer closer.Close()
+	if len(v) != 16 {
+		return domain.FileID{}, fmt.Errorf("flat-key value length=%d, want 16", len(v))
+	}
+	var id domain.FileID
+	copy(id[:], v)
+	return id, retErr
+}
+
+// IterateFlatKeys walks flat-key entries under mountName whose
+// relPath starts with prefix, in lexical order. after is a strict-
+// greater bound on relPath (empty disables). limit caps fn invocations
+// (zero = unlimited). fn returns (continue, error) — return false to
+// stop iteration without an error.
+func (i *Index) IterateFlatKeys(mountName, prefix, after string, limit int, fn func(relPath string, id domain.FileID) (bool, error)) error {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+
+	mountPrefix := flatKeyMountPrefix(mountName)
+	scanPrefix := append(append([]byte(nil), mountPrefix...), []byte(prefix)...)
+	iterOpts := &pebble.IterOptions{LowerBound: scanPrefix}
+	if upper := prefixUpperBound(mountPrefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := i.db.NewIter(iterOpts)
+	if err != nil {
+		return normalizeIndexErr(err)
+	}
+	defer iter.Close()
+
+	start := scanPrefix
+	if after != "" {
+		afterKey := flatKeyForPath(mountName, after)
+		// SeekGT for strict-greater semantics.
+		start = append(append([]byte(nil), afterKey...), 0x00)
+	}
+
+	count := 0
+	for ok := iter.SeekGE(start); ok && iter.Valid(); ok = iter.Next() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, scanPrefix) {
+			break
+		}
+		_, relPath, parsed := flatKeySplit(k)
+		if !parsed {
+			continue
+		}
+		v := iter.Value()
+		if len(v) != 16 {
+			continue
+		}
+		var id domain.FileID
+		copy(id[:], v)
+		cont, err := fn(relPath, id)
+		if err != nil {
+			return err
+		}
+		if !cont {
+			break
+		}
+		count++
+		if limit > 0 && count >= limit {
+			break
+		}
+	}
+	return retErr
+}
+
 func (i *Index) ListEntities() ([]domain.Entity, error) {
 	out := make([]domain.Entity, 0, 1024)
 	if err := i.ForEachEntity(func(e domain.Entity) error {
@@ -884,7 +1022,14 @@ func (b *batch) PutEntity(entity domain.Entity) {
 		return
 	}
 	if prev != nil {
-		nlinkSafe := prev.Nlink <= 1 && entity.Nlink <= 1
+		// nlinkSafe addresses hard-link siblings (Nlink>1) for FILES:
+		// they share one ID across multiple (parent, name) pairs, so
+		// a Put under a different (parent, name) isn't a rename of
+		// the original — it's adoption of another link. Directories
+		// always have Nlink>=2 on Linux (the "." entry counts), so
+		// the safety check would suppress every legitimate dir
+		// rename. Apply it only to non-directories.
+		nlinkSafe := entity.IsDir || (prev.Nlink <= 1 && entity.Nlink <= 1)
 		if nlinkSafe && (prev.ParentID != entity.ParentID || prev.Name != entity.Name) {
 			if err := b.b.Delete(childKey(prev.ParentID, true, prev.Name), nil); err != nil {
 				b.setErr(err)
@@ -894,6 +1039,23 @@ func (b *batch) PutEntity(entity domain.Entity) {
 				b.setErr(err)
 				return
 			}
+			if entity.IsDir && prev.IsDir {
+				// Directory rename: descendant flat-keys live under
+				// the OLD path prefix; rewrite them all to the new
+				// prefix so detector / rescan / external rename
+				// flows behave the same as the API-driven Transfer
+				// path. Walks read pre-batch state for prev's
+				// ancestors (which haven't been put in this batch)
+				// and post-batch state for current's ancestors —
+				// both correct because the directory itself is the
+				// only thing changing in this batch.
+				b.rekeyDirOnRename(*prev, entity)
+			} else {
+				// File rename: drop the stale leaf flat-key entry.
+				// The new flat-key (under new parent/name) is
+				// inserted by upsertFlatKeyForEntity below.
+				b.maintainFlatKeyOnRename(prev, entity)
+			}
 		}
 	}
 	payload, err := encodeEntity(entity)
@@ -901,7 +1063,180 @@ func (b *batch) PutEntity(entity domain.Entity) {
 		b.setErr(err)
 		return
 	}
-	b.setErr(b.b.Set(entityKey(entity.ID), payload, nil))
+	if err := b.b.Set(entityKey(entity.ID), payload, nil); err != nil {
+		b.setErr(err)
+		return
+	}
+	// Auto-maintain the flat-key entry for files. Directories are not
+	// S3 objects and don't get flat-key entries; bulk subtree
+	// operations (delete, dir rename) are handled by explicit
+	// DelFlatKeysUnder / ReKeyFlatPrefix calls from the domain layer.
+	if !entity.IsDir {
+		b.upsertFlatKeyForEntity(entity)
+	}
+}
+
+// upsertFlatKeyForEntity walks the parent chain via batch reads to
+// derive the entity's mount + relPath, then inserts the flat-key.
+// Silently no-ops on walk failure (orphaned entity, missing parent) —
+// rescan will repair on next run.
+//
+// Hard-link siblings (Nlink > 1) are skipped: a single FileID maps to
+// multiple paths, but our flat-key schema has one (mount, relPath) →
+// id mapping per file. Maintaining only the most-recently-Put path
+// would lie about the others. Skipping all of them means S3
+// LookupByFlatKey returns NotFound for hard-linked files — a
+// documented limitation that's safer than aliasing.
+func (b *batch) upsertFlatKeyForEntity(entity domain.Entity) {
+	if entity.Nlink > 1 {
+		return
+	}
+	mount, relPath, ok := b.derivePath(entity)
+	if !ok {
+		return
+	}
+	val := make([]byte, 16)
+	copy(val, entity.ID[:])
+	if err := b.b.Set(flatKeyForPath(mount, relPath), val, nil); err != nil {
+		b.setErr(err)
+	}
+}
+
+// maintainFlatKeyOnRename deletes the old-path flat-key entry when an
+// entity's parent or name changed. The new flat-key is inserted
+// separately by upsertFlatKeyForEntity.
+//
+// Hard-link transitions: a file with Nlink>1 in either prev or
+// current state has no representable flat-key (see
+// upsertFlatKeyForEntity), so there's nothing to clean up.
+func (b *batch) maintainFlatKeyOnRename(prev *domain.Entity, current domain.Entity) {
+	if prev == nil || prev.IsDir {
+		// prev was a directory → no flat-key to delete. (If current is
+		// a file with the same ID as a previous directory, that's a
+		// type-change which the rest of PutEntity handles via child
+		// entry deletion; we don't try to gracefully convert here.)
+		return
+	}
+	if prev.Nlink > 1 || current.Nlink > 1 {
+		return
+	}
+	mount, relPath, ok := b.derivePath(*prev)
+	if !ok {
+		return
+	}
+	if err := b.b.Delete(flatKeyForPath(mount, relPath), nil); err != nil {
+		b.setErr(err)
+	}
+}
+
+// rekeyDirOnRename derives the OLD and NEW directory paths for a
+// same-id directory rename and rewrites every descendant flat-key
+// from old prefix to new prefix. Called from inside PutEntity when
+// rename detection fires for a directory entity.
+//
+// Walks for prev use the directory's PRIOR (parent, name) — the
+// ancestors above the renamed directory haven't been touched in this
+// batch (they don't appear here), so reads from the batch see their
+// stable committed state. Walks for current use the NEW (parent,
+// name) — same reasoning. Both walks therefore produce the correct
+// before/after paths even when called from inside the batch.
+func (b *batch) rekeyDirOnRename(prev, current domain.Entity) {
+	oldMount, oldRel, ok1 := b.deriveDirPath(prev)
+	newMount, newRel, ok2 := b.deriveDirPath(current)
+	if !ok1 || !ok2 {
+		return
+	}
+	// ReKeyFlatPrefix's empty-prefix semantic means "entire mount" —
+	// not appropriate for a per-directory rename. If a directory IS a
+	// mount root (oldRel == "" or newRel == ""), rekey is a no-op or
+	// would over-rewrite; mounts aren't renamed via this path.
+	if oldRel == "" || newRel == "" {
+		return
+	}
+	b.ReKeyFlatPrefix(oldMount, oldRel, newMount, newRel)
+}
+
+// deriveDirPath walks a directory's parent chain to build (mount,
+// relPath). Differs from derivePath in that derivePath rejects
+// directories outright (since files are the only flat-key holders);
+// this helper is for rekey planning where we DO need a directory's
+// path expression.
+func (b *batch) deriveDirPath(entity domain.Entity) (mount, relPath string, ok bool) {
+	if !entity.IsDir || entity.ParentID.IsZero() {
+		return "", "", false
+	}
+	const maxDepth = 256
+	segments := []string{entity.Name}
+	cur := entity.ParentID
+	for depth := 0; depth < maxDepth; depth++ {
+		parent, err := b.loadEntityForBatch(cur)
+		if err != nil || parent == nil {
+			return "", "", false
+		}
+		if parent.ParentID.IsZero() {
+			for i, j := 0, len(segments)-1; i < j; i, j = i+1, j-1 {
+				segments[i], segments[j] = segments[j], segments[i]
+			}
+			return parent.Name, joinRel(segments), true
+		}
+		segments = append(segments, parent.Name)
+		cur = parent.ParentID
+	}
+	return "", "", false
+}
+
+// derivePath walks the entity's parent chain via batch reads (which
+// see committed state plus pending in-batch writes) and returns the
+// (mount, relPath) form. Returns ok=false for directories, mount roots,
+// orphans, and pathological cycles.
+func (b *batch) derivePath(entity domain.Entity) (mount, relPath string, ok bool) {
+	if entity.IsDir || entity.ParentID.IsZero() {
+		return "", "", false
+	}
+	// Bounded walk (depth cap) to defend against pathological cycles.
+	const maxDepth = 256
+	segments := []string{entity.Name}
+	cur := entity.ParentID
+	for depth := 0; depth < maxDepth; depth++ {
+		parent, err := b.loadEntityForBatch(cur)
+		if err != nil || parent == nil {
+			return "", "", false
+		}
+		if parent.ParentID.IsZero() {
+			// parent is the mount root; its Name is the mount name.
+			// segments accumulate leaf-first; reverse for top-down.
+			for i, j := 0, len(segments)-1; i < j; i, j = i+1, j-1 {
+				segments[i], segments[j] = segments[j], segments[i]
+			}
+			return parent.Name, joinRel(segments), true
+		}
+		segments = append(segments, parent.Name)
+		cur = parent.ParentID
+	}
+	return "", "", false
+}
+
+// joinRel joins path segments with "/" — kept private so callers can't
+// confuse it with virtual-path conventions (no leading slash here).
+func joinRel(segments []string) string {
+	if len(segments) == 0 {
+		return ""
+	}
+	if len(segments) == 1 {
+		return segments[0]
+	}
+	total := len(segments) - 1
+	for _, s := range segments {
+		total += len(s)
+	}
+	out := make([]byte, 0, total)
+	for i, s := range segments {
+		if i > 0 {
+			out = append(out, '/')
+		}
+		out = append(out, s...)
+	}
+	return string(out)
 }
 
 // loadEntityForBatch returns the entity stored under id, reading from the
@@ -950,7 +1285,230 @@ func (b *batch) DelEntity(id domain.FileID) {
 	if b.err != nil {
 		return
 	}
+	// Read prev so we can drop its flat-key entry (files only). If
+	// prev is a directory, has Nlink>1, or the walk fails, no
+	// flat-key was written for it — skip silently. Subtree deletes
+	// use DelFlatKeysUnder from the domain layer to clear descendants
+	// in bulk.
+	prev, err := b.loadEntityForBatch(id)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	if prev != nil && !prev.IsDir && prev.Nlink <= 1 {
+		if mount, relPath, ok := b.derivePath(*prev); ok {
+			if err := b.b.Delete(flatKeyForPath(mount, relPath), nil); err != nil {
+				b.setErr(err)
+				return
+			}
+		}
+	}
 	b.setErr(b.b.Delete(entityKey(id), nil))
+}
+
+func (b *batch) PutFlatKey(mountName, relPath string, id domain.FileID) {
+	if b.err != nil {
+		return
+	}
+	if mountName == "" {
+		b.setErr(fmt.Errorf("PutFlatKey: empty mount name"))
+		return
+	}
+	val := make([]byte, 16)
+	copy(val, id[:])
+	b.setErr(b.b.Set(flatKeyForPath(mountName, relPath), val, nil))
+}
+
+func (b *batch) DelFlatKey(mountName, relPath string) {
+	if b.err != nil {
+		return
+	}
+	if mountName == "" {
+		// Empty mount → no-op rather than error; helps keep callers
+		// simple (e.g. mount-root entities have no flat-key path to
+		// remove).
+		return
+	}
+	b.setErr(b.b.Delete(flatKeyForPath(mountName, relPath), nil))
+}
+
+// flatKeyBatchChunkSize bounds how many keys a single iteration pass
+// of DelFlatKeysUnder / ReKeyFlatPrefix collects before flushing.
+// Pebble batches grow proportionally with the in-memory key list, so
+// chunking caps memory for catastrophic-large directory operations
+// (a million-descendant rename shouldn't OOM us). Pebble's batch is
+// committed atomically by Index.Batch — chunking here only bounds
+// the SLICE size, not the eventual commit's atomicity guarantee.
+const flatKeyBatchChunkSize = 4096
+
+// DelFlatKeysUnder deletes every flat-key entry whose relPath equals
+// relPathPrefix or starts with relPathPrefix + "/". Empty relPathPrefix
+// wipes the entire mount.
+//
+// We can't use Pebble's range-delete here because the batch's reads
+// must see the deletions for self-consistency within the same
+// operation; range-delete is a tombstone applied at compaction time
+// and is invisible to in-batch reads. So we iterate and Delete each,
+// chunking the in-memory collection to bound peak memory.
+func (b *batch) DelFlatKeysUnder(mountName, relPathPrefix string) {
+	if b.err != nil {
+		return
+	}
+	if mountName == "" {
+		b.setErr(fmt.Errorf("DelFlatKeysUnder: empty mount name"))
+		return
+	}
+	mountPrefix := flatKeyMountPrefix(mountName)
+	scanPrefix := append(append([]byte(nil), mountPrefix...), []byte(relPathPrefix)...)
+	upper := prefixUpperBound(mountPrefix)
+	iterOpts := &pebble.IterOptions{LowerBound: scanPrefix}
+	if upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := b.b.(pebbleBatchIterable).NewIter(iterOpts)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	defer iter.Close()
+
+	// Walk + delete in chunks. After each flush we resume the
+	// iterator from the next key beyond the last deleted, so we
+	// never hold more than chunkSize key copies in memory.
+	chunk := make([][]byte, 0, flatKeyBatchChunkSize)
+	flush := func() bool {
+		for _, k := range chunk {
+			if err := b.b.Delete(k, nil); err != nil {
+				b.setErr(err)
+				return false
+			}
+		}
+		chunk = chunk[:0]
+		return true
+	}
+	for ok := iter.SeekGE(scanPrefix); ok && iter.Valid(); ok = iter.Next() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, scanPrefix) {
+			break
+		}
+		// Boundary check: a relPath of "foo" must not match "foo-bar"
+		// — only "foo" itself or "foo/...".
+		if relPathPrefix != "" && len(k) > len(scanPrefix) {
+			next := k[len(scanPrefix)]
+			if next != '/' {
+				continue
+			}
+		}
+		chunk = append(chunk, append([]byte(nil), k...))
+		if len(chunk) >= flatKeyBatchChunkSize {
+			if !flush() {
+				return
+			}
+		}
+	}
+	flush()
+}
+
+// ReKeyFlatPrefix moves every flat-key entry from (oldMount,
+// oldPrefix or descendant) to (newMount, newPrefix or descendant) by
+// stripping oldPrefix and prepending newPrefix from each relPath,
+// preserving file IDs. Used by directory rename/move.
+func (b *batch) ReKeyFlatPrefix(oldMount, oldPrefix, newMount, newPrefix string) {
+	if b.err != nil {
+		return
+	}
+	if oldMount == "" || newMount == "" {
+		b.setErr(fmt.Errorf("ReKeyFlatPrefix: empty mount name"))
+		return
+	}
+	oldMountPrefix := flatKeyMountPrefix(oldMount)
+	scanPrefix := append(append([]byte(nil), oldMountPrefix...), []byte(oldPrefix)...)
+	upper := prefixUpperBound(oldMountPrefix)
+	iterOpts := &pebble.IterOptions{LowerBound: scanPrefix}
+	if upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := b.b.(pebbleBatchIterable).NewIter(iterOpts)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	defer iter.Close()
+
+	type rekey struct {
+		oldKey []byte
+		newKey []byte
+		id     domain.FileID
+	}
+	chunk := make([]rekey, 0, flatKeyBatchChunkSize)
+	flush := func() bool {
+		for _, m := range chunk {
+			if err := b.b.Delete(m.oldKey, nil); err != nil {
+				b.setErr(err)
+				return false
+			}
+			val := make([]byte, 16)
+			copy(val, m.id[:])
+			if err := b.b.Set(m.newKey, val, nil); err != nil {
+				b.setErr(err)
+				return false
+			}
+		}
+		chunk = chunk[:0]
+		return true
+	}
+	for ok := iter.SeekGE(scanPrefix); ok && iter.Valid(); ok = iter.Next() {
+		k := iter.Key()
+		if !bytes.HasPrefix(k, scanPrefix) {
+			break
+		}
+		// Same boundary-check as DelFlatKeysUnder: when oldPrefix is
+		// non-empty, the next byte must be "/" (descendant) — "foo"
+		// must not match "foobar".
+		if oldPrefix != "" && len(k) > len(scanPrefix) {
+			next := k[len(scanPrefix)]
+			if next != '/' {
+				continue
+			}
+		}
+		_, oldRel, parsed := flatKeySplit(k)
+		if !parsed {
+			continue
+		}
+		// Strip oldPrefix and prepend newPrefix to derive new relPath.
+		// For oldRel="a/b" and oldPrefix="a", suffix is "/b" → new
+		// relPath = newPrefix + "/b". For an exact match (oldRel ==
+		// oldPrefix), suffix is "" → new relPath = newPrefix.
+		var suffix string
+		if len(oldRel) > len(oldPrefix) {
+			suffix = oldRel[len(oldPrefix):]
+		}
+		newRel := newPrefix + suffix
+		v := iter.Value()
+		if len(v) != 16 {
+			continue
+		}
+		var id domain.FileID
+		copy(id[:], v)
+		chunk = append(chunk, rekey{
+			oldKey: append([]byte(nil), k...),
+			newKey: flatKeyForPath(newMount, newRel),
+			id:     id,
+		})
+		if len(chunk) >= flatKeyBatchChunkSize {
+			if !flush() {
+				return
+			}
+		}
+	}
+	flush()
+}
+
+// pebbleBatchIterable extends pebbleBatchReadWriter with iterator
+// support so flat-key range operations can scan within the batch's
+// read-view (committed state + pending writes).
+type pebbleBatchIterable interface {
+	NewIter(opts *pebble.IterOptions) (*pebble.Iterator, error)
 }
 
 func (b *batch) PutVersion(meta domain.VersionMeta) {

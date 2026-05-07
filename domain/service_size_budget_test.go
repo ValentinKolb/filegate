@@ -138,3 +138,12 @@ func (f *fakeIndex) LatestVersionTimestamp(FileID) (int64, error) { return 0, ni
 func (f *fakeIndex) MarkVersionsDeleted(FileID, int64) (int, error) { return 0, nil }
 
 func (f *fakeIndex) ForEachFileVersions(func(FileID, []VersionMeta) error) error { return nil }
+
+// Flat-key surface — stub-only; the budget test doesn't probe these.
+func (f *fakeIndex) LookupByFlatKey(string, string) (FileID, error) {
+	return FileID{}, ErrNotFound
+}
+
+func (f *fakeIndex) IterateFlatKeys(string, string, string, int, func(string, FileID) (bool, error)) error {
+	return nil
+}

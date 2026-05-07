@@ -508,6 +508,23 @@ func buildEntityMetadata(id, parentID FileID, name, absPath string, info os.File
 	}
 }
 
+// splitVirtualPath decomposes a virtual path "/mount/a/b/c" into
+// (mount="mount", relPath="a/b/c"). The mount-only path "/mount"
+// returns (mount="mount", relPath=""). Returns ok=false for the root
+// "/" or invalid forms — callers treat those as "no flat-key
+// position" (e.g. a mount root).
+func splitVirtualPath(vp string) (mount, relPath string, ok bool) {
+	if !strings.HasPrefix(vp, "/") || vp == "/" {
+		return "", "", false
+	}
+	rest := vp[1:]
+	sep := strings.IndexByte(rest, '/')
+	if sep < 0 {
+		return rest, "", true
+	}
+	return rest[:sep], rest[sep+1:], true
+}
+
 // preserveS3Metadata copies the ETag and S3-only metadata fields from
 // src onto dst. buildEntityMetadata constructs an Entity purely from
 // filesystem stat info and would otherwise wipe these fields on any
@@ -1692,6 +1709,10 @@ func (s *Service) UpdateNode(id FileID, name *string, ownership *Ownership, recu
 			}
 			oldName := entity.Name
 			entity.Name = newName
+			// PutEntity in the index layer auto-detects same-id
+			// renames and rekeys the affected flat-key entries
+			// (descendant rewrite for directories, leaf swap for
+			// files). No domain-side ReKey/Del needed here.
 			if err := s.idx.Batch(func(b Batch) error {
 				b.DelChild(entity.ParentID, oldName)
 				b.PutEntity(*entity)
@@ -1986,8 +2007,13 @@ func (s *Service) reParentNode(id FileID, oldName string, newParentID FileID, ne
 	// would be wiped on every rename/move. The bytes haven't changed,
 	// only the path, so we preserve the prior ETag and S3 fields.
 	preserveS3Metadata(&updated, entity)
+
 	if err := s.idx.Batch(func(b Batch) error {
 		b.DelChild(oldParentID, oldName)
+		// PutEntity in the index layer auto-detects the same-id
+		// rename and rekeys descendant flat-key entries (for
+		// directories) or swaps the leaf flat-key (for files). We
+		// don't need to call ReKeyFlatPrefix here.
 		b.PutEntity(updated)
 		b.PutChild(newParentID, newName, DirEntry{
 			ID:    id,
@@ -2944,9 +2970,12 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 	}
 
 	type staleRef struct {
-		id       FileID
-		parentID FileID
-		name     string
+		id        FileID
+		parentID  FileID
+		name      string
+		isDir     bool
+		flatMount string // empty for dirs / mount roots / unresolvable
+		flatRel   string
 	}
 	rootMemo := make(map[FileID]FileID, 4096)
 	stale := make([]staleRef, 0, 1024)
@@ -2966,7 +2995,27 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 				return nil
 			}
 		}
-		stale = append(stale, staleRef{id: e.ID, parentID: e.ParentID, name: e.Name})
+		ref := staleRef{
+			id:       e.ID,
+			parentID: e.ParentID,
+			name:     e.Name,
+			isDir:    e.IsDir,
+		}
+		// Pre-compute the file's flat-key path NOW, while the entire
+		// stale subtree is still intact in the index. The chunked
+		// delete pass below may delete a parent before its child, in
+		// which case derivePath in DelEntity's auto-maintenance would
+		// fail to resolve. The explicit DelFlatKey call uses these
+		// pre-computed values and works regardless of delete order.
+		if !e.IsDir {
+			if vp, err := s.VirtualPath(e.ID); err == nil {
+				if m, r, ok := splitVirtualPath(vp); ok {
+					ref.flatMount = m
+					ref.flatRel = r
+				}
+			}
+		}
+		stale = append(stale, ref)
 		return nil
 	}); err != nil {
 		return err
@@ -2981,6 +3030,9 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 			for _, e := range chunk {
 				if !e.parentID.IsZero() {
 					b.DelChild(e.parentID, e.name)
+				}
+				if e.flatMount != "" {
+					b.DelFlatKey(e.flatMount, e.flatRel)
 				}
 				b.DelEntity(e.id)
 			}
@@ -3003,6 +3055,18 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 		}
 	}
 
+	// Flat-key sweep: drop any flat-key entry whose referenced fileID
+	// is gone (orphaned by a previous deletion that had a broken
+	// parent chain) or whose path no longer matches the entity's
+	// current location (left behind by a rename whose ReKey didn't
+	// reach this entry — e.g. a detector race, an old format-bump
+	// rebuild, or a hard-link transition that bypassed our index
+	// maintenance). Cost is O(num flat-keys) per swept mount, which
+	// rescan callers already accept for the FS walk.
+	if err := s.sweepStaleFlatKeysForMounts(targetMounts); err != nil {
+		log.Printf("[filegate] Rescan: flat-key sweep failed: %v", err)
+	}
+
 	s.purgePathCaches()
 	eventPath := "*"
 	if len(targetMounts) == 1 {
@@ -3011,6 +3075,81 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 		}
 	}
 	s.bus.Publish(Event{Type: EventScanned, Path: eventPath, At: time.Now()})
+	return nil
+}
+
+// sweepStaleFlatKeysForMounts walks the flat-key index for each
+// in-scope mount and drops entries that no longer correspond to a
+// live file at the listed path. Two staleness conditions:
+//
+//  1. The referenced FileID has no entity row anymore. The orphan
+//     came from a delete that couldn't derive its path (parent chain
+//     broken at delete time), or from an old rebuild that didn't yet
+//     populate flat-keys.
+//  2. The entity exists but its current VirtualPath disagrees with
+//     the flat-key entry's (mount, relPath). The orphan came from a
+//     rename whose ReKey missed this entry — caused by a same-id
+//     directory rename that fell through detector/race seams.
+//
+// Sweep is run from Rescan after the entity-level prune. Iteration
+// is read-only via the public Index API, so the sweep can chunk its
+// deletes without holding any long-running iterator.
+func (s *Service) sweepStaleFlatKeysForMounts(targetMounts map[string]struct{}) error {
+	type stale struct{ mount, rel string }
+	mounts := s.mountNames
+	for _, mountName := range mounts {
+		if targetMounts != nil {
+			if _, ok := targetMounts[mountName]; !ok {
+				continue
+			}
+		}
+		var orphans []stale
+		err := s.idx.IterateFlatKeys(mountName, "", "", 0, func(rel string, id FileID) (bool, error) {
+			entity, err := s.idx.GetEntity(id)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return false, err
+			}
+			if entity == nil {
+				orphans = append(orphans, stale{mountName, rel})
+				return true, nil
+			}
+			// Path drift: derive the entity's current path and
+			// compare to this flat-key entry. If it differs, the
+			// flat-key is from an old position the rename missed.
+			vp, vpErr := s.VirtualPath(id)
+			if vpErr != nil {
+				// Can't resolve current path → conservative: leave
+				// the entry, don't risk false-positive deletion of
+				// a key whose entity briefly looks unresolvable.
+				return true, nil
+			}
+			gotMount, gotRel, ok := splitVirtualPath(vp)
+			if !ok || gotMount != mountName || gotRel != rel {
+				orphans = append(orphans, stale{mountName, rel})
+			}
+			return true, nil
+		})
+		if err != nil {
+			return err
+		}
+		// Chunk deletes the same way rescan stale-cleanup chunks
+		// entity deletes, to avoid huge single batches.
+		for start := 0; start < len(orphans); start += 4096 {
+			end := start + 4096
+			if end > len(orphans) {
+				end = len(orphans)
+			}
+			chunk := orphans[start:end]
+			if err := s.idx.Batch(func(b Batch) error {
+				for _, o := range chunk {
+					b.DelFlatKey(o.mount, o.rel)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

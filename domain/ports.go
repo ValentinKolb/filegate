@@ -21,6 +21,15 @@ type Index interface {
 	// order. Used by the background pruner to apply retention per file
 	// without buffering the whole keyspace in memory.
 	ForEachFileVersions(fn func(fileID FileID, versions []VersionMeta) error) error
+	// LookupByFlatKey returns the file ID stored at (mountName, relPath)
+	// in the secondary flat-key index, or ErrNotFound. O(log n).
+	LookupByFlatKey(mountName, relPath string) (FileID, error)
+	// IterateFlatKeys walks flat-key entries under mountName whose
+	// relPath starts with prefix, in lexical order. after (when
+	// non-empty) is a strict-greater bound — useful for paginating
+	// past a previous cursor. limit caps the number of fn invocations
+	// (zero = unlimited). fn returns (continue, error).
+	IterateFlatKeys(mountName, prefix, after string, limit int, fn func(relPath string, id FileID) (bool, error)) error
 	Batch(fn func(Batch) error) error
 	Close() error
 }
@@ -33,6 +42,25 @@ type Batch interface {
 	DelEntity(id FileID)
 	PutVersion(meta VersionMeta)
 	DelVersion(fileID FileID, versionID VersionID)
+	// PutFlatKey inserts/overwrites the flat-key entry for a file at
+	// (mountName, relPath) → id. relPath has no leading slash and uses
+	// "/" as separator. Directories don't get flat-key entries.
+	PutFlatKey(mountName, relPath string, id FileID)
+	// DelFlatKey removes the flat-key entry at (mountName, relPath).
+	// Idempotent — no-op if the key doesn't exist.
+	DelFlatKey(mountName, relPath string)
+	// DelFlatKeysUnder removes every flat-key entry whose relPath is
+	// equal to relPathPrefix or descends from it (i.e. starts with
+	// relPathPrefix + "/"). Used by recursive directory deletes.
+	// Pass "" for relPathPrefix to wipe an entire mount.
+	DelFlatKeysUnder(mountName, relPathPrefix string)
+	// ReKeyFlatPrefix moves every flat-key entry from (oldMount,
+	// oldPrefix or descendant) to (newMount, newPrefix or descendant)
+	// by stripping oldPrefix and prepending newPrefix from each
+	// relPath, preserving file IDs. Used by directory rename/move.
+	// Inputs must NOT contain a trailing "/"; an empty prefix means
+	// "the entire mount".
+	ReKeyFlatPrefix(oldMount, oldPrefix, newMount, newPrefix string)
 }
 
 // Store is the port interface for filesystem I/O operations.
