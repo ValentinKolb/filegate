@@ -21,13 +21,23 @@ type Config struct {
 // S3 bucket-name rules (see ValidateBucketName) — Filegate startup
 // fails loudly if any mount fails the check, so the operator catches
 // the misconfiguration before clients hit it. When Enabled is false
-// (the default), bucket-name validation is skipped — REST-only
-// deployments shouldn't care about DNS-safety of mount names.
+// (the default), bucket-name validation is skipped and the listener
+// is not started — REST-only deployments shouldn't care about
+// DNS-safety of mount names.
 //
-// The remaining S3 fields (listen address, region, access keys) land
-// in M1+ when the listener itself ships.
+// Listen is a "host:port" string the S3 HTTP server binds to. Region
+// is the value clients must use in their SigV4 credential scope —
+// "us-east-1" works for any operator who doesn't care.
+//
+// AccessKey + SecretKey are the M1 single-tenant credentials. M3
+// will replace these with a YAML key store; the field stays here as
+// a fallback for single-tenant deployments.
 type S3Config struct {
-	Enabled bool `mapstructure:"enabled"`
+	Enabled   bool   `mapstructure:"enabled"`
+	Listen    string `mapstructure:"listen"`
+	Region    string `mapstructure:"region"`
+	AccessKey string `mapstructure:"access_key"`
+	SecretKey string `mapstructure:"secret_key"`
 }
 
 // ServerConfig controls HTTP server behavior.

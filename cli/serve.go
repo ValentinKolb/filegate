@@ -16,6 +16,7 @@ import (
 	"time"
 
 	httpadapter "github.com/valentinkolb/filegate/adapter/http"
+	s3adapter "github.com/valentinkolb/filegate/adapter/s3"
 	"github.com/valentinkolb/filegate/domain"
 	"github.com/valentinkolb/filegate/infra/detect"
 	"github.com/valentinkolb/filegate/infra/eventbus"
@@ -108,11 +109,54 @@ func newDaemonServeCmd() *cobra.Command {
 				IdleTimeout:       120 * time.Second,
 				MaxHeaderBytes:    1 << 20,
 			}
-			errCh := make(chan error, 1)
+			errCh := make(chan error, 2)
 			go func() {
 				log.Printf("[filegate] listening on %s", cfg.Server.Listen)
 				errCh <- srv.ListenAndServe()
 			}()
+
+			// Start the S3 listener if configured. Lives on its own
+			// port so the operator can bind it to a different
+			// interface (e.g. internal-only) and so SigV4 middleware
+			// doesn't apply to REST routes. Single-tenant for M1.
+			var s3Srv *http.Server
+			if cfg.S3.Enabled {
+				if cfg.S3.AccessKey == "" || cfg.S3.SecretKey == "" {
+					cancel()
+					detector.Close()
+					<-detectorDone
+					<-prunerDone
+					_ = idx.Close()
+					return errors.New("s3.enabled=true requires s3.access_key and s3.secret_key")
+				}
+				s3Handler, hErr := s3adapter.NewHandler(svc, s3adapter.Options{
+					Region:           cfg.S3.Region,
+					AccessKey:        cfg.S3.AccessKey,
+					SecretKey:        cfg.S3.SecretKey,
+					AccessLogEnabled: cfg.Server.AccessLogEnabled,
+				})
+				if hErr != nil {
+					cancel()
+					detector.Close()
+					<-detectorDone
+					<-prunerDone
+					_ = idx.Close()
+					return hErr
+				}
+				s3Srv = &http.Server{
+					Addr:              cfg.S3.Listen,
+					Handler:           s3Handler,
+					ReadHeaderTimeout: 10 * time.Second,
+					ReadTimeout:       30 * time.Second,
+					WriteTimeout:      cfg.Server.WriteTimeout,
+					IdleTimeout:       120 * time.Second,
+					MaxHeaderBytes:    1 << 20,
+				}
+				go func() {
+					log.Printf("[filegate-s3] listening on %s", cfg.S3.Listen)
+					errCh <- s3Srv.ListenAndServe()
+				}()
+			}
 
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -137,6 +181,9 @@ func newDaemonServeCmd() *cobra.Command {
 			shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 			defer stop()
 			_ = srv.Shutdown(shutdownCtx)
+			if s3Srv != nil {
+				_ = s3Srv.Shutdown(shutdownCtx)
+			}
 			cancel()
 			detector.Close()
 			<-detectorDone

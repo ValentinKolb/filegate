@@ -59,6 +59,10 @@ func loadConfig(configFile string) (domain.Config, error) {
 		{"keep_for": "8760h", "max_count": 12}, // ~monthly for last 1y
 	})
 	v.SetDefault("s3.enabled", false)
+	v.SetDefault("s3.listen", ":9000")
+	v.SetDefault("s3.region", "us-east-1")
+	v.SetDefault("s3.access_key", "")
+	v.SetDefault("s3.secret_key", "")
 
 	configFile = strings.TrimSpace(configFile)
 	if configFile == "" {
