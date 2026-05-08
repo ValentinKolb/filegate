@@ -172,3 +172,11 @@ func quoteETag(s string) string {
 	}
 	return fmt.Sprintf("%q", s)
 }
+
+// formatHTTPDate and quoteETag are wired up in M1 push 2 (object
+// GET/HEAD response headers). The compile-time references below
+// keep staticcheck quiet until then; they have no runtime effect.
+var (
+	_ = formatHTTPDate
+	_ = quoteETag
+)
