@@ -1,8 +1,8 @@
 package s3
 
 import (
-	"crypto/subtle"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -16,43 +16,111 @@ type Options struct {
 	// Single-tenant deployments can keep the AWS default "us-east-1";
 	// the value only needs to match what the client signs with.
 	Region string
-	// AccessKey + SecretKey are the single-tenant credentials. M3
-	// will replace this with a multi-key store; the verifier already
-	// abstracts via authConfig.SecretForKeyID.
+	// Keys is the multi-tenant key store. Each entry maps an access
+	// key to its secret + per-key bucket whitelist. NewHandler folds
+	// the legacy AccessKey/SecretKey fields below into this list at
+	// construction time, so handlers consult exactly one source.
+	Keys []KeyEntry
+	// AccessKey + SecretKey are the legacy single-tenant convenience
+	// knobs from M1. When set, NewHandler synthesizes a Keys entry
+	// with full bucket access ("*"). Operators using Keys directly
+	// can leave these empty.
 	AccessKey string
 	SecretKey string
 	// AccessLogEnabled mirrors the REST adapter's setting.
 	AccessLogEnabled bool
 }
 
+// KeyEntry is the in-memory shape of one entry in the multi-tenant
+// key store. Buckets is the per-key whitelist; the special wildcard
+// "*" grants access to every configured mount. An empty slice
+// denies all bucket access (the key authenticates but every
+// operation returns AccessDenied).
+type KeyEntry struct {
+	AccessKey string
+	SecretKey string
+	Buckets   []string
+}
+
+// keyStore is the resolved-and-indexed view of Options.Keys used by
+// the request path. Lookup is O(log n) via the map; the per-key
+// whitelist is materialized into a set so bucket-membership checks
+// don't allocate.
+type keyStore struct {
+	byAccessKey map[string]keyRecord
+}
+
+// keyRecord is the per-access-key bundle stored in keyStore. The
+// secret is kept as the raw string for ConstantTimeCompare. Buckets
+// is the set form of the whitelist; AllBuckets is true when the
+// "*" wildcard was present (in which case Buckets is nil — no
+// membership lookup needed).
+type keyRecord struct {
+	Secret     string
+	Buckets    map[string]struct{}
+	AllBuckets bool
+}
+
+// allowedBuckets returns the explicit list of buckets accessible to
+// this key, restricted to what actually exists in mounts. When the
+// key has the "*" wildcard, every mount name in mounts is returned.
+// Used by ListBuckets to surface only the per-key-permitted set.
+func (kr keyRecord) allowedBuckets(mounts []string) []string {
+	out := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		if kr.AllBuckets {
+			out = append(out, m)
+			continue
+		}
+		if _, ok := kr.Buckets[m]; ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// canAccess reports whether this key may operate on the named
+// bucket. The bucket is NOT checked for existence here — that's a
+// separate concern; canAccess only cares about authorization.
+func (kr keyRecord) canAccess(bucket string) bool {
+	if kr.AllBuckets {
+		return true
+	}
+	_, ok := kr.Buckets[bucket]
+	return ok
+}
+
 // NewHandler returns the http.Handler for the S3 listener. Returns
-// an error if Options is misconfigured (missing access/secret key);
-// callers gate this on cfg.S3.Enabled but a misconfigured config
-// shouldn't crash the daemon.
+// an error when Options is misconfigured: missing credentials, a
+// duplicated access key, or a Keys entry whose bucket whitelist
+// references a mount that doesn't exist.
 func NewHandler(svc *domain.Service, opts Options) (http.Handler, error) {
 	if opts.Region == "" {
 		opts.Region = "us-east-1"
 	}
-	if opts.AccessKey == "" || opts.SecretKey == "" {
-		return nil, errors.New("s3: AccessKey and SecretKey must be set")
+
+	store, err := buildKeyStore(opts, svc)
+	if err != nil {
+		return nil, err
 	}
+
 	auth := authConfig{
 		Region: opts.Region,
 		SecretForKeyID: func(keyID string) (string, bool) {
-			// We use ConstantTimeCompare for symmetry with the
-			// signature comparison; note that for a length
-			// mismatch it returns 0 immediately without comparing
-			// bytes, so an attacker can probe the configured key
-			// length but not its bytes. AWS access keys are a
-			// fixed 20-char shape in practice, so the length-leak
-			// is not load-bearing for security.
-			if subtle.ConstantTimeCompare([]byte(keyID), []byte(opts.AccessKey)) == 1 {
-				return opts.SecretKey, true
+			rec, ok := store.byAccessKey[keyID]
+			if !ok {
+				return "", false
 			}
-			return "", false
+			// We don't compare keyID with ConstantTimeCompare here:
+			// the map lookup already happened in O(1) on the exact
+			// key, and the secret IS what gets ConstantTimeCompare'd
+			// inside the verifier. Returning the secret as the raw
+			// string is what the verifier expects.
+			return rec.Secret, true
 		},
 	}
-	r := &router{svc: svc, auth: auth, accessLog: opts.AccessLogEnabled}
+
+	r := &router{svc: svc, auth: auth, keys: store, accessLog: opts.AccessLogEnabled}
 	// Sweep any multipart manifests left in phase=committing across
 	// crashes. Committing manifests whose durable record exists are
 	// promoted to phase=done so ListMultipartUploads stops surfacing
@@ -61,10 +129,107 @@ func NewHandler(svc *domain.Service, opts Options) (http.Handler, error) {
 	return http.HandlerFunc(r.serve), nil
 }
 
+// buildKeyStore folds the multi-tenant Keys list and the legacy
+// AccessKey/SecretKey single-tenant fields into the indexed
+// keyStore. Validates: at least one entry exists, no duplicate
+// access keys, every whitelist refers to a real mount.
+func buildKeyStore(opts Options, svc *domain.Service) (*keyStore, error) {
+	mountSet := map[string]struct{}{}
+	for _, root := range svc.ListRoot() {
+		mountSet[root.Name] = struct{}{}
+	}
+
+	store := &keyStore{byAccessKey: map[string]keyRecord{}}
+
+	// Legacy single-tenant: synthesize a "*" entry. When both Keys
+	// and the legacy fields are set, the legacy entry is added too
+	// — the operator gets exactly what they configured. A duplicate
+	// access-key collision still surfaces as an error.
+	if opts.AccessKey != "" || opts.SecretKey != "" {
+		if opts.AccessKey == "" || opts.SecretKey == "" {
+			return nil, errors.New("s3: AccessKey and SecretKey must be set together (legacy single-tenant)")
+		}
+		if _, dup := store.byAccessKey[opts.AccessKey]; dup {
+			return nil, fmt.Errorf("s3: access key %q is duplicated between Keys list and legacy AccessKey", opts.AccessKey)
+		}
+		store.byAccessKey[opts.AccessKey] = keyRecord{
+			Secret:     opts.SecretKey,
+			AllBuckets: true,
+		}
+	}
+
+	for i, k := range opts.Keys {
+		if k.AccessKey == "" || k.SecretKey == "" {
+			return nil, fmt.Errorf("s3: keys[%d]: access_key and secret_key must be non-empty", i)
+		}
+		if _, dup := store.byAccessKey[k.AccessKey]; dup {
+			return nil, fmt.Errorf("s3: keys[%d]: access key %q is duplicated", i, k.AccessKey)
+		}
+		all := false
+		set := map[string]struct{}{}
+		for _, b := range k.Buckets {
+			b = strings.TrimSpace(b)
+			if b == "" {
+				continue
+			}
+			if b == "*" {
+				all = true
+				continue
+			}
+			if _, ok := mountSet[b]; !ok {
+				return nil, fmt.Errorf("s3: keys[%d]: bucket %q is not a configured mount", i, b)
+			}
+			set[b] = struct{}{}
+		}
+		rec := keyRecord{Secret: k.SecretKey, AllBuckets: all}
+		if !all {
+			rec.Buckets = set
+		}
+		store.byAccessKey[k.AccessKey] = rec
+	}
+
+	if len(store.byAccessKey) == 0 {
+		return nil, errors.New("s3: at least one key must be configured (Keys list or legacy AccessKey/SecretKey)")
+	}
+	return store, nil
+}
+
 type router struct {
 	svc       *domain.Service
 	auth      authConfig
+	keys      *keyStore
 	accessLog bool
+}
+
+// keyForRequest returns the verified key's record. The verifier has
+// already proven the request was signed with this access key, so
+// any present key in the store is authoritative — the lookup is
+// just to retrieve the bucket whitelist.
+func (r *router) keyForRequest(verified *sigV4Result) (keyRecord, bool) {
+	rec, ok := r.keys.byAccessKey[verified.AccessKeyID]
+	return rec, ok
+}
+
+// authorizeBucket is the central authorization check. Returns true
+// when the verified key may access the named bucket; on false,
+// writes an AccessDenied response — bucket existence is NOT
+// revealed (see §10 of the plan: forbidden buckets answer 403, not
+// 404). Handlers call this before any operation that touches a
+// specific bucket.
+func (r *router) authorizeBucket(w http.ResponseWriter, req *http.Request, verified *sigV4Result, bucket, key string) bool {
+	rec, ok := r.keyForRequest(verified)
+	if !ok {
+		// Should never happen — the verifier matched the secret
+		// against this access key. Surface as a clean Forbidden
+		// rather than a 500.
+		writeError(w, req, errAccessDenied, "access denied", withBucket(bucket), withKey(key))
+		return false
+	}
+	if rec.canAccess(bucket) {
+		return true
+	}
+	writeError(w, req, errAccessDenied, "access denied", withBucket(bucket), withKey(key))
+	return false
 }
 
 func (r *router) serve(w http.ResponseWriter, req *http.Request) {
@@ -90,8 +255,7 @@ func (r *router) serve(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	case key == "":
-		// Bucket-level operations. M1 routes them but only a small
-		// subset is implemented; the rest land in M2/M3.
+		// Bucket-level operations.
 		r.handleBucketOp(w, req, verified, bucket)
 		return
 	default:
@@ -117,25 +281,47 @@ func parsePathStyle(path string) (bucket, key string) {
 	return rest[:slash], rest[slash+1:]
 }
 
-// handleListBuckets is the M1 placeholder for GET /. Returns the
-// configured mounts. Multi-tenant filtering arrives in M3.
-func (r *router) handleListBuckets(w http.ResponseWriter, _ *http.Request, _ *sigV4Result) {
-	roots := r.svc.ListRoot()
-	names := make([]string, 0, len(roots))
-	for _, root := range roots {
-		names = append(names, root.Name)
+// handleListBuckets returns the per-key-filtered list of buckets.
+// Real S3 returns every bucket the requesting account owns; we
+// model "account" as the access key and apply the key's whitelist.
+// The full mount list is NOT exposed — a key without a "*" wildcard
+// only sees its explicitly-permitted buckets, matching the
+// existence-vs-authorization separation the rest of the API
+// preserves.
+func (r *router) handleListBuckets(w http.ResponseWriter, _ *http.Request, verified *sigV4Result) {
+	rec, ok := r.keyForRequest(verified)
+	if !ok {
+		// Same defensive branch as authorizeBucket. An unknown key
+		// shouldn't have passed the verifier; if it did, treat it
+		// as having no buckets rather than 500-ing.
+		writeListAllMyBuckets(w, nil)
+		return
 	}
-	writeListAllMyBuckets(w, names)
+	mountNames := make([]string, 0, len(r.svc.ListRoot()))
+	for _, root := range r.svc.ListRoot() {
+		mountNames = append(mountNames, root.Name)
+	}
+	allowed := rec.allowedBuckets(mountNames)
+	writeListAllMyBuckets(w, allowed)
 	if r.accessLog {
-		log.Printf("[filegate-s3] ListBuckets returned %d bucket(s)", len(names))
+		log.Printf("[filegate-s3] ListBuckets key=%s returned %d bucket(s)", verified.AccessKeyID, len(allowed))
 	}
 }
 
-// handleBucketOp dispatches bucket-level methods. The dispatcher
-// passes the verified SigV4 context through so handlers can log
-// access-key info if access-logging is enabled.
+// handleBucketOp dispatches bucket-level methods. Authorization is
+// checked BEFORE the bucket-existence probe so a key without
+// permission cannot distinguish "no such bucket" from "exists but
+// forbidden" — both surface as AccessDenied per the §10 contract.
 func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verified *sigV4Result, bucket string) {
+	if !r.authorizeBucket(w, req, verified, bucket, "") {
+		return
+	}
 	if !r.bucketExists(bucket) {
+		// Whitelist check passed but the mount really doesn't
+		// exist — at this point bucket-existence leakage is fine,
+		// the key is authorized to know about the bucket. The
+		// alternative is a misleading 403 for genuinely-typo'd
+		// bucket names, which makes operator debugging painful.
 		writeError(w, req, errNoSuchBucket, "bucket does not exist", withBucket(bucket))
 		return
 	}
@@ -160,16 +346,19 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verifi
 }
 
 // handleObjectOp dispatches single-object methods to the per-method
-// handlers in object.go. The bucket-existence check happens first so
-// every handler can assume the bucket is real.
+// handlers in object.go. Authorization is checked first (see
+// handleBucketOp comment); the bucket-existence check follows.
 //
 // Multipart ops are dispatched here too via query-arg sub-resources:
 //   POST   ?uploads          → CreateMultipartUpload
 //   PUT    ?partNumber=N&uploadId=X → UploadPart
-//   POST   ?uploadId=X       → CompleteMultipartUpload (push 3)
+//   POST   ?uploadId=X       → CompleteMultipartUpload
 //   DELETE ?uploadId=X       → AbortMultipartUpload
 //   GET    ?uploadId=X       → ListParts
 func (r *router) handleObjectOp(w http.ResponseWriter, req *http.Request, verified *sigV4Result, bucket, key string) {
+	if !r.authorizeBucket(w, req, verified, bucket, key) {
+		return
+	}
 	if !r.bucketExists(bucket) {
 		writeError(w, req, errNoSuchBucket, "bucket does not exist", withBucket(bucket), withKey(key))
 		return
@@ -215,9 +404,8 @@ func (r *router) handleObjectOp(w http.ResponseWriter, req *http.Request, verifi
 }
 
 // bucketExists checks whether a mount with the given name exists.
-// The check happens BEFORE bucket-name S3 validation — operators
-// who failed startup-validation never reach this code path because
-// the listener wouldn't have started.
+// The check happens AFTER authorization in the dispatchers above so
+// non-permitted buckets cannot be probed for existence.
 func (r *router) bucketExists(name string) bool {
 	for _, root := range r.svc.ListRoot() {
 		if root.Name == name {

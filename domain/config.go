@@ -29,15 +29,52 @@ type Config struct {
 // is the value clients must use in their SigV4 credential scope —
 // "us-east-1" works for any operator who doesn't care.
 //
-// AccessKey + SecretKey are the M1 single-tenant credentials. M3
-// will replace these with a YAML key store; the field stays here as
-// a fallback for single-tenant deployments.
+// Auth model:
+//
+//   - The Keys list is the multi-tenant key store. Every entry pairs
+//     an access key with its secret and a per-key bucket whitelist.
+//     The whitelist is enforced on every operation: ListBuckets is
+//     filtered to the allowed set, and any access to a bucket not in
+//     the list returns AccessDenied — bucket existence is NOT
+//     revealed (forbidden buckets answer 403, not 404).
+//
+//   - AccessKey + SecretKey at the top level are the legacy single-
+//     tenant convenience knobs from M1. When set, they're folded
+//     into the keys list as one entry with full bucket access ("*"
+//     wildcard). They're kept for backward compatibility with
+//     existing configs and trivial single-tenant deployments.
+//
+// At least one credential source (Keys or AccessKey/SecretKey) must
+// be set when Enabled=true — startup fails loudly otherwise.
 type S3Config struct {
 	Enabled   bool   `mapstructure:"enabled"`
 	Listen    string `mapstructure:"listen"`
 	Region    string `mapstructure:"region"`
 	AccessKey string `mapstructure:"access_key"`
 	SecretKey string `mapstructure:"secret_key"`
+
+	// Keys is the multi-tenant key store. Each entry exists
+	// independently and is matched at request time by AccessKey;
+	// whatever the request signs with determines which bucket
+	// whitelist applies. Order is irrelevant.
+	Keys []S3KeyConfig `mapstructure:"keys"`
+}
+
+// S3KeyConfig is one entry in the multi-tenant S3 key store. The
+// Buckets list is the per-key whitelist of accessible buckets. The
+// special wildcard "*" grants access to every configured mount —
+// useful for an "admin" key — and is the only allowed wildcard form
+// (we deliberately don't support glob patterns; explicit lists are
+// auditable).
+//
+// An empty Buckets slice means the key has no access at all. Such
+// a key authenticates successfully but every operation returns
+// AccessDenied — useful for staging revocation without deleting the
+// entry.
+type S3KeyConfig struct {
+	AccessKey string   `mapstructure:"access_key"`
+	SecretKey string   `mapstructure:"secret_key"`
+	Buckets   []string `mapstructure:"buckets"`
 }
 
 // ServerConfig controls HTTP server behavior.

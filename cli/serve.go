@@ -118,21 +118,32 @@ func newDaemonServeCmd() *cobra.Command {
 			// Start the S3 listener if configured. Lives on its own
 			// port so the operator can bind it to a different
 			// interface (e.g. internal-only) and so SigV4 middleware
-			// doesn't apply to REST routes. Single-tenant for M1.
+			// doesn't apply to REST routes. Multi-tenant via Keys
+			// list; legacy single-tenant AccessKey/SecretKey is
+			// folded into the key store by the adapter.
 			var s3Srv *http.Server
 			if cfg.S3.Enabled {
-				if cfg.S3.AccessKey == "" || cfg.S3.SecretKey == "" {
+				if cfg.S3.AccessKey == "" && cfg.S3.SecretKey == "" && len(cfg.S3.Keys) == 0 {
 					cancel()
 					detector.Close()
 					<-detectorDone
 					<-prunerDone
 					_ = idx.Close()
-					return errors.New("s3.enabled=true requires s3.access_key and s3.secret_key")
+					return errors.New("s3.enabled=true requires either s3.access_key/s3.secret_key or at least one s3.keys entry")
+				}
+				keys := make([]s3adapter.KeyEntry, 0, len(cfg.S3.Keys))
+				for _, k := range cfg.S3.Keys {
+					keys = append(keys, s3adapter.KeyEntry{
+						AccessKey: k.AccessKey,
+						SecretKey: k.SecretKey,
+						Buckets:   k.Buckets,
+					})
 				}
 				s3Handler, hErr := s3adapter.NewHandler(svc, s3adapter.Options{
 					Region:           cfg.S3.Region,
 					AccessKey:        cfg.S3.AccessKey,
 					SecretKey:        cfg.S3.SecretKey,
+					Keys:             keys,
 					AccessLogEnabled: cfg.Server.AccessLogEnabled,
 				})
 				if hErr != nil {
