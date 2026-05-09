@@ -249,47 +249,79 @@ func (s *Service) CopyObjectS3(args CopyObjectArgs) (*CopyObjectResult, error) {
 		preserveID = newID
 	}
 
-	// Choose the copy strategy. Same-mount → CloneFile (reflink on
-	// btrfs, byte-copy fallback elsewhere). Cross-mount must always
-	// stream because reflinks can't span filesystems. Self-copy
-	// (src and dest are the SAME file on disk) skips the byte copy
-	// entirely — the only meaningful work is the metadata
-	// REPLACE that follows. AWS clients use this to update
-	// metadata in place ("the S3 metadata-update trick").
+	// Choose the copy strategy.
+	//
+	//   selfCopy        → in-place metadata update; the bytes don't
+	//                     move. We bump mtime via os.Chtimes so the
+	//                     CopyObject response and later HEAD/List
+	//                     calls advance Last-Modified, matching
+	//                     real-S3 behaviour for the metadata-update
+	//                     trick.
+	//
+	//   same-mount      → CloneFile to a sibling tmp file; reflinks
+	//                     on btrfs, byte copy elsewhere. The tmp is
+	//                     atomically renamed over the destination at
+	//                     the end of the prep pipeline so a failure
+	//                     anywhere in between can't truncate or
+	//                     destroy the existing dest.
+	//
+	//   cross-mount     → streamCopy to a sibling tmp file, same
+	//                     atomic-rename guarantee.
+	//
+	// The tmp file's name uses ".s3copy.tmp" so it sorts adjacent to
+	// the dest in directory listings — useful when an operator hits
+	// a stuck staging file after a daemon crash.
 	reflinked := false
 	selfCopy := srcAbs == dstAbs
+	dstTmp := dstAbs + ".s3copy.tmp"
 	switch {
 	case selfCopy:
-		// No byte movement. The xattr ID is already correct, the
-		// stat info doesn't change. Skip ahead to metadata update.
+		// No byte movement. Bump mtime so the metadata-update
+		// trick advances Last-Modified — without this, clients
+		// performing a self-copy REPLACE see a stale timestamp
+		// despite the metadata change.
+		now := time.Now()
+		if err := os.Chtimes(dstAbs, now, now); err != nil {
+			return nil, fmt.Errorf("chtimes self-copy: %w", err)
+		}
 	case srcMountID == dstMountID:
-		// Try CloneFile. Even on ext4 it returns false + does a
-		// byte copy via the same code path, so we don't need a
-		// fallback branch here.
-		linked, copyErr := copyForS3(s, srcAbs, dstAbs)
+		linked, copyErr := copyForS3(s, srcAbs, dstTmp)
 		if copyErr != nil {
+			_ = os.Remove(dstTmp)
 			return nil, fmt.Errorf("copy bytes: %w", copyErr)
 		}
 		reflinked = linked
 	default:
-		if err := streamCopy(srcAbs, dstAbs); err != nil {
+		if err := streamCopy(srcAbs, dstTmp); err != nil {
+			_ = os.Remove(dstTmp)
 			return nil, fmt.Errorf("stream copy: %w", err)
 		}
 	}
 
-	// Stamp the dest with the chosen fileID via xattr so resolveOrReissueID
-	// picks it up if anything else syncs the file later. Set perms
-	// to 0o644 (S3 has no notion of POSIX modes, matches single-PUT).
-	// Self-copy already has the right ID + mode; skip both syscalls
-	// to avoid a redundant xattr write under the existing ID.
+	// Stamp the staged tmp with the chosen fileID via xattr so
+	// resolveOrReissueID picks it up if anything else syncs the
+	// file later. Set perms to 0o644 (S3 has no notion of POSIX
+	// modes, matches single-PUT). Self-copy already has the right
+	// ID + mode; skip both syscalls.
 	if !selfCopy {
-		if err := s.store.SetID(dstAbs, preserveID); err != nil {
-			_ = os.Remove(dstAbs)
-			return nil, fmt.Errorf("set dest ID: %w", err)
+		if err := s.store.SetID(dstTmp, preserveID); err != nil {
+			_ = os.Remove(dstTmp)
+			return nil, fmt.Errorf("set tmp ID: %w", err)
 		}
-		if err := os.Chmod(dstAbs, 0o644); err != nil {
-			_ = os.Remove(dstAbs)
-			return nil, fmt.Errorf("chmod dest: %w", err)
+		if err := os.Chmod(dstTmp, 0o644); err != nil {
+			_ = os.Remove(dstTmp)
+			return nil, fmt.Errorf("chmod tmp: %w", err)
+		}
+		// Atomic install. Until this rename returns, the existing
+		// dest (if any) is untouched and visible to readers via the
+		// stable index entry. After the rename, the new bytes are
+		// in place but the entity row still reflects the OLD
+		// metadata — the Pebble batch below makes both the bytes
+		// and the metadata flip together from the next reader's
+		// perspective.
+		if err := os.Rename(dstTmp, dstAbs); err != nil {
+			_ = os.Remove(dstTmp)
+			return nil, fmt.Errorf("install tmp: %w", err)
 		}
 	}
 
@@ -302,8 +334,23 @@ func (s *Service) CopyObjectS3(args CopyObjectArgs) (*CopyObjectResult, error) {
 		return nil, fmt.Errorf("stat dest: %w", err)
 	}
 	dstEntity := buildEntityMetadata(preserveID, dstParentID, dstFileName, dstAbs, info)
-	dstEntity.ETagMD5 = srcETag                    // bytes-identical → MD5-identical
-	dstEntity.MultipartETag = ""                   // single-copy never preserves composite
+	// ETag rule for single-object copy: dest's ETagMD5 is the
+	// SOURCE's whole-body MD5, NOT effectiveS3ETag (which would
+	// return the composite "...-N" form when the source was
+	// uploaded multipart). The composite is not a valid MD5 and
+	// would break clients that validate the CopyObject ETag as
+	// hex(MD5). srcEntity.ETagMD5 is populated by both the
+	// single-PUT and multipart Complete paths; the legacy-empty
+	// case falls back to a fresh hash of the destination bytes.
+	dstETagMD5 := srcEntity.ETagMD5
+	if dstETagMD5 == "" {
+		hashed, hashErr := s.hashLocalFile(dstAbs)
+		if hashErr == nil {
+			dstETagMD5 = hashed
+		}
+	}
+	dstEntity.ETagMD5 = dstETagMD5
+	dstEntity.MultipartETag = "" // single-copy never preserves composite
 
 	switch directive {
 	case "COPY":
@@ -362,8 +409,13 @@ func (s *Service) CopyObjectS3(args CopyObjectArgs) (*CopyObjectResult, error) {
 		return nil, err
 	}
 	return &CopyObjectResult{
-		Meta:         finalMeta,
-		ETag:         srcETag,
+		Meta: finalMeta,
+		// Response ETag is the dest's whole-body MD5 — clients
+		// validate this as hex(MD5) and would reject a composite
+		// "...-N" value here. srcETag (effectiveS3ETag of source)
+		// stays in the source-precondition logic above where the
+		// historical client view is what matters.
+		ETag:         dstETagMD5,
 		LastModified: info.ModTime(),
 		Created:      created,
 		Reflinked:    reflinked,
@@ -383,44 +435,36 @@ const maxSingleCopyBytes = 5 * 1024 * 1024 * 1024
 var ErrCopySourceTooLarge = errors.New("copy source exceeds 5 GiB single-copy limit")
 
 // copyForS3 invokes the store's CloneFile (FICLONE on btrfs, byte
-// copy elsewhere). Returns (reflinked, error). The dest must NOT
-// already exist — CloneFile rejects an existing target. We delete
-// any prior dest before calling.
-func copyForS3(s *Service, srcAbs, dstAbs string) (bool, error) {
-	if _, err := os.Lstat(dstAbs); err == nil {
-		if err := os.Remove(dstAbs); err != nil {
-			return false, fmt.Errorf("remove existing dest: %w", err)
-		}
-	}
-	return s.store.CloneFile(srcAbs, dstAbs)
+// copy elsewhere). The caller passes a tmp dstPath that does NOT
+// already exist — CloneFile rejects an existing target. Returns
+// (reflinked, error).
+func copyForS3(s *Service, srcAbs, dstTmp string) (bool, error) {
+	return s.store.CloneFile(srcAbs, dstTmp)
 }
 
-// streamCopy is the cross-mount fallback. Always reads through
-// the regular file API; reflinks across filesystems aren't
-// supported by the kernel.
-func streamCopy(srcAbs, dstAbs string) error {
+// streamCopy is the cross-mount fallback. Reads through the regular
+// file API; reflinks across filesystems aren't supported by the
+// kernel. The caller passes a tmp dstPath that does NOT already
+// exist — we use O_EXCL so a stale tmp from a crashed prior run
+// surfaces as an explicit failure rather than silent overwrite.
+func streamCopy(srcAbs, dstTmp string) error {
 	in, err := os.Open(srcAbs)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	if _, err := os.Lstat(dstAbs); err == nil {
-		if err := os.Remove(dstAbs); err != nil {
-			return fmt.Errorf("remove existing dest: %w", err)
-		}
-	}
-	out, err := os.OpenFile(dstAbs, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	out, err := os.OpenFile(dstTmp, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
-		_ = os.Remove(dstAbs)
+		_ = os.Remove(dstTmp)
 		return err
 	}
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
-		_ = os.Remove(dstAbs)
+		_ = os.Remove(dstTmp)
 		return err
 	}
 	return out.Close()

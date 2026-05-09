@@ -362,6 +362,158 @@ func TestCopyObjectSelfReplaceMetadata(t *testing.T) {
 	}
 }
 
+// TestCopyObjectMultipartSourceETagIsMD5: a CopyObject from a
+// multipart-uploaded source must produce a destination whose ETag
+// is the whole-body MD5, NOT the source's composite "...-N" ETag.
+// Pre-fix the response and stored ETagMD5 carried the composite
+// value, breaking clients that validate CopyObject ETags as MD5
+// hex.
+func TestCopyObjectMultipartSourceETagIsMD5(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Create a multipart upload to seed a composite-ETag source.
+	uploadID := initMultipart(t, handler, mount, "mp-src.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "mp-src.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "mp-src.bin", uploadID, 2, p2)
+	rec := completeMultipart(t, handler, mount, "mp-src.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed multipart Complete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Copy multipart-source → single-object dest.
+	rec = copyObject(t, handler, mount, "mp-src.bin", mount, "dst.bin", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("CopyObject from multipart source status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var res copyObjectResult
+	_ = xml.Unmarshal(rec.Body.Bytes(), &res)
+	gotETag := strings.Trim(res.ETag, `"`)
+	// The composite ETag has a "-N" suffix; the response ETag must
+	// not.
+	if strings.Contains(gotETag, "-") {
+		t.Errorf("CopyObject response ETag=%q is the composite form, want plain MD5", gotETag)
+	}
+	if len(gotETag) != 32 {
+		t.Errorf("CopyObject response ETag=%q is %d hex chars, want 32 (MD5)", gotETag, len(gotETag))
+	}
+
+	// Whole-body MD5 of (p1 || p2).
+	wantBody := append(append([]byte{}, p1...), p2...)
+	want := md5.Sum(wantBody)
+	if gotETag != hex.EncodeToString(want[:]) {
+		t.Errorf("CopyObject ETag=%q, want %x", gotETag, want)
+	}
+
+	// HEAD on dest must report the same plain-MD5 ETag.
+	hReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/dst.bin", nil)
+	hReq.Host = "example.com"
+	signRequestPayload(hReq, nil)
+	hRec := httptest.NewRecorder()
+	handler.ServeHTTP(hRec, hReq)
+	hETag := strings.Trim(hRec.Header().Get("ETag"), `"`)
+	if strings.Contains(hETag, "-") {
+		t.Errorf("HEAD dest ETag=%q still composite — multipart_etag was not cleared", hETag)
+	}
+}
+
+// TestCopyObjectAtomicOnFailure: when the byte copy fails partway
+// through and we're overwriting an existing dest, the existing
+// dest must not be corrupted/truncated. We trigger the failure by
+// pointing the source to an unreadable path via the bucket
+// boundary (the explicit failure path here is the InternalError
+// branch in the domain method when it can't read source bytes).
+//
+// This test is a little contrived: we can't easily make CloneFile
+// fail mid-stream from the adapter level. So we exercise the
+// atomic-rename path by checking the dest's bytes are byte-for-byte
+// identical to the source's after a successful copy — i.e. that we
+// never observed a truncated dest in the index. Combined with the
+// tmp+rename code path, this is a smoke test that the new shape
+// hasn't regressed.
+func TestCopyObjectAtomicOverwrite(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Seed dest with bytes A.
+	bytesA := bytes.Repeat([]byte{0xAA}, 4096)
+	putForTest(t, handler, mount, "dst.bin", bytesA)
+
+	// Seed source with bytes B (different size + content).
+	bytesB := bytes.Repeat([]byte{0xBB}, 8192)
+	putForTest(t, handler, mount, "src.bin", bytesB)
+
+	rec := copyObject(t, handler, mount, "src.bin", mount, "dst.bin", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Copy onto existing dest status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// GET dest, expect bytes B (full source content) — not a
+	// truncated mix or a half-overwritten state.
+	gReq := httptest.NewRequest(http.MethodGet, "/"+mount+"/dst.bin", nil)
+	gReq.Host = "example.com"
+	signRequestPayload(gReq, nil)
+	gRec := httptest.NewRecorder()
+	handler.ServeHTTP(gRec, gReq)
+	if gRec.Code != http.StatusOK {
+		t.Fatalf("GET dest status=%d", gRec.Code)
+	}
+	if !bytes.Equal(gRec.Body.Bytes(), bytesB) {
+		t.Errorf("dest bytes after overwrite copy mismatch (len got=%d want=%d)", gRec.Body.Len(), len(bytesB))
+	}
+}
+
+// TestCopyObjectSelfReplaceAdvancesLastModified: a self-copy
+// REPLACE bumps the file's mtime so HEAD reports the new
+// Last-Modified. Pre-fix the metadata-update trick left mtime
+// unchanged, breaking clients that watch mtime for cache
+// invalidation.
+func TestCopyObjectSelfReplaceAdvancesLastModified(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	putForTest(t, handler, mount, "obj.txt", []byte("hello"))
+
+	// Capture pre-copy Last-Modified.
+	hReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/obj.txt", nil)
+	hReq.Host = "example.com"
+	signRequestPayload(hReq, nil)
+	hRec := httptest.NewRecorder()
+	handler.ServeHTTP(hRec, hReq)
+	preLM := hRec.Header().Get("Last-Modified")
+	if preLM == "" {
+		t.Fatalf("Last-Modified missing pre-copy")
+	}
+
+	// Sleep just past 1 second so the new mtime crosses an HTTP-date
+	// boundary (HTTP-date has 1-second resolution).
+	time.Sleep(1100 * time.Millisecond)
+
+	rec := copyObject(t, handler, mount, "obj.txt", mount, "obj.txt", map[string]string{
+		"x-amz-metadata-directive": "REPLACE",
+		"Content-Type":             "application/json",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("self-REPLACE status=%d", rec.Code)
+	}
+
+	// HEAD again — Last-Modified must have advanced.
+	hReq2 := httptest.NewRequest(http.MethodHead, "/"+mount+"/obj.txt", nil)
+	hReq2.Host = "example.com"
+	signRequestPayload(hReq2, nil)
+	hRec2 := httptest.NewRecorder()
+	handler.ServeHTTP(hRec2, hReq2)
+	postLM := hRec2.Header().Get("Last-Modified")
+	if postLM == preLM {
+		t.Errorf("Last-Modified did not advance after self-REPLACE: pre=%q post=%q", preLM, postLM)
+	}
+}
+
 // TestCopyObjectRejectsUnknownDirective: a directive other than
 // COPY or REPLACE is invalid. Catches typos like "MERGE".
 func TestCopyObjectRejectsUnknownDirective(t *testing.T) {
