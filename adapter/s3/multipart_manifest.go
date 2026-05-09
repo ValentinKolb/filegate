@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/valentinkolb/filegate/infra/filesystem"
 )
@@ -238,15 +237,3 @@ func listMultipartUploadsForBucket(mountAbs string) ([]multipartManifest, error)
 	return out, nil
 }
 
-// secondsAgo returns time.Duration since the given unix ms. Returns
-// the zero duration if t is in the future or zero.
-func secondsAgo(unixMs int64) time.Duration {
-	if unixMs == 0 {
-		return 0
-	}
-	t := time.UnixMilli(unixMs)
-	if t.After(time.Now()) {
-		return 0
-	}
-	return time.Since(t)
-}
