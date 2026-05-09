@@ -285,6 +285,15 @@ type completeMultipartUploadResult struct {
 	ETag     string   `xml:"ETag"`
 }
 
+// copyObjectResult is the XML response for a successful S3
+// CopyObject. AWS returns it with HTTP 200 — never 201 — even when
+// the destination is freshly created.
+type copyObjectResult struct {
+	XMLName      xml.Name `xml:"CopyObjectResult"`
+	ETag         string   `xml:"ETag"`
+	LastModified string   `xml:"LastModified"`
+}
+
 // deleteObjectsRequest is the XML body POSTed to /{bucket}?delete.
 // AWS allows a Quiet flag (suppress per-key Deleted entries in the
 // response, errors still surface) and up to 1000 Object entries per

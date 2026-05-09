@@ -32,7 +32,16 @@ func virtualPathFor(bucket, key string) string {
 // authenticated (signature + payload-hash verified, or chunked
 // payload validated per chunk); we read from verified.BodyReader,
 // not r.Body directly.
+//
+// PutObject and CopyObject share the same wire shape (PUT
+// /{bucket}/{key}); CopyObject is signaled by the
+// x-amz-copy-source header. We dispatch to handleCopyObject when
+// it's present so the byte-write path stays clean.
 func (rt *router) handlePutObject(w http.ResponseWriter, r *http.Request, verified *sigV4Result, bucket, key string) {
+	if v := strings.TrimSpace(r.Header.Get("x-amz-copy-source")); v != "" {
+		rt.handleCopyObject(w, r, verified, bucket, key)
+		return
+	}
 	if err := validateObjectKey(key); err != nil {
 		writeError(w, r, errInvalidArgument, err.Error(), withBucket(bucket), withKey(key))
 		return
