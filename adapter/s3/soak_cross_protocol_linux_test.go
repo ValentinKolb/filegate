@@ -242,11 +242,18 @@ func TestCrossProtocolSoak(t *testing.T) {
 						hits404.Add(1)
 					}
 				case 8: // 10% DELETE
+					// Lock the per-key mutex around DELETE +
+					// lastGood update. Without this, a concurrent
+					// PUT could race and leave lastGood
+					// inconsistent with the on-disk state — making
+					// the final sweep flaky.
+					keyLocks[idx].Lock()
 					code := doS3Delete(key)
 					if code == http.StatusNoContent {
 						lastGood[idx].Store(nil)
 						dels.Add(1)
 					}
+					keyLocks[idx].Unlock()
 				case 9: // 10% rescan-ish — call SyncAbsPath on the file path
 					abs := mountPath + "/" + key
 					_ = svc.SyncAbsPath(abs)

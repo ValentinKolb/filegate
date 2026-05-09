@@ -720,6 +720,68 @@ func TestMultipartETagSurvivesDetectorResync(t *testing.T) {
 	}
 }
 
+// TestSyncSingleClearsETagOnInPlaceRewrite covers the rsync
+// --inplace -t edge case codex called out: an external tool that
+// rewrites file content in place AND restores the original mtime
+// would otherwise look unchanged to the cheap stat-based
+// preservation check. The hash-verification fallback catches it.
+//
+// Without rehashing, this test would falsely preserve the stale
+// ETagMD5/MultipartETag, making HEAD report wrong identity for the
+// modified file.
+func TestSyncSingleClearsETagOnInPlaceRewrite(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Seed via S3 PutObject — establishes a known ETagMD5.
+	body := []byte("original content                                                ")
+	putForTest(t, handler, mount, "obj.txt", body)
+
+	mountAbs := lookupMountAbs(t, handler, mount)
+	dst := mountAbs + "/obj.txt"
+
+	// Capture pre-state stat.
+	preStat, err := os.Lstat(dst)
+	if err != nil {
+		t.Fatalf("Lstat: %v", err)
+	}
+	preMtime := preStat.ModTime()
+
+	// Simulate rsync --inplace -t: rewrite content (different
+	// bytes, SAME size), then reset mtime to the original.
+	newBody := []byte("changed content                                                 ")
+	if len(newBody) != len(body) {
+		t.Fatalf("test setup: rewrite bytes must match original size (%d vs %d)", len(newBody), len(body))
+	}
+	if err := os.WriteFile(dst, newBody, 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := os.Chtimes(dst, preMtime, preMtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	// Detector poll: SyncAbsPath. Pre-fix this preserved the old
+	// ETag because (size, mtime, inode) all matched. Post-fix the
+	// content hash is verified and the mismatch clears S3 fields.
+	if err := svc.SyncAbsPath(dst); err != nil {
+		t.Fatalf("SyncAbsPath: %v", err)
+	}
+
+	// HEAD should show a different ETag (or empty if it's been
+	// cleared without recompute) — anything but the OLD ETag.
+	hReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/obj.txt", nil)
+	hReq.Host = "example.com"
+	signRequestPayload(hReq, nil)
+	hRec := httptest.NewRecorder()
+	handler.ServeHTTP(hRec, hReq)
+	gotETag := strings.Trim(hRec.Header().Get("ETag"), `"`)
+
+	preETag := hex.EncodeToString(md5.New().Sum(body))
+	if gotETag == preETag {
+		t.Errorf("HEAD ETag=%q still matches pre-rewrite hash — in-place rewrite was not detected", gotETag)
+	}
+}
+
 // TestRecoverCommittingManifestNoRecord: a manifest in phase=committing
 // with no durable record is left untouched (the client will retry
 // Complete to redrive the install).

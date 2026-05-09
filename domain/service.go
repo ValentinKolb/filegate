@@ -2517,27 +2517,42 @@ func (s *Service) syncSingle(absPath string) error {
 	// Preserve S3-extension fields when the file looks unchanged
 	// from what we already stored. The plan's "any non-S3 write
 	// clears multipart_etag" rule targets genuine external
-	// mutations — a detector poll that re-scans a file we just
+	// mutations — a detector poll re-scanning a file we just
 	// wrote (via S3 PutObject / multipart Complete / CopyObject)
-	// is NOT an external mutation, and clearing the S3 metadata on
-	// every poll silently breaks the multipart-ETag contract.
+	// is NOT an external mutation, and clearing the S3 metadata
+	// on every poll silently breaks the multipart-ETag contract.
 	//
-	// Heuristic: preserve when size + mtime + inode all match the
-	// stored entity. Any actual external write changes at least
-	// one of those (size for content change, mtime for touch +
-	// content change, inode for replace-via-rename). When they
-	// match, the bytes are byte-identical to our last view — the
-	// S3 metadata is therefore still valid.
+	// Cheap signal first: size + mtime + inode all match. If any
+	// of those differ, the file is definitely different — clear
+	// the S3 fields per plan §7.
+	//
+	// Caveat: rsync --inplace -t (and tools that explicitly
+	// preserve mtime when rewriting bytes) can produce a same-
+	// size, same-mtime, same-inode write with different content.
+	// To catch that, when the cheap signal says "looks unchanged"
+	// AND we have a stored ETagMD5, verify the live bytes hash
+	// to the same value before preserving. Verification only
+	// runs on a candidate match — typical idle polls of unchanged
+	// files cost the hash; that's bounded by the poll interval.
 	if existing, eErr := s.idx.GetEntity(id); eErr == nil && existing != nil && !existing.IsDir {
 		if existing.Size == info.Size() &&
 			existing.Mtime == info.ModTime().UnixMilli() &&
 			existing.Inode == entity.Inode {
-			entity.ETagMD5 = existing.ETagMD5
-			entity.MultipartETag = existing.MultipartETag
-			entity.ContentType = existing.ContentType
-			entity.ContentEncoding = existing.ContentEncoding
-			entity.ContentDisposition = existing.ContentDisposition
-			entity.S3UserMetadata = existing.S3UserMetadata
+			preserve := true
+			if existing.ETagMD5 != "" {
+				live, hashErr := s.hashLocalFile(absPath)
+				if hashErr != nil || live != existing.ETagMD5 {
+					preserve = false
+				}
+			}
+			if preserve {
+				entity.ETagMD5 = existing.ETagMD5
+				entity.MultipartETag = existing.MultipartETag
+				entity.ContentType = existing.ContentType
+				entity.ContentEncoding = existing.ContentEncoding
+				entity.ContentDisposition = existing.ContentDisposition
+				entity.S3UserMetadata = existing.S3UserMetadata
+			}
 		}
 	}
 
