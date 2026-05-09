@@ -285,6 +285,43 @@ type completeMultipartUploadResult struct {
 	ETag     string   `xml:"ETag"`
 }
 
+// deleteObjectsRequest is the XML body POSTed to /{bucket}?delete.
+// AWS allows a Quiet flag (suppress per-key Deleted entries in the
+// response, errors still surface) and up to 1000 Object entries per
+// call. We enforce the 1000 cap to bound memory + lock churn.
+type deleteObjectsRequest struct {
+	XMLName xml.Name              `xml:"Delete"`
+	Quiet   bool                  `xml:"Quiet"`
+	Objects []deleteRequestObject `xml:"Object"`
+}
+
+type deleteRequestObject struct {
+	Key string `xml:"Key"`
+	// VersionId is part of the AWS schema but filegate has no
+	// per-object version concept on the S3 surface — anything
+	// non-empty surfaces as InvalidArgument so clients catch
+	// misconfigurations early.
+	VersionID string `xml:"VersionId,omitempty"`
+}
+
+// deleteObjectsResult is the XML response for DeleteObjects. Each
+// successful key produces a <Deleted>; each failure a <Error>.
+type deleteObjectsResult struct {
+	XMLName xml.Name              `xml:"DeleteResult"`
+	Deleted []deletedResultEntry  `xml:"Deleted,omitempty"`
+	Errors  []deleteResultError   `xml:"Error,omitempty"`
+}
+
+type deletedResultEntry struct {
+	Key string `xml:"Key"`
+}
+
+type deleteResultError struct {
+	Key     string `xml:"Key"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
 // quoteETag wraps a hex digest in double-quotes as S3 does on the
 // wire. Pass-through if already quoted (defensive — should not
 // normally happen).

@@ -335,6 +335,14 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verifi
 			return
 		}
 		r.handleListObjectsV2(w, req, verified, bucket)
+	case http.MethodPost:
+		// Bucket-level POST sub-resource:
+		//   ?delete           → DeleteObjects (bulk delete, XML body)
+		if _, ok := req.URL.Query()["delete"]; ok {
+			r.handleDeleteObjects(w, req, verified, bucket)
+			return
+		}
+		writeError(w, req, errMethodNotAllowed, "POST on a bucket requires ?delete")
 	case http.MethodPut, http.MethodDelete:
 		writeError(w, req, errMethodNotAllowed, "buckets come from filegate config; CreateBucket/DeleteBucket are rejected")
 	case http.MethodHead:
