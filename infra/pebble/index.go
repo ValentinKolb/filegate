@@ -28,6 +28,15 @@ const (
 	familyVersion byte = 0x04
 	// 0x05 is reserved for future use.
 	//
+	// familyMultipartUpload is the durable record per S3 multipart
+	// upload. Keyed as
+	//   0x07 + uploadId_bytes (16) → fgbin-encoded MultipartUploadIDRecord.
+	// Used by CompleteMultipartUpload's 2-phase commit: an entry
+	// here is the authoritative "this Complete already succeeded"
+	// signal. Retries that find an entry return its stored result
+	// idempotently. Records are GC'd after a 24h retention window.
+	familyMultipartUpload byte = 0x07
+
 	// familyFlatKey is the bucket+relpath → fileID secondary index,
 	// added at format version 9. Keyed as
 	//   0x06 + mount_name_bytes + 0x00 + utf8_rel_path → 16-byte fileID.
@@ -223,6 +232,16 @@ func childKey(parentID domain.FileID, isDir bool, name string) []byte {
 	return append(p, []byte(name)...)
 }
 
+
+// multipartUploadKey builds the Pebble key for a multipart-upload
+// record. uploadID is 16 bytes (we hex-encode for the manifest dir
+// name; the raw bytes go into the key).
+func multipartUploadKey(uploadID [16]byte) []byte {
+	out := make([]byte, 1+16)
+	out[0] = familyMultipartUpload
+	copy(out[1:], uploadID[:])
+	return out
+}
 
 // flatKeyMountPrefix returns the byte prefix that bounds all flat-key
 // entries under the named mount: 0x06 + mountName + 0x00.
@@ -608,6 +627,33 @@ func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) ([
 		}
 	}
 	return entries, retErr
+}
+
+// LookupMultipartUploadRecord returns the durable upload record
+// for uploadID, or domain.ErrNotFound. Records are JSON-encoded
+// blobs — fixed schema, small enough that binary encoding wouldn't
+// pay for itself.
+func (i *Index) LookupMultipartUploadRecord(uploadID [16]byte) (*domain.MultipartUploadRecord, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+	v, closer, err := i.db.Get(multipartUploadKey(uploadID))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, domain.ErrNotFound
+		}
+		return nil, normalizeIndexErr(err)
+	}
+	defer closer.Close()
+	var record domain.MultipartUploadRecord
+	if err := json.Unmarshal(v, &record); err != nil {
+		return nil, fmt.Errorf("decode multipart record: %w", err)
+	}
+	return &record, retErr
 }
 
 func (i *Index) LookupByFlatKey(mountName, relPath string) (domain.FileID, error) {
@@ -1304,6 +1350,25 @@ func (b *batch) DelEntity(id domain.FileID) {
 		}
 	}
 	b.setErr(b.b.Delete(entityKey(id), nil))
+}
+
+func (b *batch) PutMultipartUploadRecord(uploadID [16]byte, record domain.MultipartUploadRecord) {
+	if b.err != nil {
+		return
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(multipartUploadKey(uploadID), payload, nil))
+}
+
+func (b *batch) DelMultipartUploadRecord(uploadID [16]byte) {
+	if b.err != nil {
+		return
+	}
+	b.setErr(b.b.Delete(multipartUploadKey(uploadID), nil))
 }
 
 func (b *batch) PutFlatKey(mountName, relPath string, id domain.FileID) {

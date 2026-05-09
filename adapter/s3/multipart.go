@@ -102,12 +102,12 @@ func (rt *router) handleUploadPart(w http.ResponseWriter, r *http.Request, verif
 
 	loc, err := rt.findStageDir(uploadID)
 	if err != nil {
-		writeError(w, r, errNoSuchKey /* AWS: NoSuchUpload */, "upload not found", withBucket(bucket), withKey(key))
+		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
 		return
 	}
 	manifest, err := readManifest(loc.StageDir)
 	if err != nil {
-		writeError(w, r, errNoSuchKey, "upload not found", withBucket(bucket), withKey(key))
+		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
 		return
 	}
 	if manifest.Phase != phaseInProgress {
@@ -197,12 +197,12 @@ func (rt *router) handleListParts(w http.ResponseWriter, r *http.Request, verifi
 	}
 	loc, err := rt.findStageDir(uploadID)
 	if err != nil {
-		writeError(w, r, errNoSuchKey, "upload not found", withBucket(bucket), withKey(key))
+		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
 		return
 	}
 	manifest, err := readManifest(loc.StageDir)
 	if err != nil {
-		writeError(w, r, errNoSuchKey, "upload not found", withBucket(bucket), withKey(key))
+		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
 		return
 	}
 	if manifest.Bucket != bucket || manifest.Key != key {
@@ -270,14 +270,6 @@ func (rt *router) handleListMultipartUploads(w http.ResponseWriter, r *http.Requ
 	if rt.accessLog {
 		rt.logAccess("ListMultipartUploads", bucket, "", verified.AccessKeyID, fmt.Sprintf("count=%d", len(manifests)))
 	}
-}
-
-// handleCompleteMultipartUpload is wired up by router.go but the
-// 2-phase protocol implementation lands in push 3 (in
-// multipart_complete.go). Push 2 returns 501 so the router has
-// something to call.
-func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request, _ *sigV4Result, bucket, key string) {
-	writeError(w, r, errNotImplemented, "CompleteMultipartUpload is implemented in M2 push 3", withBucket(bucket), withKey(key))
 }
 
 // generateUploadID returns a fresh 32-hex-char uploadId. We use 16

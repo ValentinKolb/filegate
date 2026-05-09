@@ -138,6 +138,18 @@ type FileMeta struct {
 	IsRoot bool   `json:"-"`
 }
 
+// MultipartUploadRecord is the durable per-upload commit witness
+// stored under familyMultipartUpload (0x07). The record's existence
+// is the authoritative "this Complete already succeeded" signal —
+// retries that find a record return its stored result idempotently.
+type MultipartUploadRecord struct {
+	FileID        FileID // the entity that received the multipart write
+	CompositeETag string // <hex(MD5(concat-of-part-MD5-bytes))>-<N>
+	Bucket        string // mount the destination lives in
+	Key           string // relative path within the bucket
+	CompletedAt   int64  // unix milliseconds when the commit landed
+}
+
 // Ownership specifies optional permission overrides for file operations.
 type Ownership struct {
 	UID     *int   `json:"uid,omitempty"`

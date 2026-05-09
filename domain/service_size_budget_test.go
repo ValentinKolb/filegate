@@ -147,3 +147,8 @@ func (f *fakeIndex) LookupByFlatKey(string, string) (FileID, error) {
 func (f *fakeIndex) IterateFlatKeys(string, string, string, int, func(string, FileID) (bool, error)) error {
 	return nil
 }
+
+// Multipart upload record surface — stub-only.
+func (f *fakeIndex) LookupMultipartUploadRecord([16]byte) (*MultipartUploadRecord, error) {
+	return nil, ErrNotFound
+}

@@ -53,6 +53,11 @@ func NewHandler(svc *domain.Service, opts Options) (http.Handler, error) {
 		},
 	}
 	r := &router{svc: svc, auth: auth, accessLog: opts.AccessLogEnabled}
+	// Sweep any multipart manifests left in phase=committing across
+	// crashes. Committing manifests whose durable record exists are
+	// promoted to phase=done so ListMultipartUploads stops surfacing
+	// them; the rest are left for client-driven retry of Complete.
+	recoverPendingMultipartUploads(svc)
 	return http.HandlerFunc(r.serve), nil
 }
 

@@ -48,14 +48,25 @@ const (
 	errSignatureDoesNotMatch    errorCode = "SignatureDoesNotMatch"
 	errAuthorizationHeaderError errorCode = "AuthorizationHeaderMalformed"
 	errInvalidAccessKeyID       errorCode = "InvalidAccessKeyId"
+	// Multipart-specific codes — clients (rclone, awscli, MinIO SDK)
+	// branch on these; emitting NoSuchKey for a missing upload is
+	// technically allowed by status-code but breaks resume/retry
+	// flows that look at <Code>.
+	errNoSuchUpload     errorCode = "NoSuchUpload"
+	errInvalidPart      errorCode = "InvalidPart"
+	errInvalidPartOrder errorCode = "InvalidPartOrder"
+	errEntityTooSmall   errorCode = "EntityTooSmall"
+	errMalformedXML     errorCode = "MalformedXML"
 )
 
 func statusFor(code errorCode) int {
 	switch code {
 	case errAccessDenied, errSignatureDoesNotMatch, errInvalidAccessKeyID:
 		return http.StatusForbidden
-	case errNoSuchBucket, errNoSuchKey:
+	case errNoSuchBucket, errNoSuchKey, errNoSuchUpload:
 		return http.StatusNotFound
+	case errInvalidPart, errInvalidPartOrder, errEntityTooSmall, errMalformedXML:
+		return http.StatusBadRequest
 	case errPreconditionFailed:
 		return http.StatusPreconditionFailed
 	case errRequestTimeTooSkewed:

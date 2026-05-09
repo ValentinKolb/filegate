@@ -30,6 +30,12 @@ type Index interface {
 	// past a previous cursor. limit caps the number of fn invocations
 	// (zero = unlimited). fn returns (continue, error).
 	IterateFlatKeys(mountName, prefix, after string, limit int, fn func(relPath string, id FileID) (bool, error)) error
+	// LookupMultipartUploadRecord returns the durable multipart-
+	// upload record for uploadID, or ErrNotFound. Used by
+	// CompleteMultipartUpload's idempotency check: a present record
+	// means the Complete already succeeded once and any retry must
+	// return its stored result, not re-do the install.
+	LookupMultipartUploadRecord(uploadID [16]byte) (*MultipartUploadRecord, error)
 	Batch(fn func(Batch) error) error
 	Close() error
 }
@@ -61,6 +67,15 @@ type Batch interface {
 	// Inputs must NOT contain a trailing "/"; an empty prefix means
 	// "the entire mount".
 	ReKeyFlatPrefix(oldMount, oldPrefix, newMount, newPrefix string)
+	// PutMultipartUploadRecord stores or overwrites the durable
+	// uploadId record. Caller is responsible for batching this
+	// alongside the entity update — both must commit atomically
+	// for the 2-phase Complete protocol.
+	PutMultipartUploadRecord(uploadID [16]byte, record MultipartUploadRecord)
+	// DelMultipartUploadRecord removes a stored upload record.
+	// Used by AbortMultipartUpload and the cleanup loop after the
+	// retention window elapses.
+	DelMultipartUploadRecord(uploadID [16]byte)
 }
 
 // Store is the port interface for filesystem I/O operations.

@@ -314,6 +314,384 @@ func TestUploadPartUnknownUploadId(t *testing.T) {
 	}
 }
 
+// completeMultipart helper: POST ?uploadId=X with the given parts
+// XML and returns the response recorder.
+func completeMultipart(t *testing.T, handler http.Handler, mount, key, uploadID string, parts []completeRequestPart) *httptest.ResponseRecorder {
+	t.Helper()
+	body := completeMultipartUploadRequest{Parts: parts}
+	raw, err := xml.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal complete body: %v", err)
+	}
+	url := fmt.Sprintf("/%s/%s?uploadId=%s", mount, key, uploadID)
+	req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	req.Host = "example.com"
+	signRequestPayload(req, raw)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// makePartBody returns a deterministic byte slice of the given size.
+// Pattern is repeating "P<n>." so different parts produce different
+// MD5s even at identical sizes.
+func makePartBody(partNum, size int) []byte {
+	out := make([]byte, size)
+	tag := byte('A' + (partNum-1)%26)
+	for i := range out {
+		out[i] = tag
+	}
+	return out
+}
+
+// expectedCompositeETag computes the composite ETag the same way
+// Complete does: hex(MD5(concat-of-part-md5-bytes)) + "-N".
+func expectedCompositeETag(parts [][]byte) string {
+	composite := md5.New()
+	for _, p := range parts {
+		s := md5.Sum(p)
+		composite.Write(s[:])
+	}
+	return fmt.Sprintf("%s-%d", hex.EncodeToString(composite.Sum(nil)), len(parts))
+}
+
+// TestCompleteMultipartUploadRoundTrip pins the happy path: two
+// 5 MiB parts + one small final part → Complete succeeds, returns
+// composite ETag, GET returns assembled body with same ETag.
+func TestCompleteMultipartUploadRoundTrip(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "big.bin", map[string]string{
+		"Content-Type":      "application/octet-stream",
+		"x-amz-meta-author": "alice",
+	})
+
+	const minSize = 5 * 1024 * 1024
+	p1 := makePartBody(1, minSize)
+	p2 := makePartBody(2, minSize)
+	p3 := makePartBody(3, 1024) // last part can be small
+
+	e1 := uploadPart(t, handler, mount, "big.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "big.bin", uploadID, 2, p2)
+	e3 := uploadPart(t, handler, mount, "big.bin", uploadID, 3, p3)
+
+	rec := completeMultipart(t, handler, mount, "big.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+		{PartNumber: 3, ETag: e3},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Complete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var res completeMultipartUploadResult
+	if err := xml.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode complete result: %v", err)
+	}
+	wantETag := expectedCompositeETag([][]byte{p1, p2, p3})
+	gotETag := strings.Trim(res.ETag, `"`)
+	if gotETag != wantETag {
+		t.Errorf("composite ETag=%q, want %q", gotETag, wantETag)
+	}
+	if res.Bucket != mount || res.Key != "big.bin" {
+		t.Errorf("Bucket/Key=%q/%q", res.Bucket, res.Key)
+	}
+
+	// GET should return the assembled body and the same composite ETag.
+	getReq := httptest.NewRequest(http.MethodGet, "/"+mount+"/big.bin", nil)
+	getReq.Host = "example.com"
+	signRequestPayload(getReq, nil)
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET after Complete status=%d body=%s", getRec.Code, getRec.Body.String())
+	}
+	gotBody := getRec.Body.Bytes()
+	wantBody := append(append(append([]byte{}, p1...), p2...), p3...)
+	if !bytes.Equal(gotBody, wantBody) {
+		t.Errorf("GET body length=%d, want %d", len(gotBody), len(wantBody))
+	}
+	if got := strings.Trim(getRec.Header().Get("ETag"), `"`); got != wantETag {
+		t.Errorf("GET ETag=%q, want %q", got, wantETag)
+	}
+	if got := getRec.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Errorf("GET Content-Type=%q", got)
+	}
+	if got := getRec.Header().Get("X-Amz-Meta-Author"); got != "alice" {
+		t.Errorf("GET x-amz-meta-author=%q, want alice", got)
+	}
+}
+
+// TestCompleteMultipartUploadIdempotent: a retried Complete with the
+// same uploadId returns the same result (composite ETag) without
+// re-doing the install.
+func TestCompleteMultipartUploadIdempotent(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 256)
+	e1 := uploadPart(t, handler, mount, "obj.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "obj.bin", uploadID, 2, p2)
+
+	parts := []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	}
+
+	first := completeMultipart(t, handler, mount, "obj.bin", uploadID, parts)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first Complete status=%d body=%s", first.Code, first.Body.String())
+	}
+	var firstRes completeMultipartUploadResult
+	_ = xml.Unmarshal(first.Body.Bytes(), &firstRes)
+
+	second := completeMultipart(t, handler, mount, "obj.bin", uploadID, parts)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second Complete status=%d body=%s", second.Code, second.Body.String())
+	}
+	var secondRes completeMultipartUploadResult
+	_ = xml.Unmarshal(second.Body.Bytes(), &secondRes)
+	if firstRes.ETag != secondRes.ETag {
+		t.Errorf("retry ETag=%q, first=%q (must be identical)", secondRes.ETag, firstRes.ETag)
+	}
+}
+
+// TestCompleteMultipartUploadInvalidPart: Complete fails when a
+// referenced PartNumber wasn't uploaded.
+func TestCompleteMultipartUploadInvalidPart(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "k.bin", nil)
+	uploadPart(t, handler, mount, "k.bin", uploadID, 1, makePartBody(1, 5*1024*1024))
+
+	rec := completeMultipart(t, handler, mount, "k.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: "deadbeefdeadbeefdeadbeefdeadbeef"},  // wrong ETag
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-etag Complete status=%d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "InvalidPart") {
+		t.Errorf("body should mention InvalidPart, got %s", rec.Body.String())
+	}
+}
+
+// TestCompleteMultipartUploadOutOfOrder: parts in descending order
+// → InvalidPartOrder.
+func TestCompleteMultipartUploadOutOfOrder(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "k.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 5*1024*1024)
+	e1 := uploadPart(t, handler, mount, "k.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "k.bin", uploadID, 2, p2)
+
+	rec := completeMultipart(t, handler, mount, "k.bin", uploadID, []completeRequestPart{
+		{PartNumber: 2, ETag: e2},
+		{PartNumber: 1, ETag: e1},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("descending parts Complete status=%d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "InvalidPartOrder") {
+		t.Errorf("body should mention InvalidPartOrder, got %s", rec.Body.String())
+	}
+}
+
+// TestCompleteMultipartUploadEntityTooSmall: a non-final part under
+// 5 MiB → EntityTooSmall.
+func TestCompleteMultipartUploadEntityTooSmall(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "k.bin", nil)
+	tinyP1 := makePartBody(1, 1024) // << 5 MiB
+	tailP2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "k.bin", uploadID, 1, tinyP1)
+	e2 := uploadPart(t, handler, mount, "k.bin", uploadID, 2, tailP2)
+
+	rec := completeMultipart(t, handler, mount, "k.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("small-part Complete status=%d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "EntityTooSmall") {
+		t.Errorf("body should mention EntityTooSmall, got %s", rec.Body.String())
+	}
+}
+
+// TestCompleteMultipartUploadSinglePart: a single small part (the
+// final and only part) is allowed — the 5 MiB rule applies only to
+// non-final parts.
+func TestCompleteMultipartUploadSinglePart(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "tiny.bin", nil)
+	p1 := makePartBody(1, 1024)
+	e1 := uploadPart(t, handler, mount, "tiny.bin", uploadID, 1, p1)
+
+	rec := completeMultipart(t, handler, mount, "tiny.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("single-part Complete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	wantETag := expectedCompositeETag([][]byte{p1})
+	var res completeMultipartUploadResult
+	_ = xml.Unmarshal(rec.Body.Bytes(), &res)
+	if got := strings.Trim(res.ETag, `"`); got != wantETag {
+		t.Errorf("ETag=%q, want %q", got, wantETag)
+	}
+}
+
+// TestCompleteMultipartUploadUnknownUploadID: a Complete with an
+// uploadId that doesn't exist returns NoSuchUpload.
+func TestCompleteMultipartUploadUnknownUploadID(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	rec := completeMultipart(t, handler, mount, "x.bin", "00000000000000000000000000000000",
+		[]completeRequestPart{{PartNumber: 1, ETag: "deadbeefdeadbeefdeadbeefdeadbeef"}})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown uploadId Complete status=%d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "NoSuchUpload") {
+		t.Errorf("body should mention NoSuchUpload, got %s", rec.Body.String())
+	}
+}
+
+// TestRecoverCommittingManifestNoRecord: a manifest in phase=committing
+// with no durable record is left untouched (the client will retry
+// Complete to redrive the install).
+func TestRecoverCommittingManifestNoRecord(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "stuck.bin", nil)
+	uploadPart(t, handler, mount, "stuck.bin", uploadID, 1, makePartBody(1, 5*1024*1024))
+
+	mountAbs := lookupMountAbs(t, handler, mount)
+	stageDir := stageDirFor(mountAbs, uploadID)
+	m, _ := readManifest(stageDir)
+	m.Phase = phaseCommitting
+	m.CompositeETag = "fake-etag-1"
+	if err := writeManifest(stageDir, m); err != nil {
+		t.Fatalf("force committing manifest: %v", err)
+	}
+
+	recoverPendingMultipartUploads(svc)
+
+	// Manifest should still be in committing — no durable record exists.
+	got, err := readManifest(stageDir)
+	if err != nil {
+		t.Fatalf("readManifest: %v", err)
+	}
+	if got.Phase != phaseCommitting {
+		t.Errorf("Phase=%q after recovery, want committing (no record means client retry redrives)", got.Phase)
+	}
+}
+
+// TestRecoverCommittingManifestWithRecord: a manifest in phase=committing
+// whose durable record DOES exist is promoted to phase=done so listing
+// stops showing it as in-progress.
+func TestRecoverCommittingManifestWithRecord(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Run a complete Complete to land a durable record.
+	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "obj.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "obj.bin", uploadID, 2, p2)
+	rec := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Complete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Simulate a crash that only updated phase to committing (not done).
+	mountAbs := lookupMountAbs(t, handler, mount)
+	stageDir := stageDirFor(mountAbs, uploadID)
+	m, _ := readManifest(stageDir)
+	m.Phase = phaseCommitting
+	m.WholeBodyMD5 = ""
+	m.CompletedFileID = ""
+	m.CompletedAt = 0
+	if err := writeManifest(stageDir, m); err != nil {
+		t.Fatalf("force committing manifest: %v", err)
+	}
+
+	recoverPendingMultipartUploads(svc)
+
+	got, err := readManifest(stageDir)
+	if err != nil {
+		t.Fatalf("readManifest: %v", err)
+	}
+	if got.Phase != phaseDone {
+		t.Errorf("Phase=%q after recovery, want done", got.Phase)
+	}
+	if got.CompletedFileID == "" {
+		t.Errorf("CompletedFileID should be backfilled from durable record")
+	}
+}
+
+// TestCompleteMultipartUploadOverwritesExisting: Complete onto a
+// pre-existing object overwrites it, preserving the original fileID.
+func TestCompleteMultipartUploadOverwritesExisting(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Pre-write an object via PUT so it has a stable fileID.
+	body := []byte("v1")
+	url := "/" + mount + "/obj.bin"
+	req := httptest.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	req.Host = "example.com"
+	signRequestPayload(req, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed PUT status=%d", rec.Code)
+	}
+	originalID, err := svc.ResolvePath("/" + mount + "/obj.bin")
+	if err != nil {
+		t.Fatalf("ResolvePath: %v", err)
+	}
+
+	// Now do a multipart Complete with new bytes.
+	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "obj.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "obj.bin", uploadID, 2, p2)
+
+	cRec := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if cRec.Code != http.StatusOK {
+		t.Fatalf("overwrite Complete status=%d body=%s", cRec.Code, cRec.Body.String())
+	}
+
+	// FileID should be preserved across the overwrite.
+	newID, err := svc.ResolvePath("/" + mount + "/obj.bin")
+	if err != nil {
+		t.Fatalf("ResolvePath after Complete: %v", err)
+	}
+	if newID != originalID {
+		t.Errorf("fileID after overwrite=%v, want preserved %v", newID, originalID)
+	}
+}
+
 // helpers
 
 // lookupMountAbs reads the mount's abs path from the test service.
