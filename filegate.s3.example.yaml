@@ -1,0 +1,96 @@
+# Example filegate config tuned for the S3-compatible listener.
+# Mount this at /etc/filegate/filegate.yaml inside the container
+# (see compose.s3.example.yml).
+#
+# IMPORTANT: rotate every access_key / secret_key BEFORE deploying
+# this in any environment that's reachable from the network.
+
+server:
+  listen: ":8080"
+  write_timeout: "5m"
+  access_log_enabled: true
+
+# Bearer token for the REST adapter. Independent from S3
+# credentials. Set to "" to disable the REST listener entirely
+# (only the S3 listener will respond) — but keep at least one
+# auth surface live or the daemon is useless.
+auth:
+  bearer_token: "your-rest-bearer-token-please-rotate-me"
+
+storage:
+  # Each entry becomes one S3 bucket. The leaf must be a valid
+  # bucket name (3-63 chars, lowercase, alphanumeric + hyphens,
+  # not an AWS-reserved prefix/suffix, not .fg-versions or
+  # .fg-uploads). Filegate fails startup loudly if any leaf
+  # violates these rules with s3.enabled=true.
+  base_paths:
+    - "/data/photos"
+    - "/data/backups"
+    - "/data/archive"
+  index_path: "/var/lib/filegate/index"
+
+upload:
+  # REST chunked-upload settings (S3 multipart has its own
+  # internal staging under .fg-uploads).
+  expiry: "24h"
+  cleanup_interval: "6h"
+  max_chunk_bytes: 52428800        # 50 MiB
+  max_upload_bytes: 0              # 0 = unlimited
+  max_chunked_upload_bytes: 0      # 0 = unlimited
+  min_free_bytes: 67108864         # 64 MiB
+
+versioning:
+  # "auto" enables per-file versioning on btrfs mounts and silently
+  # disables it elsewhere. Versions live under .fg-versions/ inside
+  # each mount (filegate-private — clients can't reach them).
+  # Versioning is REST-only; S3 writes participate in the
+  # capture-on-overwrite hook but the version surface itself isn't
+  # exposed via S3 (see docs/s3-api.md).
+  enabled: "auto"
+  cooldown: "15m"
+
+s3:
+  # The S3-compatible HTTP frontend.
+  enabled: true
+  # Bind to the container's port 9100. Caddy maps the public
+  # hostname to this internally (compose.s3.example.yml).
+  listen: ":9100"
+  # Region clients sign with. Single-instance deployments can keep
+  # us-east-1; multi-instance routing benefits from distinct names.
+  region: "us-east-1"
+
+  # ─── Multi-tenant key store ──────────────────────────────────
+  # Each entry: a unique access_key, its secret, and the list of
+  # bucket names the key may access. Rules:
+  #   - "*" wildcard grants every configured mount (admin-style).
+  #   - An empty buckets list authenticates but every operation
+  #     returns 403 — useful for staging revocation.
+  #   - Two entries with the same access_key are rejected at
+  #     startup.
+  #   - A buckets list referencing a mount that doesn't exist is
+  #     rejected at startup (catches typos like "buckte" instead
+  #     of "bucket").
+  keys:
+    - access_key: "AKIAALICEKEY00000001"
+      secret_key: "rotate-me-alice-secret-please"
+      buckets:
+        - "photos"
+
+    - access_key: "AKIABACKUPKEY0000001"
+      secret_key: "rotate-me-backup-secret-please"
+      buckets:
+        - "backups"
+
+    - access_key: "AKIAOPSKEY00000000001"
+      secret_key: "rotate-me-ops-admin-secret-please"
+      buckets:
+        - "*"   # admin: sees every mount
+
+  # ─── Legacy single-tenant credentials (optional) ─────────────
+  # Leave blank when using the keys list above. Set them ONLY for
+  # single-tenant deployments that don't want a keys list. The
+  # legacy fields are folded into the same key store as a
+  # synthesized "*" entry; their access key cannot collide with
+  # any keys[] entry's access_key.
+  # access_key: ""
+  # secret_key: ""
