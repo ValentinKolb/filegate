@@ -658,6 +658,68 @@ func TestUploadPartRejectedDuringCommit(t *testing.T) {
 	}
 }
 
+// TestMultipartETagSurvivesDetectorResync pins the regression
+// surfaced by the M4 Docker smoke test: a poll-detector cycle that
+// re-syncs a freshly-multipart-uploaded file used to clobber the
+// composite ETag (and every other S3-extension field) by running
+// the entity through buildEntityMetadata, which has no concept
+// of S3 fields. Pre-fix HEAD returned an empty ETag a few seconds
+// after Complete; post-fix the composite survives detector
+// re-syncs as long as the on-disk size + mtime + inode haven't
+// changed.
+func TestMultipartETagSurvivesDetectorResync(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "obj.bin", map[string]string{
+		"Content-Type":      "image/png",
+		"x-amz-meta-author": "alice",
+	})
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "obj.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "obj.bin", uploadID, 2, p2)
+	rec := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Complete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var compRes completeMultipartUploadResult
+	_ = xml.Unmarshal(rec.Body.Bytes(), &compRes)
+	wantETag := strings.Trim(compRes.ETag, `"`)
+	if !strings.Contains(wantETag, "-") {
+		t.Fatalf("Complete returned non-composite ETag %q — test setup wrong", wantETag)
+	}
+
+	// Simulate a detector poll touching the file.
+	mountAbs := lookupMountAbs(t, handler, mount)
+	if err := svc.SyncAbsPath(mountAbs + "/obj.bin"); err != nil {
+		t.Fatalf("SyncAbsPath: %v", err)
+	}
+
+	// HEAD should still report the composite ETag + S3 metadata.
+	hReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/obj.bin", nil)
+	hReq.Host = "example.com"
+	signRequestPayload(hReq, nil)
+	hRec := httptest.NewRecorder()
+	handler.ServeHTTP(hRec, hReq)
+	if hRec.Code != http.StatusOK {
+		t.Fatalf("HEAD after sync status=%d", hRec.Code)
+	}
+	gotETag := strings.Trim(hRec.Header().Get("ETag"), `"`)
+	if gotETag != wantETag {
+		t.Errorf("HEAD ETag=%q after detector sync, want preserved %q", gotETag, wantETag)
+	}
+	if got := hRec.Header().Get("Content-Type"); got != "image/png" {
+		t.Errorf("HEAD Content-Type=%q after detector sync, want preserved image/png", got)
+	}
+	if got := hRec.Header().Get("X-Amz-Meta-Author"); got != "alice" {
+		t.Errorf("HEAD x-amz-meta-author=%q after detector sync, want preserved 'alice'", got)
+	}
+}
+
 // TestRecoverCommittingManifestNoRecord: a manifest in phase=committing
 // with no durable record is left untouched (the client will retry
 // Complete to redrive the install).

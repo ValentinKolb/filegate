@@ -2513,6 +2513,34 @@ func (s *Service) syncSingle(absPath string) error {
 
 	name := filepath.Base(absPath)
 	entity := buildEntityMetadata(id, parentID, name, absPath, info)
+
+	// Preserve S3-extension fields when the file looks unchanged
+	// from what we already stored. The plan's "any non-S3 write
+	// clears multipart_etag" rule targets genuine external
+	// mutations — a detector poll that re-scans a file we just
+	// wrote (via S3 PutObject / multipart Complete / CopyObject)
+	// is NOT an external mutation, and clearing the S3 metadata on
+	// every poll silently breaks the multipart-ETag contract.
+	//
+	// Heuristic: preserve when size + mtime + inode all match the
+	// stored entity. Any actual external write changes at least
+	// one of those (size for content change, mtime for touch +
+	// content change, inode for replace-via-rename). When they
+	// match, the bytes are byte-identical to our last view — the
+	// S3 metadata is therefore still valid.
+	if existing, eErr := s.idx.GetEntity(id); eErr == nil && existing != nil && !existing.IsDir {
+		if existing.Size == info.Size() &&
+			existing.Mtime == info.ModTime().UnixMilli() &&
+			existing.Inode == entity.Inode {
+			entity.ETagMD5 = existing.ETagMD5
+			entity.MultipartETag = existing.MultipartETag
+			entity.ContentType = existing.ContentType
+			entity.ContentEncoding = existing.ContentEncoding
+			entity.ContentDisposition = existing.ContentDisposition
+			entity.S3UserMetadata = existing.S3UserMetadata
+		}
+	}
+
 	entry := DirEntry{
 		ID:    id,
 		Name:  name,
