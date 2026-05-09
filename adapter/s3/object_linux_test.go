@@ -63,9 +63,11 @@ func newTestServer(t *testing.T) (svc *domain.Service, handler http.Handler, mou
 		t.Fatalf("new handler: %v", err)
 	}
 	cleanup = func() {
+		testSvcGlobal = nil
 		bus.Close()
 		_ = idx.Close()
 	}
+	testSvcGlobal = svc
 	return svc, handler, "data", cleanup
 }
 

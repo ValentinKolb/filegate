@@ -136,8 +136,13 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verifi
 	}
 	switch req.Method {
 	case http.MethodGet:
-		// Bucket-level GET = ListObjectsV2 (when list-type=2 in
-		// the query, which the modern S3 SDKs always set).
+		// Bucket-level GET sub-resources:
+		//   ?uploads          → ListMultipartUploads
+		//   (default)         → ListObjectsV2 (list-type=2 expected)
+		if _, ok := req.URL.Query()["uploads"]; ok {
+			r.handleListMultipartUploads(w, req, verified, bucket)
+			return
+		}
 		r.handleListObjectsV2(w, req, verified, bucket)
 	case http.MethodPut, http.MethodDelete:
 		writeError(w, req, errMethodNotAllowed, "buckets come from filegate config; CreateBucket/DeleteBucket are rejected")
@@ -152,19 +157,52 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verifi
 // handleObjectOp dispatches single-object methods to the per-method
 // handlers in object.go. The bucket-existence check happens first so
 // every handler can assume the bucket is real.
+//
+// Multipart ops are dispatched here too via query-arg sub-resources:
+//   POST   ?uploads          → CreateMultipartUpload
+//   PUT    ?partNumber=N&uploadId=X → UploadPart
+//   POST   ?uploadId=X       → CompleteMultipartUpload (push 3)
+//   DELETE ?uploadId=X       → AbortMultipartUpload
+//   GET    ?uploadId=X       → ListParts
 func (r *router) handleObjectOp(w http.ResponseWriter, req *http.Request, verified *sigV4Result, bucket, key string) {
 	if !r.bucketExists(bucket) {
 		writeError(w, req, errNoSuchBucket, "bucket does not exist", withBucket(bucket), withKey(key))
 		return
 	}
+	q := req.URL.Query()
+	hasUploads := func() bool { _, ok := q["uploads"]; return ok }()
+	uploadID := q.Get("uploadId")
+
 	switch req.Method {
 	case http.MethodGet:
+		if uploadID != "" {
+			r.handleListParts(w, req, verified, bucket, key)
+			return
+		}
 		r.handleGetObject(w, req, verified, bucket, key)
 	case http.MethodHead:
 		r.handleHeadObject(w, req, verified, bucket, key)
 	case http.MethodPut:
+		if uploadID != "" {
+			r.handleUploadPart(w, req, verified, bucket, key)
+			return
+		}
 		r.handlePutObject(w, req, verified, bucket, key)
+	case http.MethodPost:
+		if hasUploads {
+			r.handleCreateMultipartUpload(w, req, verified, bucket, key)
+			return
+		}
+		if uploadID != "" {
+			r.handleCompleteMultipartUpload(w, req, verified, bucket, key)
+			return
+		}
+		writeError(w, req, errMethodNotAllowed, "POST requires ?uploads or ?uploadId")
 	case http.MethodDelete:
+		if uploadID != "" {
+			r.handleAbortMultipartUpload(w, req, verified, bucket, key)
+			return
+		}
 		r.handleDeleteObject(w, req, verified, bucket, key)
 	default:
 		writeError(w, req, errMethodNotAllowed, "method not supported")

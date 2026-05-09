@@ -204,6 +204,76 @@ func writeListBucketResult(w http.ResponseWriter, res listBucketResultV2) {
 	_ = xml.NewEncoder(w).Encode(res)
 }
 
+// initiateMultipartUploadResult is the XML payload returned by
+// CreateMultipartUpload. Clients echo the UploadId back on every
+// subsequent UploadPart / Complete / Abort call.
+type initiateMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
+	Bucket   string   `xml:"Bucket"`
+	Key      string   `xml:"Key"`
+	UploadID string   `xml:"UploadId"`
+}
+
+// listPartsResult is the XML payload for GET ?uploadId=X (the
+// ListParts S3 op). MaxParts/IsTruncated are set when paginating;
+// our M2 push 2 returns all parts in a single response since
+// realistic uploads have ≤10000 parts and the response is small.
+type listPartsResult struct {
+	XMLName     xml.Name  `xml:"ListPartsResult"`
+	Bucket      string    `xml:"Bucket"`
+	Key         string    `xml:"Key"`
+	UploadID    string    `xml:"UploadId"`
+	IsTruncated bool      `xml:"IsTruncated"`
+	Parts       []partXML `xml:"Part"`
+}
+
+type partXML struct {
+	PartNumber   int    `xml:"PartNumber"`
+	LastModified string `xml:"LastModified"`
+	ETag         string `xml:"ETag"`
+	Size         int64  `xml:"Size"`
+}
+
+// listMultipartUploadsResult is the XML payload for GET
+// /{bucket}?uploads (ListMultipartUploads). Used by clients to
+// resume / clean up unfinished uploads.
+type listMultipartUploadsResult struct {
+	XMLName     xml.Name    `xml:"ListMultipartUploadsResult"`
+	Bucket      string      `xml:"Bucket"`
+	IsTruncated bool        `xml:"IsTruncated"`
+	Uploads     []uploadXML `xml:"Upload"`
+}
+
+type uploadXML struct {
+	Key       string `xml:"Key"`
+	UploadID  string `xml:"UploadId"`
+	Initiated string `xml:"Initiated"`
+}
+
+// completeMultipartUploadRequest is the XML body the client sends on
+// POST /{bucket}/{key}?uploadId=X. The Parts list MUST be in
+// ascending PartNumber order with the per-part ETag from
+// UploadPart.
+type completeMultipartUploadRequest struct {
+	XMLName xml.Name             `xml:"CompleteMultipartUpload"`
+	Parts   []completeRequestPart `xml:"Part"`
+}
+
+type completeRequestPart struct {
+	PartNumber int    `xml:"PartNumber"`
+	ETag       string `xml:"ETag"`
+}
+
+// completeMultipartUploadResult is the XML response. Location is a
+// best-effort URL; clients mostly care about Bucket/Key/ETag.
+type completeMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"CompleteMultipartUploadResult"`
+	Location string   `xml:"Location"`
+	Bucket   string   `xml:"Bucket"`
+	Key      string   `xml:"Key"`
+	ETag     string   `xml:"ETag"`
+}
+
 // quoteETag wraps a hex digest in double-quotes as S3 does on the
 // wire. Pass-through if already quoted (defensive — should not
 // normally happen).
