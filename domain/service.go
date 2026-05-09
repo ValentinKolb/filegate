@@ -2330,35 +2330,41 @@ func (s *Service) Delete(id FileID) error {
 		return ErrForbidden
 	}
 
-	doDelete := func() error {
-		meta, err := s.GetFile(id)
-		if err != nil {
-			return err
-		}
-		if meta.IsRoot {
-			return ErrForbidden
-		}
-		abs, err := s.ResolveAbsPath(id)
-		if err != nil {
-			return err
-		}
-		if err := s.store.RemoveAll(abs); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return ErrNotFound
-			}
-			return err
-		}
-		if err := s.deleteSubtree(id); err != nil {
-			return err
-		}
-		// EventDeleted is published by deleteSubtree itself.
-		return nil
-	}
-
+	fn := func() error { return s.deleteCoreLocked(id) }
 	if entity.IsDir {
-		return s.withSubtreeLockByID(id, doDelete)
+		return s.withSubtreeLockByID(id, fn)
 	}
-	return s.withFilePointLock(id, doDelete)
+	return s.withFilePointLock(id, fn)
+}
+
+// deleteCoreLocked is the actual delete body, factored out so that
+// other methods (DeleteIfMatch — see service_s3_write.go) can run
+// it inside a lock that ALSO performs other invariant checks.
+// Caller MUST already hold the appropriate path-lock + file-id-lock
+// for id (typically via withFilePointLock or withSubtreeLockByID).
+func (s *Service) deleteCoreLocked(id FileID) error {
+	meta, err := s.GetFile(id)
+	if err != nil {
+		return err
+	}
+	if meta.IsRoot {
+		return ErrForbidden
+	}
+	abs, err := s.ResolveAbsPath(id)
+	if err != nil {
+		return err
+	}
+	if err := s.store.RemoveAll(abs); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if err := s.deleteSubtree(id); err != nil {
+		return err
+	}
+	// EventDeleted is published by deleteSubtree itself.
+	return nil
 }
 
 // resolveOrReissueID returns the stable ID for absPath. It reads the

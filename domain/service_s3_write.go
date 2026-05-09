@@ -20,6 +20,13 @@ import (
 // the write is rejected with ErrConflict when the target already
 // exists.
 //
+// IfMatch (when non-empty) is the unquoted ETag value the client
+// supplied in If-Match. The write succeeds only if the existing
+// object's effective ETag (multipart_etag if set, else etag_md5)
+// matches one of the candidates. Compare-and-swap semantics —
+// the check happens UNDER the path-lock, so there is no TOCTOU
+// race against concurrent writers.
+//
 // REST callers continue to use WriteContent / WriteContentByVirtualPath
 // — those entry-points clear all S3-only metadata fields (the
 // "non-S3 write means non-S3 file" rule from plan §7).
@@ -29,6 +36,7 @@ type S3WriteOptions struct {
 	ContentDisposition string
 	UserMetadata       []byte // serialized x-amz-meta-* blob
 	IfNoneMatchAny     bool   // S3 If-None-Match: *
+	IfMatch            string // S3 If-Match: "<etag>" (or comma-separated list, unquoted)
 }
 
 // WriteObjectS3 is the S3-style write entry-point used by the (M1+)
@@ -113,6 +121,24 @@ func (s *Service) WriteObjectS3(virtualPath string, body io.Reader, opts S3Write
 	// Conditional rejection (If-None-Match: *).
 	if exists && opts.IfNoneMatchAny {
 		return nil, false, ErrConflict
+	}
+	// Conditional rejection (If-Match: "<etag>"). When the client
+	// sets If-Match and the target doesn't exist, the precondition
+	// fails (you can't compare-and-swap against a non-existent
+	// object). When it does exist, the current effective ETag must
+	// match one of the supplied candidates.
+	if opts.IfMatch != "" {
+		if !exists {
+			return nil, false, ErrConflict
+		}
+		targetEntity, getErr := s.idx.GetEntity(targetID)
+		if getErr != nil {
+			return nil, false, getErr
+		}
+		current := effectiveS3ETag(targetEntity)
+		if !ifMatchSatisfied(opts.IfMatch, current) {
+			return nil, false, ErrConflict
+		}
 	}
 
 	// Refuse to clobber a directory: S3 has no concept of
@@ -238,6 +264,89 @@ func (s *Service) GetS3Metadata(id FileID) (*S3MetadataView, error) {
 		UserMetadata:       entity.S3UserMetadata,
 		MultipartETag:      entity.MultipartETag,
 	}, nil
+}
+
+// effectiveS3ETag returns the ETag value an S3 client sees on the
+// wire for entity. Multipart-uploaded files present their composite
+// ETag; everything else presents the single-MD5. Used by the
+// conditional-write path-locked check inside WriteObjectS3 and
+// DeleteIfMatch.
+func effectiveS3ETag(entity *Entity) string {
+	if entity == nil {
+		return ""
+	}
+	if entity.MultipartETag != "" {
+		return entity.MultipartETag
+	}
+	return entity.ETagMD5
+}
+
+// ifMatchSatisfied reports whether condition (an unquoted ETag or
+// comma-separated list of unquoted ETags, possibly with W/ weak
+// validators) matches current. Strong-only — weak validators are
+// rejected per RFC 7232 §3.1 since If-Match is the strong-mode
+// header.
+func ifMatchSatisfied(condition, current string) bool {
+	condition = strings.TrimSpace(condition)
+	if condition == "*" {
+		return current != ""
+	}
+	current = strings.Trim(current, `"`)
+	for _, candidate := range strings.Split(condition, ",") {
+		candidate = strings.TrimSpace(candidate)
+		// Reject weak validators on If-Match.
+		if strings.HasPrefix(candidate, "W/") {
+			continue
+		}
+		candidate = strings.Trim(candidate, `"`)
+		if candidate == current {
+			return true
+		}
+	}
+	return false
+}
+
+// DeleteIfMatch is Delete + an S3-style If-Match precondition. The
+// ETag check happens INSIDE the same path-lock + file-id-lock
+// critical section as the actual delete (via deleteCoreLocked),
+// so a concurrent PUT that changes the object between our peek
+// and the delete cannot win — its lock-acquire blocks behind ours.
+//
+// Pass an empty ifMatch to fall through to plain Delete.
+//
+// Returns ErrConflict when the precondition fails (S3 maps this to
+// 412 PreconditionFailed at the adapter layer).
+func (s *Service) DeleteIfMatch(id FileID, ifMatch string) error {
+	if ifMatch == "" {
+		return s.Delete(id)
+	}
+	entity, err := s.idx.GetEntity(id)
+	if err != nil {
+		return err
+	}
+	if entity.ParentID.IsZero() {
+		return ErrForbidden
+	}
+	fn := func() error {
+		// Re-fetch INSIDE the lock so concurrent writers that
+		// committed between our pre-lock peek and the lock
+		// acquisition are reflected in the ETag check.
+		current, err := s.idx.GetEntity(id)
+		if err != nil {
+			return err
+		}
+		if current == nil {
+			return ErrNotFound
+		}
+		if !ifMatchSatisfied(ifMatch, effectiveS3ETag(current)) {
+			return ErrConflict
+		}
+		return s.deleteCoreLocked(id)
+	}
+	if entity.IsDir {
+		return s.withSubtreeLockByID(id, fn)
+	}
+	return s.withFilePointLock(id, fn)
 }
 
 // IterateFlatKeysForS3 is the Service-layer entry-point for the S3

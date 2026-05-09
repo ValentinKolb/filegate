@@ -222,22 +222,9 @@ func TestListObjectsV2StartAfter(t *testing.T) {
 	}
 }
 
-// TestListObjectsV2RejectDelimiter: M1 doesn't support delimiter;
-// requests including one are rejected with NotImplemented so the
-// client fails loudly.
-func TestListObjectsV2RejectDelimiter(t *testing.T) {
-	_, handler, mount, cleanup := newTestServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodGet, "/"+mount+"?list-type=2&delimiter=/", nil)
-	req.Host = "example.com"
-	signRequestPayload(req, nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("delimiter status=%d, want 501", rec.Code)
-	}
-}
+// (TestListObjectsV2RejectDelimiter removed — delimiter is
+// supported as of M2 push 1; behaviour is exercised by
+// TestListObjectsV2Delimiter and TestListObjectsV2DelimiterPrefix.)
 
 // TestListObjectsV2InvalidMaxKeys: negative or non-integer values
 // surface as InvalidArgument.
@@ -392,6 +379,111 @@ func TestListObjectsV2MaxKeysZero(t *testing.T) {
 	}
 }
 
+// TestListObjectsV2Delimiter: delimiter='/' produces CommonPrefixes
+// for each top-level "directory", with leaf-files at the prefix
+// level appearing in Contents.
+func TestListObjectsV2Delimiter(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Layout:
+	//   leaf-at-root.txt        (Contents)
+	//   photos/2023/cat.jpg     (rolls up under "photos/")
+	//   photos/2024/cat.jpg     (same group)
+	//   videos/v.mp4            (rolls up under "videos/")
+	keys := []string{
+		"leaf-at-root.txt",
+		"photos/2023/cat.jpg",
+		"photos/2024/cat.jpg",
+		"videos/v.mp4",
+	}
+	for _, k := range keys {
+		body := []byte("x")
+		req := httptest.NewRequest(http.MethodPut, "/"+mount+"/"+k, bytes.NewReader(body))
+		req.Host = "example.com"
+		signRequestPayload(req, body)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+mount+"?list-type=2&delimiter=/", nil)
+	req.Host = "example.com"
+	signRequestPayload(req, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var res listBucketResultV2
+	_ = xml.Unmarshal(rec.Body.Bytes(), &res)
+
+	// Expected: 1 Contents (leaf-at-root.txt), 2 CommonPrefixes
+	// (photos/, videos/). KeyCount = 3.
+	if res.Delimiter != "/" {
+		t.Errorf("Delimiter=%q, want /", res.Delimiter)
+	}
+	if res.KeyCount != 3 {
+		t.Fatalf("KeyCount=%d, want 3 (1 Content + 2 CommonPrefixes)", res.KeyCount)
+	}
+	if len(res.Contents) != 1 || res.Contents[0].Key != "leaf-at-root.txt" {
+		t.Errorf("Contents=%v, want [leaf-at-root.txt]", keysOf(res.Contents))
+	}
+	wantPrefixes := []string{"photos/", "videos/"}
+	if len(res.CommonPrefixes) != len(wantPrefixes) {
+		t.Fatalf("CommonPrefixes count=%d, want %d", len(res.CommonPrefixes), len(wantPrefixes))
+	}
+	for i, want := range wantPrefixes {
+		if res.CommonPrefixes[i].Prefix != want {
+			t.Errorf("CommonPrefixes[%d]=%q, want %q", i, res.CommonPrefixes[i].Prefix, want)
+		}
+	}
+}
+
+// TestListObjectsV2DelimiterPrefix: delimiter+prefix combined.
+// Prefix='photos/' delimiter='/' produces one CommonPrefix per
+// year-subdir directly under photos/.
+func TestListObjectsV2DelimiterPrefix(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	keys := []string{
+		"photos/loose.jpg",       // direct child → Contents
+		"photos/2023/cat.jpg",    // → photos/2023/
+		"photos/2024/cat.jpg",    // → photos/2024/
+		"photos/2024/dog.jpg",    // same group
+		"unrelated/x.txt",        // outside prefix, ignored
+	}
+	for _, k := range keys {
+		body := []byte("x")
+		req := httptest.NewRequest(http.MethodPut, "/"+mount+"/"+k, bytes.NewReader(body))
+		req.Host = "example.com"
+		signRequestPayload(req, body)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+mount+"?list-type=2&prefix=photos/&delimiter=/", nil)
+	req.Host = "example.com"
+	signRequestPayload(req, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	var res listBucketResultV2
+	_ = xml.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Prefix != "photos/" {
+		t.Errorf("Prefix=%q", res.Prefix)
+	}
+	if len(res.Contents) != 1 || res.Contents[0].Key != "photos/loose.jpg" {
+		t.Errorf("Contents=%v, want [photos/loose.jpg]", keysOf(res.Contents))
+	}
+	wantPrefixes := []string{"photos/2023/", "photos/2024/"}
+	if len(res.CommonPrefixes) != len(wantPrefixes) {
+		t.Fatalf("CommonPrefixes count=%d, want %d (got: %v)", len(res.CommonPrefixes), len(wantPrefixes), prefixesOf(res.CommonPrefixes))
+	}
+	for i, want := range wantPrefixes {
+		if res.CommonPrefixes[i].Prefix != want {
+			t.Errorf("CommonPrefixes[%d]=%q, want %q", i, res.CommonPrefixes[i].Prefix, want)
+		}
+	}
+}
+
 // helpers
 
 func keysOf(items []listObjectXML) []string {
@@ -407,4 +499,12 @@ func firstKey(items []listObjectXML) string {
 		return ""
 	}
 	return items[0].Key
+}
+
+func prefixesOf(items []commonPrefixXML) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.Prefix
+	}
+	return out
 }

@@ -479,6 +479,134 @@ func TestRangeOnEmptyObject(t *testing.T) {
 	}
 }
 
+// TestPutIfMatch: If-Match with the current ETag → success;
+// If-Match with a stale ETag → 412 PreconditionFailed and the
+// existing object stays untouched.
+func TestPutIfMatch(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	v1 := []byte("v1")
+	v1MD5 := md5.Sum(v1)
+	v1ETag := hex.EncodeToString(v1MD5[:])
+
+	// Create.
+	req := httptest.NewRequest(http.MethodPut, "/"+mount+"/cas.txt", bytes.NewReader(v1))
+	req.Host = "example.com"
+	signRequestPayload(req, v1)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status=%d", rec.Code)
+	}
+
+	// Compare-and-swap with current ETag → success, body becomes v2.
+	v2 := []byte("v2 final")
+	v2MD5 := md5.Sum(v2)
+	v2ETag := hex.EncodeToString(v2MD5[:])
+	req = httptest.NewRequest(http.MethodPut, "/"+mount+"/cas.txt", bytes.NewReader(v2))
+	req.Host = "example.com"
+	req.Header.Set("If-Match", `"`+v1ETag+`"`)
+	signRequestPayload(req, v2)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("CAS PUT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := strings.Trim(rec.Header().Get("ETag"), `"`); got != v2ETag {
+		t.Errorf("CAS PUT ETag=%q, want %q", got, v2ETag)
+	}
+
+	// Compare-and-swap with the OLD (now stale) ETag → 412.
+	req = httptest.NewRequest(http.MethodPut, "/"+mount+"/cas.txt", bytes.NewReader([]byte("v3")))
+	req.Host = "example.com"
+	req.Header.Set("If-Match", `"`+v1ETag+`"`) // stale
+	signRequestPayload(req, []byte("v3"))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale-CAS PUT status=%d, want 412", rec.Code)
+	}
+
+	// The object should still be v2 after the failed CAS.
+	req = httptest.NewRequest(http.MethodGet, "/"+mount+"/cas.txt", nil)
+	req.Host = "example.com"
+	signRequestPayload(req, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if got := rec.Body.Bytes(); !bytes.Equal(got, v2) {
+		t.Errorf("after failed CAS body=%q, want v2", got)
+	}
+}
+
+// TestPutIfMatchOnMissingObject: PutObject with If-Match against a
+// non-existent key fails (you can't compare-and-swap against
+// nothing). AWS returns 412 PreconditionFailed.
+func TestPutIfMatchOnMissingObject(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	body := []byte("x")
+	req := httptest.NewRequest(http.MethodPut, "/"+mount+"/missing.txt", bytes.NewReader(body))
+	req.Host = "example.com"
+	req.Header.Set("If-Match", `"any"`)
+	signRequestPayload(req, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("If-Match on missing status=%d, want 412", rec.Code)
+	}
+}
+
+// TestDeleteIfMatch: DELETE with If-Match matching the current
+// ETag succeeds; with a stale ETag, returns 412 and the object
+// stays.
+func TestDeleteIfMatch(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	body := []byte("delete-me")
+	bodyMD5 := md5.Sum(body)
+	bodyETag := hex.EncodeToString(bodyMD5[:])
+
+	req := httptest.NewRequest(http.MethodPut, "/"+mount+"/del.txt", bytes.NewReader(body))
+	req.Host = "example.com"
+	signRequestPayload(req, body)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	// DELETE with stale ETag → 412.
+	req = httptest.NewRequest(http.MethodDelete, "/"+mount+"/del.txt", nil)
+	req.Host = "example.com"
+	req.Header.Set("If-Match", `"deadbeef"`)
+	signRequestPayload(req, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale If-Match DELETE status=%d, want 412", rec.Code)
+	}
+
+	// Object should still be there.
+	req = httptest.NewRequest(http.MethodGet, "/"+mount+"/del.txt", nil)
+	req.Host = "example.com"
+	signRequestPayload(req, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("after stale-DELETE GET status=%d, want 200", rec.Code)
+	}
+
+	// DELETE with current ETag → 204 success.
+	req = httptest.NewRequest(http.MethodDelete, "/"+mount+"/del.txt", nil)
+	req.Host = "example.com"
+	req.Header.Set("If-Match", `"`+bodyETag+`"`)
+	signRequestPayload(req, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("matching If-Match DELETE status=%d, want 204", rec.Code)
+	}
+}
+
 // TestConditionalGet: If-None-Match with the current ETag returns
 // 304 Not Modified.
 func TestConditionalGet(t *testing.T) {

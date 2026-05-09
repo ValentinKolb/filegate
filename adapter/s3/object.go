@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/valentinkolb/filegate/domain"
 )
@@ -82,6 +83,17 @@ func (rt *router) handlePutObject(w http.ResponseWriter, r *http.Request, verifi
 			errors.Is(err, errChunkTooLarge) {
 			writeError(w, r, errInvalidArgument, err.Error(), withBucket(bucket), withKey(key))
 			return
+		}
+		// Conditional-write precondition failure → 412. Both
+		// IfNoneMatchAny (target existed) and IfMatch (didn't
+		// match current ETag) surface as ErrConflict from
+		// WriteObjectS3 — which one is responsible is encoded in
+		// the request headers.
+		if errors.Is(err, domain.ErrConflict) {
+			if opts.IfNoneMatchAny || opts.IfMatch != "" {
+				writeError(w, r, errPreconditionFailed, "conditional PutObject precondition failed", withBucket(bucket), withKey(key))
+				return
+			}
 		}
 		mapDomainError(w, r, err, bucket, key)
 		return
@@ -286,11 +298,19 @@ func (rt *router) handleDeleteObject(w http.ResponseWriter, r *http.Request, ver
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err := rt.svc.Delete(id); err != nil {
+	// S3 conditional DELETE: If-Match must match the current ETag,
+	// otherwise reject with PreconditionFailed.
+	ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
+	if err := rt.svc.DeleteIfMatch(id, ifMatch); err != nil {
 		// Same idempotency: a delete that races with another delete
 		// shouldn't surface as 404 to S3 clients.
 		if errors.Is(err, domain.ErrNotFound) {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// If-Match precondition failure → 412.
+		if errors.Is(err, domain.ErrConflict) && ifMatch != "" {
+			writeError(w, r, errPreconditionFailed, "If-Match precondition failed", withBucket(bucket), withKey(key))
 			return
 		}
 		mapDomainError(w, r, err, bucket, key)
@@ -304,13 +324,19 @@ func (rt *router) handleDeleteObject(w http.ResponseWriter, r *http.Request, ver
 
 // validateObjectKey rejects keys outside the M0-declared S3-key
 // compatibility subset. This is the wire-side check; domain layer
-// enforces filesystem-side rules separately.
+// enforces filesystem-side rules separately. Keys MUST be valid
+// UTF-8 — both because S3 spec mandates it and because our
+// continuation-token "+0xff suffix" trick depends on UTF-8 keys
+// not containing 0xff.
 func validateObjectKey(key string) error {
 	if key == "" {
 		return errors.New("object key must not be empty")
 	}
 	if len(key) > 1024 {
 		return errors.New("object key exceeds 1024 bytes")
+	}
+	if !utf8.ValidString(key) {
+		return errors.New("object key is not valid UTF-8")
 	}
 	if strings.Contains(key, "\x00") {
 		return errors.New("object key contains NUL byte")
@@ -345,12 +371,20 @@ func buildS3WriteOptions(r *http.Request) (domain.S3WriteOptions, *sigV4VerifyEr
 		ContentDisposition: r.Header.Get("Content-Disposition"),
 	}
 	// "If-None-Match: *" is the only S3-conditional create form
-	// (any other value is invalid for PutObject).
+	// (any other value is invalid for PutObject per AWS spec).
 	if cond := r.Header.Get("If-None-Match"); cond != "" {
 		if strings.TrimSpace(cond) != "*" {
 			return opts, sigErr(errInvalidArgument, "If-None-Match must be \"*\" on PutObject")
 		}
 		opts.IfNoneMatchAny = true
+	}
+	// "If-Match: <etag>" enables compare-and-swap PUT — the write
+	// only succeeds if the existing object's ETag matches one of
+	// the supplied candidates. Multiple candidates allowed
+	// (comma-separated). The check happens under the path-lock
+	// inside WriteObjectS3.
+	if cond := strings.TrimSpace(r.Header.Get("If-Match")); cond != "" {
+		opts.IfMatch = cond
 	}
 	// User metadata: collect every x-amz-meta-* header into a map
 	// and serialize to JSON for storage. AWS limits the total to

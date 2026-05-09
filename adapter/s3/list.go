@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/valentinkolb/filegate/domain"
@@ -38,14 +39,7 @@ func (rt *router) handleListObjectsV2(w http.ResponseWriter, r *http.Request, _ 
 		writeError(w, r, errInvalidArgument, "only ListObjectsV2 (list-type=2) is supported", withBucket(bucket))
 		return
 	}
-	if q.Get("delimiter") != "" {
-		// Push 1's plan deferred delimiter (CommonPrefixes
-		// virtual-hierarchy) to M2. Returning NotImplemented
-		// lets clients fail loudly instead of silently seeing a
-		// flat result when they expect grouping.
-		writeError(w, r, errNotImplemented, "delimiter is not supported in M1; use a recursive listing", withBucket(bucket))
-		return
-	}
+	delimiter := q.Get("delimiter")
 	if v := q.Get("encoding-type"); v != "" && v != "url" {
 		writeError(w, r, errInvalidArgument, "encoding-type must be \"url\" if specified", withBucket(bucket))
 		return
@@ -103,32 +97,82 @@ func (rt *router) handleListObjectsV2(w http.ResponseWriter, r *http.Request, _ 
 	}
 
 	// We pass limit=0 (unlimited) and stop the iteration ourselves
-	// once we've accepted maxKeys+1 RETURNABLE objects. Counting
-	// callbacks instead of returnables (e.g. via iterLimit=maxKeys+1)
-	// would mis-detect truncation when an entry is skipped (stale
-	// race, non-file, reserved namespace) — IsTruncated could go
-	// wrong in either direction. The "+1" lets us peek one past
-	// the cap to set IsTruncated correctly without losing data.
+	// once we've accepted maxKeys+1 RETURNABLE entries (objects OR
+	// common-prefix groupings). Counting callbacks instead of
+	// returnables (e.g. via iterLimit=maxKeys+1) would mis-detect
+	// truncation when an entry is skipped (stale race, non-file,
+	// reserved namespace) — IsTruncated could go wrong in either
+	// direction. The "+1" peek past the cap is what sets
+	// IsTruncated correctly without losing data.
+	//
+	// When delimiter is set, we virtual-group keys whose first
+	// occurrence of the delimiter (after the prefix) falls at the
+	// same boundary. Each unique group becomes one CommonPrefixes
+	// entry that consumes one MaxKeys slot — same budget as a
+	// regular Contents entry per AWS spec.
 	contents := make([]listObjectXML, 0, maxKeys)
+	commonPrefixes := make([]commonPrefixXML, 0)
+	prefixSet := make(map[string]struct{})
 	truncated := false
+	totalReturnable := func() int { return len(contents) + len(commonPrefixes) }
 
 	err := rt.svc.IterateFlatKeysForS3(bucket, prefix, cursor, 0, func(relPath string, id domain.FileID) (bool, error) {
-		if len(contents) >= maxKeys {
-			// We already have maxKeys returnables — this
-			// callback is the truncation peek. The strict-
-			// greater cursor for the next page is the LAST
-			// returnable we accepted. (Note: this only fires
-			// for a callback that would have been returnable;
-			// a stale or filtered entry below the maxKeys-th
-			// returnable doesn't cause an early IsTruncated.)
+		// Filter out reserved-namespace and out-of-subset keys
+		// FIRST — they should never surface as either Contents
+		// or CommonPrefixes, even if something rogue ended up
+		// indexed.
+		if validateObjectKey(relPath) != nil {
+			return true, nil
+		}
+
+		// Compute whether this key rolls up into a CommonPrefix
+		// (delimiter set + key has a delimiter after the prefix).
+		// AWS-style grouping: take everything from the start of
+		// the key up to and including the FIRST occurrence of
+		// the delimiter that's strictly after the prefix.
+		commonPrefix, isGrouping := computeCommonPrefix(relPath, prefix, delimiter)
+
+		// AWS filters CommonPrefixes by start-after / cursor too:
+		// a group whose prefix is <= the cursor must not re-emit.
+		// Without this, paginating with delimiter could repeat a
+		// group that the previous page already emitted.
+		if isGrouping && cursor != "" && commonPrefix <= cursor {
+			return true, nil
+		}
+
+		if totalReturnable() >= maxKeys {
+			// Truncation peek. Detect a real next entry —
+			// either a new common-prefix grouping we haven't
+			// emitted, or a returnable object key.
+			if isGrouping {
+				if _, seen := prefixSet[commonPrefix]; seen {
+					// Already-emitted group — not a real
+					// new returnable, keep walking.
+					return true, nil
+				}
+				truncated = true
+				return false, nil
+			}
 			if !isReturnable(rt.svc, relPath, id) {
-				// Skip filtered peek — keep walking until we
-				// see a real next entry.
 				return true, nil
 			}
 			truncated = true
 			return false, nil
 		}
+
+		if isGrouping {
+			if _, seen := prefixSet[commonPrefix]; seen {
+				// Already emitted this group; skip without
+				// counting toward the budget.
+				return true, nil
+			}
+			prefixSet[commonPrefix] = struct{}{}
+			commonPrefixes = append(commonPrefixes, commonPrefixXML{
+				Prefix: maybeURLEncode(commonPrefix, encodeURL),
+			})
+			return true, nil
+		}
+
 		// Fetch entity for size + mtime + etag. A missing entity
 		// for a flat-key entry is a transient race (the rescan
 		// sweep will clean it up); skip it rather than abort the
@@ -141,15 +185,6 @@ func (rt *router) handleListObjectsV2(w http.ResponseWriter, r *http.Request, _ 
 			return false, err
 		}
 		if meta.Type != "file" {
-			// Defensive: flat-key entries are file-only, but a
-			// race during dir-rename could briefly point at a
-			// directory. Skip.
-			return true, nil
-		}
-		// Apply the same key-validation we use on the PUT path —
-		// reserved-namespace and out-of-subset shapes shouldn't
-		// surface even if something rogue ended up indexed.
-		if validateObjectKey(relPath) != nil {
 			return true, nil
 		}
 		view, _ := rt.svc.GetS3Metadata(id)
@@ -168,13 +203,15 @@ func (rt *router) handleListObjectsV2(w http.ResponseWriter, r *http.Request, _ 
 	}
 
 	res := listBucketResultV2{
-		Name:        bucket,
-		Prefix:      maybeURLEncode(prefix, encodeURL),
-		StartAfter:  maybeURLEncode(startAfter, encodeURL),
-		KeyCount:    len(contents),
-		MaxKeys:     maxKeys,
-		IsTruncated: truncated,
-		Contents:    contents,
+		Name:           bucket,
+		Prefix:         maybeURLEncode(prefix, encodeURL),
+		Delimiter:      maybeURLEncode(delimiter, encodeURL),
+		StartAfter:     maybeURLEncode(startAfter, encodeURL),
+		KeyCount:       len(contents) + len(commonPrefixes),
+		MaxKeys:        maxKeys,
+		IsTruncated:    truncated,
+		Contents:       contents,
+		CommonPrefixes: commonPrefixes,
 	}
 	if encodeURL {
 		res.EncodingType = "url"
@@ -182,20 +219,69 @@ func (rt *router) handleListObjectsV2(w http.ResponseWriter, r *http.Request, _ 
 	if contToken != "" {
 		res.ContinuationToken = contToken
 	}
-	if truncated && len(contents) > 0 {
-		// Token encodes the LAST RAW relPath we accepted (NOT
-		// url-encoded — the iterator wants the original bytes).
-		// We backtrack from the response Contents which may be
-		// url-encoded, so keep a parallel raw cursor.
-		res.NextContinuationToken = encodeContinuationToken(lastRawKey(contents, encodeURL))
+	if truncated {
+		// Cursor for the next page is the LAST RAW relPath we
+		// accepted as a returnable. For a Contents entry that's
+		// the last entry's key; for a CommonPrefix that's the
+		// first key under that prefix that we encountered (via
+		// emittedAt — but a simpler-and-correct rule is to use
+		// the prefix string itself as the strict-greater bound,
+		// since any later key not-under-this-prefix sorts after
+		// the prefix lexically). We pick the bigger of the two
+		// to ensure forward progress regardless of which type
+		// was last.
+		next := lastRawKey(contents, encodeURL)
+		if len(commonPrefixes) > 0 {
+			lastPrefix := commonPrefixes[len(commonPrefixes)-1].Prefix
+			if encodeURL {
+				if dec, ok := percentDecode(lastPrefix); ok {
+					lastPrefix = dec
+				}
+			}
+			// Resume position for a common-prefix group: any key
+			// strictly greater than `prefix + 0xFF*` will be
+			// outside the group (at the lexical boundary). The
+			// simplest deterministic cursor is the prefix
+			// itself plus a high-byte suffix; we use the iterator's
+			// strict-greater semantic to advance past every key
+			// in the group.
+			candidate := lastPrefix + "\xff"
+			if candidate > next {
+				next = candidate
+			}
+		}
+		res.NextContinuationToken = encodeContinuationToken(next)
 	}
 	writeListBucketResult(w, res)
+}
+
+// computeCommonPrefix returns (group, ok). When delimiter is set
+// and relPath has the delimiter past prefix, group is the
+// "<prefix><leading-segment><delimiter>" string the AWS spec emits
+// in CommonPrefixes; ok=true. Otherwise returns ("", false) —
+// caller treats relPath as a regular Contents entry.
+func computeCommonPrefix(relPath, prefix, delimiter string) (string, bool) {
+	if delimiter == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(relPath, prefix) {
+		// Iterator is prefix-bounded so this shouldn't happen,
+		// but defend.
+		return "", false
+	}
+	tail := relPath[len(prefix):]
+	idx := strings.Index(tail, delimiter)
+	if idx < 0 {
+		return "", false
+	}
+	return prefix + tail[:idx+len(delimiter)], true
 }
 
 // isReturnable mirrors the post-fetch filter in the main loop. Used
 // during truncation-peek to decide whether the (maxKeys+1)-th
 // callback represents a "real next item" worth signalling
-// IsTruncated for.
+// IsTruncated for. Mirrors the validateObjectKey + GetFile checks
+// the main loop runs.
 func isReturnable(svc *domain.Service, relPath string, id domain.FileID) bool {
 	if validateObjectKey(relPath) != nil {
 		return false

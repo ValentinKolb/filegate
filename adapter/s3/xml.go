@@ -165,17 +165,26 @@ func formatHTTPDate(t time.Time) string {
 // don't strictly require positional order, but matching keeps wire
 // diffs tight.
 type listBucketResultV2 struct {
-	XMLName               xml.Name        `xml:"ListBucketResult"`
-	Name                  string          `xml:"Name"`
-	Prefix                string          `xml:"Prefix"`
-	StartAfter            string          `xml:"StartAfter,omitempty"`
-	EncodingType          string          `xml:"EncodingType,omitempty"`
-	KeyCount              int             `xml:"KeyCount"`
-	MaxKeys               int             `xml:"MaxKeys"`
-	IsTruncated           bool            `xml:"IsTruncated"`
-	ContinuationToken     string          `xml:"ContinuationToken,omitempty"`
-	NextContinuationToken string          `xml:"NextContinuationToken,omitempty"`
-	Contents              []listObjectXML `xml:"Contents"`
+	XMLName               xml.Name             `xml:"ListBucketResult"`
+	Name                  string               `xml:"Name"`
+	Prefix                string               `xml:"Prefix"`
+	Delimiter             string               `xml:"Delimiter,omitempty"`
+	StartAfter            string               `xml:"StartAfter,omitempty"`
+	EncodingType          string               `xml:"EncodingType,omitempty"`
+	KeyCount              int                  `xml:"KeyCount"`
+	MaxKeys               int                  `xml:"MaxKeys"`
+	IsTruncated           bool                 `xml:"IsTruncated"`
+	ContinuationToken     string               `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string               `xml:"NextContinuationToken,omitempty"`
+	Contents              []listObjectXML      `xml:"Contents"`
+	CommonPrefixes        []commonPrefixXML    `xml:"CommonPrefixes,omitempty"`
+}
+
+// commonPrefixXML represents a virtual "directory" entry in
+// ListObjectsV2 output when delimiter is set. Each grouping appears
+// as <CommonPrefixes><Prefix>...</Prefix></CommonPrefixes>.
+type commonPrefixXML struct {
+	Prefix string `xml:"Prefix"`
 }
 
 type listObjectXML struct {
