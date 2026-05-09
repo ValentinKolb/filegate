@@ -126,17 +126,19 @@ func (r *router) handleListBuckets(w http.ResponseWriter, _ *http.Request, _ *si
 	}
 }
 
-// handleBucketOp is the dispatch point for GET /{bucket} (ListObjectsV2)
-// and other bucket-level methods. M1 only stubs the structure — the
-// real ListObjectsV2 lands in Push 3.
-func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, _ *sigV4Result, bucket string) {
+// handleBucketOp dispatches bucket-level methods. The dispatcher
+// passes the verified SigV4 context through so handlers can log
+// access-key info if access-logging is enabled.
+func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verified *sigV4Result, bucket string) {
 	if !r.bucketExists(bucket) {
 		writeError(w, req, errNoSuchBucket, "bucket does not exist", withBucket(bucket))
 		return
 	}
 	switch req.Method {
 	case http.MethodGet:
-		writeError(w, req, errNotImplemented, "ListObjectsV2 lands in M1 push 3")
+		// Bucket-level GET = ListObjectsV2 (when list-type=2 in
+		// the query, which the modern S3 SDKs always set).
+		r.handleListObjectsV2(w, req, verified, bucket)
 	case http.MethodPut, http.MethodDelete:
 		writeError(w, req, errMethodNotAllowed, "buckets come from filegate config; CreateBucket/DeleteBucket are rejected")
 	case http.MethodHead:

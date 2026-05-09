@@ -160,6 +160,41 @@ func formatHTTPDate(t time.Time) string {
 	return t.UTC().Format(http.TimeFormat)
 }
 
+// listBucketResultV2 is the wire format for GET /{bucket}?list-type=2.
+// Element order matches what AWS emits — clients (rclone, awscli)
+// don't strictly require positional order, but matching keeps wire
+// diffs tight.
+type listBucketResultV2 struct {
+	XMLName               xml.Name        `xml:"ListBucketResult"`
+	Name                  string          `xml:"Name"`
+	Prefix                string          `xml:"Prefix"`
+	StartAfter            string          `xml:"StartAfter,omitempty"`
+	EncodingType          string          `xml:"EncodingType,omitempty"`
+	KeyCount              int             `xml:"KeyCount"`
+	MaxKeys               int             `xml:"MaxKeys"`
+	IsTruncated           bool            `xml:"IsTruncated"`
+	ContinuationToken     string          `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string          `xml:"NextContinuationToken,omitempty"`
+	Contents              []listObjectXML `xml:"Contents"`
+}
+
+type listObjectXML struct {
+	Key          string `xml:"Key"`
+	LastModified string `xml:"LastModified"`
+	ETag         string `xml:"ETag"`
+	Size         int64  `xml:"Size"`
+	StorageClass string `xml:"StorageClass"`
+}
+
+// writeListBucketResult emits a ListObjectsV2 XML response.
+func writeListBucketResult(w http.ResponseWriter, res listBucketResultV2) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Server", "filegate")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, xml.Header)
+	_ = xml.NewEncoder(w).Encode(res)
+}
+
 // quoteETag wraps a hex digest in double-quotes as S3 does on the
 // wire. Pass-through if already quoted (defensive — should not
 // normally happen).

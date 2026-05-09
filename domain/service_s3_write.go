@@ -240,6 +240,17 @@ func (s *Service) GetS3Metadata(id FileID) (*S3MetadataView, error) {
 	}, nil
 }
 
+// IterateFlatKeysForS3 is the Service-layer entry-point for the S3
+// adapter's ListObjectsV2 path. Forwards to the index iterator with
+// the same semantics — relPath order, prefix-bounded scan, after as
+// strict-greater bound, limit caps the calls (zero = unlimited).
+// The S3 adapter is the only expected caller; the wrapper exists
+// so the adapter doesn't have to know about the underlying Pebble
+// keyspace shape.
+func (s *Service) IterateFlatKeysForS3(mountName, prefix, after string, limit int, fn func(relPath string, id FileID) (bool, error)) error {
+	return s.idx.IterateFlatKeys(mountName, prefix, after, limit, fn)
+}
+
 // syncSingleAfterS3Write is the S3-write counterpart of
 // syncSingleAfterLocalWrite: same atomic syncSingle, but the
 // follow-up PutEntity SETS the S3-only metadata fields from opts
