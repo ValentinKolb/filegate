@@ -197,18 +197,29 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 		return MultipartCompleteResult{}, fmt.Errorf("install: %w", err)
 	}
 
-	// syncSingle to populate the entity row from the new file's
-	// stat info — this fills in size, mtime, ownership, ETag MD5
-	// (computed inline by the rescan-aware path? no, syncSingle
-	// uses buildEntityMetadata which doesn't hash). We compute the
-	// ETag explicitly below and write it via a follow-up batch.
-	if err := s.syncSingle(destAbs); err != nil {
-		return MultipartCompleteResult{}, fmt.Errorf("sync after rename: %w", err)
+	// Stat the freshly-renamed destination so we can build the
+	// entity record inline. We deliberately do NOT call
+	// s.syncSingle here — syncSingle commits the entity in its own
+	// Pebble batch, which would create a window where the object
+	// is visible without the durable uploadId record. Folding the
+	// entity write and the record insertion into the SAME batch
+	// below is what makes the install + commit atomic.
+	info, err := os.Lstat(destAbs)
+	if err != nil {
+		return MultipartCompleteResult{}, fmt.Errorf("stat after rename: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return MultipartCompleteResult{}, ErrForbidden
+	}
+	id, err := s.store.GetID(destAbs)
+	if err != nil {
+		return MultipartCompleteResult{}, fmt.Errorf("get installed ID: %w", err)
 	}
 
 	// Hash the destination on disk so etag_md5 is correct (whole-
-	// body MD5; distinct from the composite multipart ETag). This
-	// is the same calculation rescan does for legacy files.
+	// body MD5; distinct from the composite multipart ETag). The
+	// rename is atomic and we hold the path-lock — no other writer
+	// can mutate the file between rename and hash.
 	wholeBodyMD5, hashErr := s.hashLocalFile(destAbs)
 	if hashErr != nil {
 		// Best-effort — leave etag_md5 empty; the rescan will
@@ -216,44 +227,62 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 		wholeBodyMD5 = ""
 	}
 
-	// Atomic batch: entity update (with composite multipart_etag,
-	// content-type, etc) + uploadId record insertion. This is the
-	// single Pebble commit that makes the multipart Complete
-	// durable.
-	id, err := s.store.GetID(destAbs)
-	if err != nil {
-		return MultipartCompleteResult{}, fmt.Errorf("get installed ID: %w", err)
+	// Build the entity record from the rebuild stat + composite ETag
+	// + S3 metadata. This is the same shape syncSingle would write
+	// via buildEntityMetadata, plus the S3-specific fields the
+	// adapter passed in.
+	entity := buildEntityMetadata(id, parentID, fileName, destAbs, info)
+	entity.ETagMD5 = wholeBodyMD5
+	entity.MultipartETag = args.CompositeETag
+	entity.ContentType = args.Opts.ContentType
+	entity.ContentEncoding = args.Opts.ContentEncoding
+	entity.ContentDisposition = args.Opts.ContentDisposition
+	if len(args.Opts.UserMetadata) > 0 {
+		entity.S3UserMetadata = append([]byte(nil), args.Opts.UserMetadata...)
+	} else {
+		entity.S3UserMetadata = nil
 	}
+	dirEntry := DirEntry{
+		ID:    id,
+		Name:  fileName,
+		IsDir: false,
+		Size:  info.Size(),
+		Mtime: info.ModTime().UnixMilli(),
+	}
+
+	// Atomic batch: entity row + parent child-edge + flat-key + the
+	// durable uploadId record. A crash before this commits leaves
+	// the destination with new bytes on disk but NO entity row,
+	// which the recovery sweep can detect (entity-by-id lookup
+	// returns nil) and re-drive safely. A crash AFTER this commits
+	// makes the upload durable; a retry sees the record and
+	// short-circuits idempotently.
 	now := time.Now().UnixMilli()
+	mountRel := strings.Join(parts[1:], "/")
 	if err := s.idx.Batch(func(b Batch) error {
-		entity, gErr := s.idx.GetEntity(id)
-		if gErr != nil {
-			return gErr
-		}
-		if entity == nil {
-			return ErrNotFound
-		}
-		entity.ETagMD5 = wholeBodyMD5
-		entity.MultipartETag = args.CompositeETag
-		entity.ContentType = args.Opts.ContentType
-		entity.ContentEncoding = args.Opts.ContentEncoding
-		entity.ContentDisposition = args.Opts.ContentDisposition
-		if len(args.Opts.UserMetadata) > 0 {
-			entity.S3UserMetadata = append([]byte(nil), args.Opts.UserMetadata...)
-		} else {
-			entity.S3UserMetadata = nil
-		}
-		b.PutEntity(*entity)
+		b.PutEntity(entity)
+		b.PutChild(parentID, fileName, dirEntry)
+		b.PutFlatKey(mountName, mountRel, id)
 		b.PutMultipartUploadRecord(args.UploadID, MultipartUploadRecord{
 			FileID:        id,
 			CompositeETag: args.CompositeETag,
 			Bucket:        mountName,
-			Key:           strings.Join(parts[1:], "/"),
+			Key:           mountRel,
 			CompletedAt:   now,
 		})
 		return nil
 	}); err != nil {
 		return MultipartCompleteResult{}, err
+	}
+
+	// Cache invalidation mirrors what syncSingle does — without it
+	// stale path-cache entries can keep handing out the prior fileID
+	// after an overwrite that minted a new one (we don't here, but
+	// be defensive).
+	s.invalidateCacheByID(id)
+	if parentVP, vpErr := s.VirtualPath(parentID); vpErr == nil {
+		s.InvalidatePathCache(parentVP)
+		s.InvalidatePathCache(parentVP + "/" + fileName)
 	}
 
 	// Auto V1 + EventCreated mirroring the single-PUT path.

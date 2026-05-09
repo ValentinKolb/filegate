@@ -567,6 +567,97 @@ func TestCompleteMultipartUploadUnknownUploadID(t *testing.T) {
 	}
 }
 
+// TestCompleteMultipartUploadCleansStagingOnSuccess: after a
+// successful Complete, parts/ and complete.tmp are gone — only
+// the manifest survives for the idempotent-retry short-circuit.
+// Pre-fix the parts directory leaked permanently, doubling the
+// effective storage of every multipart upload.
+func TestCompleteMultipartUploadCleansStagingOnSuccess(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "obj.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "obj.bin", uploadID, 2, p2)
+
+	rec := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Complete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	mountAbs := lookupMountAbs(t, handler, mount)
+	stageDir := stageDirFor(mountAbs, uploadID)
+
+	// parts/ must be gone.
+	partsDir := stageDir + "/" + multipartPartsDirName
+	if _, err := os.Stat(partsDir); !os.IsNotExist(err) {
+		t.Errorf("parts dir should be removed after Complete, got err=%v", err)
+	}
+	// complete.tmp must be gone.
+	if _, err := os.Stat(stageDir + "/" + multipartCompleteTmp); !os.IsNotExist(err) {
+		t.Errorf("complete.tmp should be removed after Complete, got err=%v", err)
+	}
+	// Manifest must still exist (idempotent retry needs it).
+	got, err := readManifest(stageDir)
+	if err != nil {
+		t.Fatalf("manifest should remain after Complete: %v", err)
+	}
+	if got.Phase != phaseDone {
+		t.Errorf("manifest Phase=%q, want done", got.Phase)
+	}
+
+	// Idempotent retry still works (the phaseDone short-circuit reads
+	// the surviving manifest, not the deleted parts).
+	rec2 := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry after staging cleanup status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// TestUploadPartRejectedDuringCommit: once Complete starts (manifest
+// flipped to phase=committing), concurrent UploadPart for the same
+// uploadId must be rejected. Pre-fix UploadPart could overwrite a
+// part-file between Complete's validate and concat steps, breaking
+// the composite-ETag invariant.
+func TestUploadPartRejectedDuringCommit(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
+	uploadPart(t, handler, mount, "obj.bin", uploadID, 1, makePartBody(1, 5*1024*1024))
+
+	// Force the manifest into committing — exactly the state Complete
+	// installs before validating.
+	mountAbs := lookupMountAbs(t, handler, mount)
+	m, _ := readManifest(stageDirFor(mountAbs, uploadID))
+	m.Phase = phaseCommitting
+	if err := writeManifest(stageDirFor(mountAbs, uploadID), m); err != nil {
+		t.Fatalf("force committing manifest: %v", err)
+	}
+
+	body := []byte("racey")
+	url := fmt.Sprintf("/%s/obj.bin?partNumber=2&uploadId=%s", mount, uploadID)
+	req := httptest.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	req.Host = "example.com"
+	signRequestPayload(req, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("UploadPart accepted while phase=committing — race not closed")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("UploadPart during committing status=%d, want 400 InvalidRequest", rec.Code)
+	}
+}
+
 // TestRecoverCommittingManifestNoRecord: a manifest in phase=committing
 // with no durable record is left untouched (the client will retry
 // Complete to redrive the install).

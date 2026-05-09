@@ -109,6 +109,21 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Mark phase=committing FIRST — before validation and concat.
+	// handleUploadPart rejects parts when phase != in_progress, so
+	// flipping the phase here closes the race where a concurrent
+	// (or retried) UploadPart could overwrite a part file between
+	// our validation and the concat-stream open. Persisting this
+	// before doing any expensive work also gives the recovery sweep
+	// something to find if we crash mid-validate.
+	if manifest.Phase == phaseInProgress {
+		manifest.Phase = phaseCommitting
+		if err := writeManifest(loc.StageDir, manifest); err != nil {
+			writeError(w, r, errInternalError, "could not write committing manifest", withBucket(bucket), withKey(key))
+			return
+		}
+	}
+
 	// Validate the parts list against the manifest.
 	validatedParts, validateErr := validateCompleteParts(req.Parts, manifest)
 	if validateErr != nil {
@@ -125,10 +140,9 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Mark phase=committing so a crash mid-install is recoverable.
-	// We persist the composite ETag here so recovery can verify the
-	// installed bytes match if the rename did succeed.
-	manifest.Phase = phaseCommitting
+	// Persist the composite ETag now so a crash before the durable
+	// commit lets recovery verify (or surface) what would have been
+	// installed.
 	manifest.CompositeETag = composite
 	if err := writeManifest(loc.StageDir, manifest); err != nil {
 		_ = os.Remove(completeTmp)
@@ -189,6 +203,14 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		// record. Log and move on; recovery will reconcile.
 		fmt.Printf("[filegate-s3] CompleteMultipartUpload: post-commit manifest write failed: %s\n", err)
 	}
+
+	// Drop the parts/ directory and the assembled complete.tmp now
+	// that the durable commit has landed. The manifest stays so a
+	// retried Complete (until retention sweeps the manifest) can
+	// short-circuit via the phaseDone branch — the Pebble record is
+	// authoritative; the manifest just lets ListMultipartUploads /
+	// retry-Complete answer without a Pebble lookup.
+	cleanupCompletedStaging(loc.StageDir)
 
 	// Build the response.
 	res := completeMultipartUploadResult{
@@ -330,6 +352,24 @@ func writeCompleteResultFromManifest(w http.ResponseWriter, r *http.Request, buc
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, xml.Header)
 	_ = xml.NewEncoder(w).Encode(res)
+}
+
+// cleanupCompletedStaging removes the bulky staging artifacts of a
+// finished multipart upload (parts/ and complete.tmp) while leaving
+// the manifest in place. The manifest is small and serves the
+// idempotent-retry short-circuit; a future cleanup loop deletes
+// done manifests + the durable Pebble record after the retention
+// window. Errors are logged but don't fail the request — the bytes
+// are already durable in Pebble.
+func cleanupCompletedStaging(stageDir string) {
+	partsDir := filepath.Join(stageDir, multipartPartsDirName)
+	if err := os.RemoveAll(partsDir); err != nil {
+		fmt.Printf("[filegate-s3] CompleteMultipartUpload: remove parts dir %s: %s\n", partsDir, err)
+	}
+	completeTmp := filepath.Join(stageDir, multipartCompleteTmp)
+	if err := os.Remove(completeTmp); err != nil && !os.IsNotExist(err) {
+		fmt.Printf("[filegate-s3] CompleteMultipartUpload: remove complete.tmp %s: %s\n", completeTmp, err)
+	}
 }
 
 // locationFor synthesizes the Location header value AWS clients
