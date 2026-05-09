@@ -204,6 +204,42 @@ func (s *Service) WriteObjectS3(virtualPath string, body io.Reader, opts S3Write
 	return created, true, nil
 }
 
+// S3MetadataView is the S3-only metadata an S3 adapter needs to
+// render GET/HEAD responses. Returned by GetS3Metadata. Empty
+// strings / nil slices mean "field wasn't set" — the adapter
+// translates those to "header omitted".
+type S3MetadataView struct {
+	ContentType        string
+	ContentEncoding    string
+	ContentDisposition string
+	UserMetadata       []byte // serialized x-amz-meta-* blob
+	MultipartETag      string // composite ETag for multipart-uploaded files
+}
+
+// GetS3Metadata returns the S3-only extension fields stored on the
+// entity. Returns ErrNotFound when the entity doesn't exist. The
+// REST API doesn't surface these fields; the S3 adapter is the only
+// expected caller. ETag (single-MD5) is on FileMeta — use GetFile
+// for that. ETag selection rule (multipart vs single) is the
+// caller's job: prefer MultipartETag when set, fall back to
+// FileMeta.ETag.
+func (s *Service) GetS3Metadata(id FileID) (*S3MetadataView, error) {
+	entity, err := s.idx.GetEntity(id)
+	if err != nil {
+		return nil, err
+	}
+	if entity == nil {
+		return nil, ErrNotFound
+	}
+	return &S3MetadataView{
+		ContentType:        entity.ContentType,
+		ContentEncoding:    entity.ContentEncoding,
+		ContentDisposition: entity.ContentDisposition,
+		UserMetadata:       entity.S3UserMetadata,
+		MultipartETag:      entity.MultipartETag,
+	}, nil
+}
+
 // syncSingleAfterS3Write is the S3-write counterpart of
 // syncSingleAfterLocalWrite: same atomic syncSingle, but the
 // follow-up PutEntity SETS the S3-only metadata fields from opts

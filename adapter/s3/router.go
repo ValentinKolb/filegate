@@ -147,16 +147,23 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, _ *sig
 	}
 }
 
-// handleObjectOp dispatches single-object methods. M1 push 1 stubs
-// these; push 2 wires them to the M0-built domain entry points.
-func (r *router) handleObjectOp(w http.ResponseWriter, req *http.Request, _ *sigV4Result, bucket, key string) {
+// handleObjectOp dispatches single-object methods to the per-method
+// handlers in object.go. The bucket-existence check happens first so
+// every handler can assume the bucket is real.
+func (r *router) handleObjectOp(w http.ResponseWriter, req *http.Request, verified *sigV4Result, bucket, key string) {
 	if !r.bucketExists(bucket) {
 		writeError(w, req, errNoSuchBucket, "bucket does not exist", withBucket(bucket), withKey(key))
 		return
 	}
 	switch req.Method {
-	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete:
-		writeError(w, req, errNotImplemented, "object operations land in M1 push 2")
+	case http.MethodGet:
+		r.handleGetObject(w, req, verified, bucket, key)
+	case http.MethodHead:
+		r.handleHeadObject(w, req, verified, bucket, key)
+	case http.MethodPut:
+		r.handlePutObject(w, req, verified, bucket, key)
+	case http.MethodDelete:
+		r.handleDeleteObject(w, req, verified, bucket, key)
 	default:
 		writeError(w, req, errMethodNotAllowed, "method not supported")
 	}
