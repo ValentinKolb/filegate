@@ -41,6 +41,16 @@ func newDaemonServeCmd() *cobra.Command {
 				return err
 			}
 
+			// Probe every mount before opening the index. Catches
+			// the operator who mounted ext4 without user_xattr,
+			// who pointed at a read-only path, or whose mount
+			// silently dropped to disk-full overnight. Failing here
+			// is way better than failing on the first PUT, when
+			// the symptom is a confusing 500 to a real client.
+			if err := checkMountsHealthOrFail(cfg.Storage.BasePaths); err != nil {
+				return err
+			}
+
 			idx, svc, err := buildCore(cfg)
 			if err != nil {
 				return err
