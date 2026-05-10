@@ -58,10 +58,14 @@ func CheckMountHealth(path string) MountHealth {
 		return h
 	}
 
-	// Probe writability + xattr in a sibling dir so we never
-	// touch user data.
-	probeDir := filepath.Join(path, ".fg-healthcheck")
-	if err := os.MkdirAll(probeDir, 0o755); err != nil {
+	// Probe writability + xattr in a unique-named temp dir so we
+	// never touch user data. CRITICAL: do NOT use a fixed name
+	// like ".fg-healthcheck" — if the user happens to have a
+	// directory by that name (it's not reserved by filegate), the
+	// deferred RemoveAll would wipe their data on every restart.
+	// MkdirTemp gives us a unique path the probe creates and owns.
+	probeDir, err := os.MkdirTemp(path, ".fg-healthcheck-*")
+	if err != nil {
 		h.Errors = append(h.Errors, fmt.Sprintf("mkdir probe dir: %s", err))
 		// can't continue without the probe dir — but try to
 		// surface free space anyway.
@@ -69,8 +73,9 @@ func CheckMountHealth(path string) MountHealth {
 		return h
 	}
 	defer func() {
-		// Best-effort cleanup. A cleanup failure isn't fatal; the
-		// next probe just reuses the dir.
+		// Best-effort cleanup. We created probeDir and only the
+		// probe writes inside it, so RemoveAll on this exact path
+		// only touches our artifacts.
 		_ = os.RemoveAll(probeDir)
 	}()
 

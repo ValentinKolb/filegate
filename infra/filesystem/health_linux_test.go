@@ -39,9 +39,15 @@ func TestCheckMountHealthHealthyDir(t *testing.T) {
 		t.Logf("statfs returned zero (host quirk): free=%d total=%d", h.FreeBytes, h.TotalBytes)
 	}
 
-	// Cleanup: probe dir must be gone after the call.
-	if _, err := os.Stat(filepath.Join(dir, ".fg-healthcheck")); !os.IsNotExist(err) {
-		t.Errorf(".fg-healthcheck dir was not cleaned up, err=%v", err)
+	// Cleanup: NO probe dir (.fg-healthcheck-*) must remain.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir post-probe: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".fg-healthcheck-") {
+			t.Errorf("probe dir %q was not cleaned up", e.Name())
+		}
 	}
 }
 
@@ -124,8 +130,8 @@ func TestCheckMountsHealthMixed(t *testing.T) {
 }
 
 // TestCheckMountHealthCleansUpOnFailure: even when the xattr
-// probe fails, the .fg-healthcheck dir is removed afterwards.
-// A regression that leaks the probe dir would show up here.
+// probe fails, the probe dir is removed afterwards. A regression
+// that leaks the probe dir would show up here.
 func TestCheckMountHealthCleansUpOnFailure(t *testing.T) {
 	// We can't easily simulate xattr-not-supported on a Linux
 	// tmp dir, so this test just verifies cleanup happens on
@@ -133,7 +139,48 @@ func TestCheckMountHealthCleansUpOnFailure(t *testing.T) {
 	// code path either way.
 	dir := t.TempDir()
 	_ = CheckMountHealth(dir)
-	if _, err := os.Stat(filepath.Join(dir, ".fg-healthcheck")); !os.IsNotExist(err) {
-		t.Errorf(".fg-healthcheck not cleaned up on healthy probe, err=%v", err)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir post-probe: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".fg-healthcheck-") {
+			t.Errorf("probe dir %q not cleaned up on healthy probe", e.Name())
+		}
+	}
+}
+
+// TestCheckMountHealthDoesNotTouchUserOwnedFgHealthcheck pins the
+// codex-flagged data-loss invariant: a user-created
+// ".fg-healthcheck" directory in the mount MUST survive a probe.
+// Pre-fix the deferred RemoveAll wiped any directory matching
+// the literal probe name. Post-fix the probe uses MkdirTemp so
+// it only touches paths it created.
+func TestCheckMountHealthDoesNotTouchUserOwnedFgHealthcheck(t *testing.T) {
+	dir := t.TempDir()
+	userDir := filepath.Join(dir, ".fg-healthcheck") // exact pre-fix name
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatalf("setup user dir: %v", err)
+	}
+	canary := filepath.Join(userDir, "irreplaceable-user-data.txt")
+	if err := os.WriteFile(canary, []byte("never delete me"), 0o644); err != nil {
+		t.Fatalf("write canary: %v", err)
+	}
+
+	// Run the probe — the deferred cleanup must NOT touch userDir.
+	_ = CheckMountHealth(dir)
+
+	if _, err := os.Stat(userDir); err != nil {
+		t.Fatalf("user-created .fg-healthcheck dir was deleted by probe: %v", err)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Fatalf("canary file was deleted by probe: %v", err)
+	}
+	got, err := os.ReadFile(canary)
+	if err != nil {
+		t.Fatalf("read canary: %v", err)
+	}
+	if string(got) != "never delete me" {
+		t.Errorf("canary content modified: %q", got)
 	}
 }
