@@ -514,6 +514,39 @@ func TestCopyObjectSelfReplaceAdvancesLastModified(t *testing.T) {
 	}
 }
 
+// TestCopyObjectRejectsNoOpSelfCopy pins the AWS-spec rule that a
+// self-copy (same src + same dst) with metadata-directive=COPY is
+// InvalidRequest. Without the guard, clients that send the no-op
+// call (bug or stale config) get a silent success that masks their
+// problem. The valid in-place metadata-update flow uses
+// directive=REPLACE — covered by TestCopyObjectSelfReplaceMetadata.
+func TestCopyObjectRejectsNoOpSelfCopy(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	putForTest(t, handler, mount, "obj.txt", []byte("hello"))
+
+	// COPY directive (default) on a self-copy → 400 InvalidRequest.
+	rec := copyObject(t, handler, mount, "obj.txt", mount, "obj.txt", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("self-copy with COPY directive status=%d, want 400 InvalidRequest", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "InvalidRequest") {
+		t.Errorf("body should mention InvalidRequest, got %s", rec.Body.String())
+	}
+
+	// REPLACE on the same self-copy is still allowed (covered more
+	// fully by TestCopyObjectSelfReplaceMetadata) — this is just a
+	// sanity check that the guard is COPY-specific.
+	rec = copyObject(t, handler, mount, "obj.txt", mount, "obj.txt", map[string]string{
+		"x-amz-metadata-directive": "REPLACE",
+		"Content-Type":             "text/x-keep-alive",
+	})
+	if rec.Code != http.StatusOK {
+		t.Errorf("self-copy REPLACE status=%d, want 200", rec.Code)
+	}
+}
+
 // TestCopyObjectRejectsUnknownDirective: a directive other than
 // COPY or REPLACE is invalid. Catches typos like "MERGE".
 func TestCopyObjectRejectsUnknownDirective(t *testing.T) {

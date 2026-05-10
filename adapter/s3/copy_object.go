@@ -68,6 +68,20 @@ func (rt *router) handleCopyObject(w http.ResponseWriter, r *http.Request, verif
 		return
 	}
 
+	// AWS-spec rule: a CopyObject that names the SAME source and
+	// destination AND uses metadata-directive=COPY is rejected as
+	// InvalidRequest. Without this guard, the call is a guaranteed
+	// no-op (no bytes change, no metadata changes) — clients that
+	// send it have either a bug or a broken assumption, so failing
+	// loudly is the friendlier behavior. The valid in-place
+	// metadata-update workflow uses metadata-directive=REPLACE,
+	// which is allowed and exercised by the existing self-copy
+	// REPLACE tests.
+	if srcBucket == destBucket && srcKey == destKey && directive == "COPY" {
+		writeError(w, r, errInvalidRequest, "self-copy requires metadata-directive=REPLACE (otherwise the call is a no-op)", withBucket(destBucket), withKey(destKey))
+		return
+	}
+
 	// REPLACE pulls metadata from the request headers (same builder
 	// used by PutObject). COPY ignores DestOpts entirely; we still
 	// build a zero-value struct to keep the API symmetric.

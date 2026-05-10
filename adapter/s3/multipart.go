@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -28,6 +29,25 @@ func (rt *router) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 		writeError(w, r, errInvalidArgument, err.Error(), withBucket(bucket), withKey(key))
 		return
 	}
+
+	// Enforce the same 2 KiB user-metadata budget the single-PUT
+	// path enforces. Without this, clients could smuggle arbitrarily
+	// large x-amz-meta-* blobs through CreateMultipartUpload —
+	// inconsistent with PutObject and an unbounded resource cost on
+	// the manifest.
+	userMeta := collectUserMetadata(r)
+	if len(userMeta) > 0 {
+		blob, jerr := json.Marshal(userMeta)
+		if jerr != nil {
+			writeError(w, r, errInvalidArgument, "could not encode x-amz-meta-* headers: "+jerr.Error(), withBucket(bucket), withKey(key))
+			return
+		}
+		if len(blob) > userMetadataMaxBytes {
+			writeError(w, r, errInvalidArgument, "x-amz-meta-* headers exceed 2 KiB user-metadata budget", withBucket(bucket), withKey(key))
+			return
+		}
+	}
+
 	uploadID, err := generateUploadID()
 	if err != nil {
 		writeError(w, r, errInternalError, "could not generate uploadId", withBucket(bucket), withKey(key))
@@ -49,7 +69,7 @@ func (rt *router) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 		ContentType:        r.Header.Get("Content-Type"),
 		ContentEncoding:    r.Header.Get("Content-Encoding"),
 		ContentDisposition: r.Header.Get("Content-Disposition"),
-		UserMetadata:       collectUserMetadata(r),
+		UserMetadata:       userMeta,
 		Parts:              map[int]multipartPart{},
 		Phase:              phaseInProgress,
 	}

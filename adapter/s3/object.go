@@ -331,6 +331,12 @@ func (rt *router) handleDeleteObject(w http.ResponseWriter, r *http.Request, ver
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// userMetadataMaxBytes is the AWS-spec ceiling on the total
+// x-amz-meta-* user-metadata blob (2 KiB after JSON encoding).
+// Both single-PUT and CreateMultipartUpload enforce it so the
+// budget is consistent across the two write paths.
+const userMetadataMaxBytes = 2 * 1024
+
 // validateObjectKey rejects keys outside the M0-declared S3-key
 // compatibility subset. This is the wire-side check; domain layer
 // enforces filesystem-side rules separately. Keys MUST be valid
@@ -423,7 +429,7 @@ func buildS3WriteOptions(r *http.Request) (domain.S3WriteOptions, *sigV4VerifyEr
 		if err != nil {
 			return opts, sigErr(errInvalidArgument, "could not encode x-amz-meta-* headers: %s", err)
 		}
-		if len(blob) > 2*1024 {
+		if len(blob) > userMetadataMaxBytes {
 			return opts, sigErr(errInvalidArgument, "x-amz-meta-* headers exceed 2 KiB user-metadata budget")
 		}
 		opts.UserMetadata = blob

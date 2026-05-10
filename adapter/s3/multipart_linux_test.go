@@ -720,6 +720,45 @@ func TestMultipartETagSurvivesDetectorResync(t *testing.T) {
 	}
 }
 
+// TestCreateMultipartUploadEnforcesUserMetadataBudget pins parity
+// with the single-PUT path: x-amz-meta-* headers exceeding the
+// 2 KiB JSON-encoded budget are rejected at CreateMultipartUpload
+// time. Without this, a client could smuggle arbitrarily large
+// metadata blobs through the multipart path — inconsistent with
+// PutObject and a resource-cost foothold on the manifest.
+func TestCreateMultipartUploadEnforcesUserMetadataBudget(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// At-budget: pad value sized so the JSON-encoded blob is
+	// just under the 2 KiB cap.
+	okPad := strings.Repeat("a", 1900)
+	req := httptest.NewRequest(http.MethodPost, "/"+mount+"/ok-mp.bin?uploads", nil)
+	req.Host = "example.com"
+	req.Header.Set("x-amz-meta-pad", okPad)
+	signRequestPayload(req, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("at-budget metadata multipart create status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Over-budget: pad large enough to push JSON over 2 KiB.
+	bigPad := strings.Repeat("a", 4000)
+	req2 := httptest.NewRequest(http.MethodPost, "/"+mount+"/over-mp.bin?uploads", nil)
+	req2.Host = "example.com"
+	req2.Header.Set("x-amz-meta-pad", bigPad)
+	signRequestPayload(req2, nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("over-budget metadata multipart create status=%d, want 400 InvalidArgument", rec2.Code)
+	}
+	if !strings.Contains(rec2.Body.String(), "InvalidArgument") {
+		t.Errorf("body should mention InvalidArgument, got %s", rec2.Body.String())
+	}
+}
+
 // TestSyncSingleClearsETagOnInPlaceRewrite covers the rsync
 // --inplace -t edge case codex called out: an external tool that
 // rewrites file content in place AND restores the original mtime
