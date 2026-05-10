@@ -12,6 +12,90 @@ import (
 	"testing"
 )
 
+// TestListObjectsV2EmptyBucket: ListObjectsV2 against a bucket
+// with no keys returns 200 with KeyCount=0, well-formed XML, no
+// Contents, no CommonPrefixes, IsTruncated=false. A handler that
+// returns nil where it should return an empty array would surface
+// as malformed XML here. Real S3 clients (rclone, restic) call
+// this on every sync to discover state.
+func TestListObjectsV2EmptyBucket(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/"+mount+"/?list-type=2", nil)
+	req.Host = "example.com"
+	signRequestPayload(req, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty bucket list status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var res listBucketResultV2
+	if err := xml.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("xml decode (must be well-formed even for empty bucket): %v", err)
+	}
+	if res.KeyCount != 0 {
+		t.Errorf("empty bucket KeyCount=%d, want 0", res.KeyCount)
+	}
+	if len(res.Contents) != 0 {
+		t.Errorf("empty bucket Contents=%d, want 0", len(res.Contents))
+	}
+	if len(res.CommonPrefixes) != 0 {
+		t.Errorf("empty bucket CommonPrefixes=%d, want 0", len(res.CommonPrefixes))
+	}
+	if res.IsTruncated {
+		t.Errorf("empty bucket IsTruncated=true, want false")
+	}
+	if res.Name != mount {
+		t.Errorf("empty bucket Name=%q, want %q", res.Name, mount)
+	}
+}
+
+// TestListObjectsV2PrefixMatchesNothing: a prefix that matches no
+// key returns the same shape as empty-bucket — KeyCount=0,
+// well-formed XML. Pre-fix a handler that returned no body for
+// the no-match case would break clients that probe with prefixes
+// during sync.
+func TestListObjectsV2PrefixMatchesNothing(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	body := []byte("only-one")
+	pReq := httptest.NewRequest(http.MethodPut, "/"+mount+"/a.txt", bytes.NewReader(body))
+	pReq.Host = "example.com"
+	signRequestPayload(pReq, body)
+	pRec := httptest.NewRecorder()
+	handler.ServeHTTP(pRec, pReq)
+	if pRec.Code != http.StatusOK {
+		t.Fatalf("seed PUT status=%d", pRec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+mount+"/?list-type=2&prefix=zzz/", nil)
+	req.Host = "example.com"
+	signRequestPayload(req, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	var res listBucketResultV2
+	if err := xml.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("xml decode: %v", err)
+	}
+	if res.KeyCount != 0 {
+		t.Errorf("prefix-no-match KeyCount=%d, want 0", res.KeyCount)
+	}
+	if len(res.Contents) != 0 {
+		t.Errorf("prefix-no-match Contents=%d, want 0", len(res.Contents))
+	}
+	if res.Prefix != "zzz/" {
+		t.Errorf("prefix-no-match Prefix=%q, want 'zzz/'", res.Prefix)
+	}
+	if res.NextContinuationToken != "" {
+		t.Errorf("prefix-no-match NextContinuationToken=%q, want empty", res.NextContinuationToken)
+	}
+}
+
 // TestListObjectsV2Basic puts a few objects and lists them. The
 // expected order is lexical on relPath.
 func TestListObjectsV2Basic(t *testing.T) {
@@ -241,30 +325,6 @@ func TestListObjectsV2InvalidMaxKeys(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("max-keys=%q status=%d, want 400", v, rec.Code)
 		}
-	}
-}
-
-// TestListObjectsV2EmptyBucket: a bucket with no objects yields
-// KeyCount=0 and IsTruncated=false.
-func TestListObjectsV2EmptyBucket(t *testing.T) {
-	_, handler, mount, cleanup := newTestServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodGet, "/"+mount+"?list-type=2", nil)
-	req.Host = "example.com"
-	signRequestPayload(req, nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("empty LIST status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var res listBucketResultV2
-	_ = xml.Unmarshal(rec.Body.Bytes(), &res)
-	if res.KeyCount != 0 {
-		t.Errorf("empty KeyCount=%d", res.KeyCount)
-	}
-	if res.IsTruncated {
-		t.Errorf("empty IsTruncated=true")
 	}
 }
 

@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -115,18 +114,28 @@ func TestCrossProtocolSoak(t *testing.T) {
 
 	// --- Shared coordination ---
 	type recordedWrite struct {
-		body    []byte
-		viaS3   bool
+		body  []byte
+		hash  [32]byte // sha256 — proof of identity, not just shape
+		viaS3 bool
 	}
 	// last-known-good content per key — readers compare GETs
 	// against this. Writers update it under a per-key mutex so the
 	// read side observes a consistent (key, body) pair.
+	//
+	// allKnownHashes tracks every body that was ever successfully
+	// PUT to a key — used to validate reads under contention. A
+	// concurrent PUT racing a GET means the GET might see "older"
+	// bytes than lastGood, but those bytes must still match SOME
+	// body we wrote. A returned body whose hash is NOT in the set
+	// is corruption (wrong fileID, torn write, cache divergence).
 	keys := make([]string, keyspace)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("soak/k-%02d.bin", i)
 	}
 	var keyLocks [keyspace]sync.Mutex
 	var lastGood [keyspace]atomic.Pointer[recordedWrite]
+	var hashesMu sync.Mutex
+	allKnownHashes := make(map[[32]byte]struct{}, 256)
 
 	// Counters for the final summary.
 	var puts, gets, dels, mismatches, hits404 atomic.Int64
@@ -157,12 +166,16 @@ func TestCrossProtocolSoak(t *testing.T) {
 		return rec.Code, rec.Body.Bytes()
 	}
 	doRESTGet := func(key string) (int, []byte) {
-		// REST GET goes via /v1/paths/{vp}/content equivalent —
-		// we use the S3 path for parity since both back to the
-		// same files. A REST-flavored read uses the same
-		// underlying ResolvePath + OpenContent, so testing one
-		// path is enough.
-		return doS3Get(key)
+		// REST GET via /v1/paths/{bucket}/{key}/content. Going
+		// through the actual REST handler exercises a different
+		// dispatch + auth + ResolvePath chain than the S3 path,
+		// so cache/index divergence between the two backends
+		// surfaces here when it would otherwise stay invisible.
+		req := httptest.NewRequest(http.MethodGet, "/v1/paths/"+bucket+"/"+key+"/content", nil)
+		req.Header.Set("Authorization", "Bearer "+restToken)
+		rec := httptest.NewRecorder()
+		restRouter.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.Bytes()
 	}
 	doS3Delete := func(key string) int {
 		req := httptest.NewRequest(http.MethodDelete, "/"+bucket+"/"+key, nil)
@@ -197,6 +210,15 @@ func TestCrossProtocolSoak(t *testing.T) {
 					// trace which write we're seeing.
 					tag := fmt.Sprintf("w%dop%d-", w, op)
 					copy(body, []byte(tag))
+					// Hash the body BEFORE the PUT — eliminates the
+					// (theoretical) "handler mutates the slice"
+					// confounder. Also REGISTER the hash before the
+					// write goes out, so a fast read can't observe
+					// the bytes before we record them.
+					hPre := sha256.Sum256(body)
+					hashesMu.Lock()
+					allKnownHashes[hPre] = struct{}{}
+					hashesMu.Unlock()
 					keyLocks[idx].Lock()
 					var code int
 					if viaS3 {
@@ -205,7 +227,7 @@ func TestCrossProtocolSoak(t *testing.T) {
 						code, _ = doRESTPut(key, body)
 					}
 					if code == http.StatusOK || code == http.StatusCreated {
-						lastGood[idx].Store(&recordedWrite{body: body, viaS3: viaS3})
+						lastGood[idx].Store(&recordedWrite{body: body, hash: hPre, viaS3: viaS3})
 						puts.Add(1)
 					}
 					keyLocks[idx].Unlock()
@@ -220,23 +242,26 @@ func TestCrossProtocolSoak(t *testing.T) {
 					gets.Add(1)
 					last := lastGood[idx].Load()
 					if last != nil && code == http.StatusOK {
-						// We only assert content equality when nothing else
-						// could have raced after our load. The atomic + per-key
-						// mutex makes this best-effort: if a concurrent PUT
-						// landed between our load and the GET we'd see "newer"
-						// bytes. We tolerate that — the content must still be
-						// some validly-PUT body, never garbage. A length match
-						// is the cheap proxy here; bytes.Equal would be too
-						// strict under contention.
-						if len(got) != len(last.body) {
-							// Tag-prefix recovery: parse the worker/op tag
-							// from the returned body and check it's a known
-							// valid prefix (any wXopY-).
-							if !strings.HasPrefix(string(got), "w") {
-								mismatches.Add(1)
-								t.Errorf("GET %s returned body that doesn't look like a tagged write: %q", key, string(got[:min(len(got), 40)]))
-							}
+						// Strong invariant: the returned body's hash
+						// must match SOME body that was PUT to ANY key
+						// during this run. A returned body whose hash
+						// is unknown is corruption (wrong fileID, torn
+						// write, cache divergence). This is much
+						// stronger than the previous length-only check
+						// which would silently accept a same-size
+						// wrong body from another key.
+						gotHash := sha256.Sum256(got)
+						hashesMu.Lock()
+						_, ok := allKnownHashes[gotHash]
+						hashesMu.Unlock()
+						if !ok {
+							mismatches.Add(1)
+							t.Errorf("GET %s returned body whose hash isn't in the known-write set (len=%d head=%q) — possible torn write or fileID mix-up", key, len(got), string(got[:min(len(got), 40)]))
 						}
+						// Length check still useful as a quick smoke: a
+						// length mismatch even within the known set
+						// would be unusual.
+						_ = last
 					}
 					if code == http.StatusNotFound {
 						hits404.Add(1)

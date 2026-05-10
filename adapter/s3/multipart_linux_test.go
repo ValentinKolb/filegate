@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -720,6 +721,186 @@ func TestMultipartETagSurvivesDetectorResync(t *testing.T) {
 	}
 }
 
+// TestConditionalWriteAgainstMultipartETag pins the contract that
+// If-Match / If-None-Match on PUT and DELETE compare against the
+// CURRENT effective ETag of the target — which is the COMPOSITE
+// ETag for a multipart-uploaded object. A client that does HEAD,
+// gets the composite ETag back, and sends If-Match with that
+// value must be allowed to overwrite or delete; a client sending
+// the underlying whole-body MD5 must be rejected.
+//
+// The bug class this catches: conditional logic that compares
+// against the wrong ETag form (whole-body MD5 vs composite). A
+// regression here would make multipart-uploaded objects
+// effectively un-overwritable via conditional clients.
+func TestConditionalWriteAgainstMultipartETag(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Seed a multipart-uploaded object.
+	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "obj.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "obj.bin", uploadID, 2, p2)
+	rec := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed Complete status=%d", rec.Code)
+	}
+
+	// HEAD to discover the composite ETag we expose to clients.
+	hReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/obj.bin", nil)
+	hReq.Host = "example.com"
+	signRequestPayload(hReq, nil)
+	hRec := httptest.NewRecorder()
+	handler.ServeHTTP(hRec, hReq)
+	composite := strings.Trim(hRec.Header().Get("ETag"), `"`)
+	if !strings.Contains(composite, "-") {
+		t.Fatalf("composite ETag has no -N suffix: %q", composite)
+	}
+
+	// Compute the underlying whole-body MD5 (what an internal
+	// observer might think the ETag is).
+	wholeBody := append(append([]byte{}, p1...), p2...)
+	wholeMD5sum := md5.Sum(wholeBody)
+	wholeMD5 := hex.EncodeToString(wholeMD5sum[:])
+
+	// PUT with If-Match: <composite> should SUCCEED.
+	body := []byte("conditional overwrite via composite")
+	pReq := httptest.NewRequest(http.MethodPut, "/"+mount+"/obj.bin", bytes.NewReader(body))
+	pReq.Host = "example.com"
+	pReq.Header.Set("If-Match", `"`+composite+`"`)
+	signRequestPayload(pReq, body)
+	pRec := httptest.NewRecorder()
+	handler.ServeHTTP(pRec, pReq)
+	if pRec.Code != http.StatusOK {
+		t.Errorf("PUT If-Match: <composite> status=%d, want 200; body=%s", pRec.Code, pRec.Body.String())
+	}
+
+	// Re-seed the multipart object (the previous PUT replaced it).
+	uploadID2 := initMultipart(t, handler, mount, "obj.bin", nil)
+	e1 = uploadPart(t, handler, mount, "obj.bin", uploadID2, 1, p1)
+	e2 = uploadPart(t, handler, mount, "obj.bin", uploadID2, 2, p2)
+	rec = completeMultipart(t, handler, mount, "obj.bin", uploadID2, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-seed Complete status=%d", rec.Code)
+	}
+
+	// PUT with If-Match: <wholeMD5> should FAIL with 412 — the
+	// effective ETag is the composite, not the whole-body MD5.
+	pReq2 := httptest.NewRequest(http.MethodPut, "/"+mount+"/obj.bin", bytes.NewReader(body))
+	pReq2.Host = "example.com"
+	pReq2.Header.Set("If-Match", `"`+wholeMD5+`"`)
+	signRequestPayload(pReq2, body)
+	pRec2 := httptest.NewRecorder()
+	handler.ServeHTTP(pRec2, pReq2)
+	if pRec2.Code != http.StatusPreconditionFailed {
+		t.Errorf("PUT If-Match: <whole-MD5> status=%d, want 412 (effective ETag is composite)", pRec2.Code)
+	}
+}
+
+// TestCompleteOverExistingFullAssertion extends the existing
+// fileID-preservation test with byte/ETag/listing assertions.
+// Pre-fix the test only confirmed the fileID was preserved; an
+// overwrite that kept the ID but failed to install new bytes or
+// metadata would have passed. This pins the full overwrite
+// contract.
+func TestCompleteOverExistingFullAssertion(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Seed via single-PUT with old bytes + old metadata.
+	oldBody := []byte("OLD CONTENT — should be replaced")
+	oldReq := httptest.NewRequest(http.MethodPut, "/"+mount+"/over.bin", bytes.NewReader(oldBody))
+	oldReq.Host = "example.com"
+	oldReq.Header.Set("Content-Type", "text/x-old")
+	oldReq.Header.Set("x-amz-meta-source", "single-put")
+	signRequestPayload(oldReq, oldBody)
+	oldRec := httptest.NewRecorder()
+	handler.ServeHTTP(oldRec, oldReq)
+	if oldRec.Code != http.StatusOK {
+		t.Fatalf("seed PUT status=%d", oldRec.Code)
+	}
+
+	// Multipart-overwrite with new bytes + new metadata.
+	uploadID := initMultipart(t, handler, mount, "over.bin", map[string]string{
+		"Content-Type":      "text/x-new",
+		"x-amz-meta-source": "multipart",
+	})
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "over.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "over.bin", uploadID, 2, p2)
+	cRec := completeMultipart(t, handler, mount, "over.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if cRec.Code != http.StatusOK {
+		t.Fatalf("Complete overwrite status=%d", cRec.Code)
+	}
+	var cRes completeMultipartUploadResult
+	_ = xml.Unmarshal(cRec.Body.Bytes(), &cRes)
+	composite := strings.Trim(cRes.ETag, `"`)
+
+	// HEAD: ETag must be composite, Content-Type + meta must be
+	// the new values, size must be parts size.
+	hReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/over.bin", nil)
+	hReq.Host = "example.com"
+	signRequestPayload(hReq, nil)
+	hRec := httptest.NewRecorder()
+	handler.ServeHTTP(hRec, hReq)
+	if got := strings.Trim(hRec.Header().Get("ETag"), `"`); got != composite {
+		t.Errorf("HEAD ETag=%q, want composite %q", got, composite)
+	}
+	if got := hRec.Header().Get("Content-Type"); got != "text/x-new" {
+		t.Errorf("HEAD Content-Type=%q, want text/x-new (was text/x-old)", got)
+	}
+	if got := getMetaHeader(hRec.Header(), "x-amz-meta-source"); got != "multipart" {
+		t.Errorf("HEAD x-amz-meta-source=%q, want 'multipart' (was 'single-put')", got)
+	}
+	wantSize := int64(len(p1) + len(p2))
+	if got, _ := strconv.ParseInt(hRec.Header().Get("Content-Length"), 10, 64); got != wantSize {
+		t.Errorf("HEAD Content-Length=%d, want %d", got, wantSize)
+	}
+
+	// GET: body must be the multipart bytes, byte-for-byte.
+	gReq := httptest.NewRequest(http.MethodGet, "/"+mount+"/over.bin", nil)
+	gReq.Host = "example.com"
+	signRequestPayload(gReq, nil)
+	gRec := httptest.NewRecorder()
+	handler.ServeHTTP(gRec, gReq)
+	wantBody := append(append([]byte{}, p1...), p2...)
+	if !bytes.Equal(gRec.Body.Bytes(), wantBody) {
+		t.Errorf("GET body length=%d, want %d (full multipart payload)", gRec.Body.Len(), len(wantBody))
+	}
+
+	// ListObjectsV2: entry must show the new size + composite ETag.
+	lReq := httptest.NewRequest(http.MethodGet, "/"+mount+"/?list-type=2&prefix=over.bin", nil)
+	lReq.Host = "example.com"
+	signRequestPayload(lReq, nil)
+	lRec := httptest.NewRecorder()
+	handler.ServeHTTP(lRec, lReq)
+	var lRes listBucketResultV2
+	if err := xml.Unmarshal(lRec.Body.Bytes(), &lRes); err != nil {
+		t.Fatalf("list decode: %v", err)
+	}
+	if len(lRes.Contents) != 1 {
+		t.Fatalf("ListObjectsV2 returned %d entries, want 1", len(lRes.Contents))
+	}
+	if lRes.Contents[0].Size != wantSize {
+		t.Errorf("ListObjectsV2 Size=%d, want %d", lRes.Contents[0].Size, wantSize)
+	}
+	if got := strings.Trim(lRes.Contents[0].ETag, `"`); got != composite {
+		t.Errorf("ListObjectsV2 ETag=%q, want composite %q", got, composite)
+	}
+}
+
 // TestCreateMultipartUploadEnforcesUserMetadataBudget pins parity
 // with the single-PUT path: x-amz-meta-* headers exceeding the
 // 2 KiB JSON-encoded budget are rejected at CreateMultipartUpload
@@ -818,6 +999,84 @@ func TestSyncSingleClearsETagOnInPlaceRewrite(t *testing.T) {
 	preETag := hex.EncodeToString(md5.New().Sum(body))
 	if gotETag == preETag {
 		t.Errorf("HEAD ETag=%q still matches pre-rewrite hash — in-place rewrite was not detected", gotETag)
+	}
+}
+
+// TestRecoveryViaNewHandlerProductionPath pins that
+// NewHandler runs the recovery sweep on construction — the
+// production restart code path. The pre-existing recovery tests
+// call recoverPendingMultipartUploads directly, which would still
+// PASS even if NewHandler forgot to invoke it. This test catches
+// that wiring regression.
+func TestRecoveryViaNewHandlerProductionPath(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	// Run a full multipart Complete to land a durable record.
+	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
+	p1 := makePartBody(1, 5*1024*1024)
+	p2 := makePartBody(2, 1024)
+	e1 := uploadPart(t, handler, mount, "obj.bin", uploadID, 1, p1)
+	e2 := uploadPart(t, handler, mount, "obj.bin", uploadID, 2, p2)
+	rec := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed Complete status=%d", rec.Code)
+	}
+
+	// Force the manifest back to phase=committing — simulating
+	// the crash window where the durable record was committed but
+	// the manifest write didn't land. Also clear the parts/ dir
+	// to simulate the cleanup having happened.
+	mountAbs := lookupMountAbs(t, handler, mount)
+	stageDir := stageDirFor(mountAbs, uploadID)
+	m, _ := readManifest(stageDir)
+	m.Phase = phaseCommitting
+	m.WholeBodyMD5 = ""
+	m.CompletedFileID = ""
+	m.CompletedAt = 0
+	if err := writeManifest(stageDir, m); err != nil {
+		t.Fatalf("force committing: %v", err)
+	}
+
+	// Construct a SECOND handler via NewHandler — this is the
+	// production restart code path. It must run the recovery
+	// sweep and reconcile the committing manifest to done.
+	handler2, err := NewHandler(svc, Options{
+		Region:    testRegion,
+		AccessKey: testAccessKey,
+		SecretKey: testSecretKey,
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// ListMultipartUploads must NOT show this upload as in-progress.
+	lReq := httptest.NewRequest(http.MethodGet, "/"+mount+"/?uploads", nil)
+	lReq.Host = "example.com"
+	signRequestPayload(lReq, nil)
+	lRec := httptest.NewRecorder()
+	handler2.ServeHTTP(lRec, lReq)
+	if lRec.Code != http.StatusOK {
+		t.Fatalf("ListMultipartUploads status=%d", lRec.Code)
+	}
+	var lRes listMultipartUploadsResult
+	_ = xml.Unmarshal(lRec.Body.Bytes(), &lRes)
+	for _, u := range lRes.Uploads {
+		if u.UploadID == uploadID {
+			t.Errorf("post-restart ListMultipartUploads still surfaces uploadId %s — recovery sweep didn't run via NewHandler", uploadID)
+		}
+	}
+
+	// Manifest on disk must now be phase=done.
+	m2, err := readManifest(stageDir)
+	if err != nil {
+		t.Fatalf("readManifest after recovery: %v", err)
+	}
+	if m2.Phase != phaseDone {
+		t.Errorf("manifest Phase=%q after NewHandler recovery, want done", m2.Phase)
 	}
 }
 
