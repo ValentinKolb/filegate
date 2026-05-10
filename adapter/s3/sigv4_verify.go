@@ -106,6 +106,47 @@ func verifyRequest(r *http.Request, cfg authConfig) (*sigV4Result, *sigV4VerifyE
 	return verifyHeaderMode(r, cfg, strings.TrimPrefix(auth, sigAlgorithm+" "))
 }
 
+// peekAccessKey extracts the access key from a request WITHOUT
+// running the full SigV4 verification. Used by the rate-limit
+// pre-check so a throttled key short-circuits the request before
+// the expensive body-binding step in verifyRequest. Returns "" if
+// the request has no parseable access key (which means
+// verifyRequest will reject it anyway, just a few microseconds
+// later).
+//
+// Trust model: the access key is NOT authenticated at this point
+// — anyone can spoof a request with any access key in the
+// Authorization header. The implication is that a throttled
+// key's bucket is consumable by anonymous traffic. That's an
+// acceptable trade-off: real S3 throttles before signature
+// verification too (you can't scale otherwise), and a key's
+// existence can already be probed cheaply via the InvalidAccessKey
+// vs. SignatureDoesNotMatch error split.
+func peekAccessKey(r *http.Request) string {
+	if v := r.URL.Query().Get("X-Amz-Credential"); v != "" {
+		if cred, err := parseCredential(v); err == nil {
+			return cred.AccessKey
+		}
+		return ""
+	}
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return ""
+	}
+	if !strings.HasPrefix(auth, sigAlgorithm+" ") {
+		return ""
+	}
+	credentialRaw, _, _, ok := splitAuthHeader(strings.TrimPrefix(auth, sigAlgorithm+" "))
+	if !ok {
+		return ""
+	}
+	cred, err := parseCredential(credentialRaw)
+	if err != nil {
+		return ""
+	}
+	return cred.AccessKey
+}
+
 // verifyHeaderMode handles the standard Authorization-header path.
 // The header value (after the algorithm prefix) is a comma-separated
 // list of three fields: Credential, SignedHeaders, Signature.

@@ -179,6 +179,15 @@ func buildKeyStore(opts Options, svc *domain.Service) (*keyStore, error) {
 		if _, dup := store.byAccessKey[k.AccessKey]; dup {
 			return nil, fmt.Errorf("s3: keys[%d]: access key %q is duplicated", i, k.AccessKey)
 		}
+		// Rate-limit sanity. 0 = unlimited, positive = throttle,
+		// negative = operator typo. Silently treating negative as
+		// unlimited would remove the intended limit without warning.
+		if k.RequestsPerSecond < 0 {
+			return nil, fmt.Errorf("s3: keys[%d]: requests_per_second must be >= 0 (0 disables throttling), got %d", i, k.RequestsPerSecond)
+		}
+		if k.Burst < 0 {
+			return nil, fmt.Errorf("s3: keys[%d]: burst must be >= 0, got %d", i, k.Burst)
+		}
 		all := false
 		set := map[string]struct{}{}
 		for _, b := range k.Buckets {
@@ -248,23 +257,26 @@ func (r *router) authorizeBucket(w http.ResponseWriter, req *http.Request, verif
 }
 
 func (r *router) serve(w http.ResponseWriter, req *http.Request) {
-	// Authenticate first. The verifier returns a sigV4Result whose
+	// Rate-limit BEFORE verifyRequest. verifyRequest binds (and
+	// for hex-mode signed bodies, reads) the request body, which
+	// we don't want to do for a throttled key — a flooded key
+	// would otherwise force per-request body buffering even after
+	// it should be paying nothing. The access-key extraction is
+	// a header-only parse; signature/body are still verified by
+	// verifyRequest below. See peekAccessKey for the trust-model
+	// rationale.
+	if accessKey := peekAccessKey(req); accessKey != "" && !r.limiter.allow(accessKey) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, req, errSlowDown, "request rate limit exceeded for this access key")
+		return
+	}
+
+	// Authenticate. The verifier returns a sigV4Result whose
 	// BodyReader is what handlers must read (might be a chunked
 	// decoder). Handlers MUST NOT read req.Body directly.
 	verified, sigErr := verifyRequest(req, r.auth)
 	if sigErr != nil {
 		writeError(w, req, sigErr.Code, sigErr.Message)
-		return
-	}
-
-	// Rate-limit AFTER auth so anonymous probes don't burn the
-	// budget of a real key, and BEFORE any work so a flooded key
-	// pays the cheapest possible price per rejected request. AWS
-	// uses 503 SlowDown for back-off; well-behaved SDKs (boto3,
-	// awscli, rclone) honour it with exponential backoff.
-	if !r.limiter.allow(verified.AccessKeyID) {
-		w.Header().Set("Retry-After", "1")
-		writeError(w, req, errSlowDown, "request rate limit exceeded for this access key")
 		return
 	}
 

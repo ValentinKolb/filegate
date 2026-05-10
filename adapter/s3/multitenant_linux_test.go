@@ -5,6 +5,7 @@ package s3
 import (
 	"bytes"
 	"crypto/sha256"
+	"io"
 	"encoding/hex"
 	"encoding/xml"
 	"net/http"
@@ -419,6 +420,104 @@ func TestRateLimitReturnsSlowDownAndRetryAfter(t *testing.T) {
 	}
 }
 
+// TestNewHandlerRejectsNegativeRPS pins startup validation:
+// requests_per_second < 0 is a typo, not a "disable" signal.
+// 0 is the documented disable value; negative would silently
+// remove the operator's intended limit. We fail loudly at
+// construction.
+func TestNewHandlerRejectsNegativeRPS(t *testing.T) {
+	baseDir := t.TempDir()
+	indexDir := t.TempDir()
+	idx, err := indexpebble.Open(indexDir, 16<<20)
+	if err != nil {
+		t.Fatalf("open index: %v", err)
+	}
+	defer idx.Close()
+	bus := eventbus.New()
+	defer bus.Close()
+	mountPath := baseDir + "/data"
+	_ = os.MkdirAll(mountPath, 0o755)
+	svc, err := domain.NewService(idx, filesystem.New(), bus, []string{mountPath}, 1000)
+	if err != nil {
+		t.Fatalf("svc: %v", err)
+	}
+
+	_, err = NewHandler(svc, Options{
+		Region: testRegion,
+		Keys: []KeyEntry{
+			{AccessKey: "AKIANEGATIVE00000001", SecretKey: "ok-secret-fillerfillerfillerfillerf",
+				Buckets: []string{"data"}, RequestsPerSecond: -1},
+		},
+	})
+	if err == nil {
+		t.Fatalf("negative RPS should have been rejected at construction")
+	}
+	if !strings.Contains(err.Error(), "requests_per_second") {
+		t.Errorf("error=%q, want mention of requests_per_second", err.Error())
+	}
+}
+
+// TestRateLimitFiresBeforeBodyBinding pins the codex-flagged
+// invariant: a throttled key's PUT must hit the SlowDown
+// response BEFORE verifyRequest reads the body. Otherwise a
+// flooded key still forces per-request body buffering even
+// though it should be paying nothing.
+//
+// We verify by sending a PUT with a body that would normally be
+// hex-SHA256-validated (forcing verifyRequest to pre-read it),
+// counting bytes consumed from the body reader. A throttled
+// SlowDown response means zero bytes consumed.
+func TestRateLimitFiresBeforeBodyBinding(t *testing.T) {
+	const (
+		access = "AKIAPRELIMITKEY00001"
+		secret = "secret-prelimit-fillerfillerfillerfille"
+	)
+	_, handler, cleanup := newMultiTenantTestServer(t, []KeyEntry{
+		{AccessKey: access, SecretKey: secret, Buckets: []string{"*"},
+			RequestsPerSecond: 1, Burst: 1},
+	})
+	defer cleanup()
+
+	// Drain the bucket with a cheap GET.
+	doGet := httptest.NewRequest(http.MethodGet, "/alpha?list-type=2", nil)
+	doGet.Host = "example.com"
+	signWithKey(doGet, nil, access, secret)
+	gRec := httptest.NewRecorder()
+	handler.ServeHTTP(gRec, doGet)
+	if gRec.Code == http.StatusServiceUnavailable {
+		t.Fatalf("burst GET throttled, want admitted")
+	}
+
+	// Now PUT a 1 MiB body with a counting reader. If rate-limit
+	// fires before body binding, the reader is never touched.
+	body := bytes.Repeat([]byte("x"), 1024*1024)
+	type countingReader struct {
+		src       *bytes.Reader
+		readCount int64
+	}
+	cr := &countingReader{src: bytes.NewReader(body)}
+	// Wrap in a closure-based reader so we can count.
+	read := func(p []byte) (int, error) {
+		n, err := cr.src.Read(p)
+		cr.readCount += int64(n)
+		return n, err
+	}
+
+	pReq := httptest.NewRequest(http.MethodPut, "/alpha/throttle-target.bin", io.NopCloser(readerFunc(read)))
+	pReq.Host = "example.com"
+	pReq.ContentLength = int64(len(body))
+	signWithKey(pReq, body, access, secret) // hex-SHA256 mode forces body verify
+	pRec := httptest.NewRecorder()
+	handler.ServeHTTP(pRec, pReq)
+
+	if pRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("over-burst PUT status=%d, want 503 SlowDown", pRec.Code)
+	}
+	if cr.readCount > 0 {
+		t.Errorf("body reader was consumed (%d bytes) before rate-limit fired — body buffering not bypassed", cr.readCount)
+	}
+}
+
 // TestRateLimitDoesNotApplyToUnconfiguredKeys: a key without
 // RequestsPerSecond MUST never be throttled, no matter how many
 // requests it issues. Catches a regression where the limiter
@@ -458,6 +557,12 @@ func TestRateLimitDoesNotApplyToUnconfiguredKeys(t *testing.T) {
 		}
 	}
 }
+
+// readerFunc adapts a Read closure to io.Reader so tests can
+// instrument byte counts without writing a full struct.
+type readerFunc func(p []byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 // equalSorted reports whether a and b contain the same strings,
 // order-independent.
