@@ -135,9 +135,11 @@ func newDaemonServeCmd() *cobra.Command {
 				keys := make([]s3adapter.KeyEntry, 0, len(cfg.S3.Keys))
 				for _, k := range cfg.S3.Keys {
 					keys = append(keys, s3adapter.KeyEntry{
-						AccessKey: k.AccessKey,
-						SecretKey: k.SecretKey,
-						Buckets:   k.Buckets,
+						AccessKey:         k.AccessKey,
+						SecretKey:         k.SecretKey,
+						Buckets:           k.Buckets,
+						RequestsPerSecond: k.RequestsPerSecond,
+						Burst:             k.Burst,
 					})
 				}
 				s3Handler, hErr := s3adapter.NewHandler(svc, s3adapter.Options{

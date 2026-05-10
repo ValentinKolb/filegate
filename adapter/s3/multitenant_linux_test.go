@@ -373,6 +373,92 @@ func TestLegacySingleTenantStillWorks(t *testing.T) {
 	}
 }
 
+// TestRateLimitReturnsSlowDownAndRetryAfter pins the end-to-end
+// contract: a key whose rate limit is exhausted gets 503
+// SlowDown with a Retry-After header. Real SDKs (boto3, awscli,
+// rclone) honour this with exponential backoff.
+func TestRateLimitReturnsSlowDownAndRetryAfter(t *testing.T) {
+	const (
+		access = "AKIATHROTTLED0000001"
+		secret = "secret-throttled-fillerfillerfillerfille"
+	)
+	_, handler, cleanup := newMultiTenantTestServer(t, []KeyEntry{
+		{AccessKey: access, SecretKey: secret, Buckets: []string{"*"},
+			RequestsPerSecond: 2, Burst: 2}, // tight, easy to exhaust
+	})
+	defer cleanup()
+
+	// Use GET (not HEAD) so the error body is delivered too —
+	// writeError suppresses bodies on HEAD per HTTP semantics.
+	doList := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/alpha?list-type=2", nil)
+		r.Host = "example.com"
+		signWithKey(r, nil, access, secret)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec
+	}
+
+	// First two requests use the burst — must succeed.
+	for i := 0; i < 2; i++ {
+		rec := doList()
+		if rec.Code == http.StatusServiceUnavailable {
+			t.Fatalf("burst request #%d throttled, want admitted", i+1)
+		}
+	}
+	// Third request — bucket empty, must SlowDown.
+	rec := doList()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("over-burst request status=%d, want 503 SlowDown", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "SlowDown") {
+		t.Errorf("body should contain SlowDown, got %s", rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Errorf("503 SlowDown response missing Retry-After header")
+	}
+}
+
+// TestRateLimitDoesNotApplyToUnconfiguredKeys: a key without
+// RequestsPerSecond MUST never be throttled, no matter how many
+// requests it issues. Catches a regression where the limiter
+// would default to throttling unconfigured keys.
+func TestRateLimitDoesNotApplyToUnconfiguredKeys(t *testing.T) {
+	const (
+		throttledKey = "AKIATHROTTLED0000002"
+		throttledSec = "secret-throttled-2-fillerfillerfillerff"
+		unlimitedKey = "AKIAUNLIMITED0000003"
+		unlimitedSec = "secret-unlimited-fillerfillerfillerfille"
+	)
+	_, handler, cleanup := newMultiTenantTestServer(t, []KeyEntry{
+		{AccessKey: throttledKey, SecretKey: throttledSec, Buckets: []string{"*"},
+			RequestsPerSecond: 1, Burst: 1},
+		{AccessKey: unlimitedKey, SecretKey: unlimitedSec, Buckets: []string{"*"}},
+	})
+	defer cleanup()
+
+	doHead := func(access, secret string) int {
+		r := httptest.NewRequest(http.MethodHead, "/alpha", nil)
+		r.Host = "example.com"
+		signWithKey(r, nil, access, secret)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+		return rec.Code
+	}
+
+	// Drain the throttled key.
+	doHead(throttledKey, throttledSec)
+	if code := doHead(throttledKey, throttledSec); code != http.StatusServiceUnavailable {
+		t.Errorf("throttled key second request status=%d, want 503", code)
+	}
+	// Unlimited key must STILL succeed many times.
+	for i := 0; i < 20; i++ {
+		if code := doHead(unlimitedKey, unlimitedSec); code == http.StatusServiceUnavailable {
+			t.Fatalf("unlimited key throttled at iteration %d (status=%d) — bucket leak between keys", i, code)
+		}
+	}
+}
+
 // equalSorted reports whether a and b contain the same strings,
 // order-independent.
 func equalSorted(a, b []string) bool {

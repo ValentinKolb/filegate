@@ -96,6 +96,15 @@ type S3KeyConfig struct {
 	AccessKey string   `mapstructure:"access_key"`
 	SecretKey string   `mapstructure:"secret_key"`
 	Buckets   []string `mapstructure:"buckets"`
+
+	// RequestsPerSecond throttles the key's sustained request
+	// rate. 0 (default) means unlimited. Burst defaults to RPS
+	// when unset. Over-limit requests get 503 SlowDown — every
+	// real S3 SDK honours that with exponential backoff. Use to
+	// blast-radius-limit a misbehaving or compromised key
+	// without disabling it entirely.
+	RequestsPerSecond int `mapstructure:"requests_per_second"`
+	Burst             int `mapstructure:"burst"`
 }
 
 // ServerConfig controls HTTP server behavior.

@@ -57,6 +57,11 @@ const (
 	errInvalidPartOrder errorCode = "InvalidPartOrder"
 	errEntityTooSmall   errorCode = "EntityTooSmall"
 	errMalformedXML     errorCode = "MalformedXML"
+	// errSlowDown is the AWS-spec back-off response when the
+	// requesting access key exceeds its configured rate. SDKs
+	// honour it with exponential backoff (boto3, awscli, rclone
+	// all implement this). Status 503 + a Retry-After header.
+	errSlowDown errorCode = "SlowDown"
 )
 
 func statusFor(code errorCode) int {
@@ -67,6 +72,8 @@ func statusFor(code errorCode) int {
 		return http.StatusNotFound
 	case errInvalidPart, errInvalidPartOrder, errEntityTooSmall, errMalformedXML:
 		return http.StatusBadRequest
+	case errSlowDown:
+		return http.StatusServiceUnavailable
 	case errPreconditionFailed:
 		return http.StatusPreconditionFailed
 	case errRequestTimeTooSkewed:

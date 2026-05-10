@@ -36,10 +36,18 @@ type Options struct {
 // "*" grants access to every configured mount. An empty slice
 // denies all bucket access (the key authenticates but every
 // operation returns AccessDenied).
+//
+// RequestsPerSecond + Burst configure a per-key token-bucket rate
+// limit. RPS=0 (default) means unlimited — the limiter skips the
+// bucket entirely. When RPS>0 and Burst is unset, Burst defaults
+// to RPS (allowing one second's worth of bursty traffic). Over-
+// limit requests get 503 SlowDown (the AWS-spec back-off code).
 type KeyEntry struct {
-	AccessKey string
-	SecretKey string
-	Buckets   []string
+	AccessKey         string
+	SecretKey         string
+	Buckets           []string
+	RequestsPerSecond int
+	Burst             int
 }
 
 // keyStore is the resolved-and-indexed view of Options.Keys used by
@@ -120,7 +128,13 @@ func NewHandler(svc *domain.Service, opts Options) (http.Handler, error) {
 		},
 	}
 
-	r := &router{svc: svc, auth: auth, keys: store, accessLog: opts.AccessLogEnabled}
+	r := &router{
+		svc:       svc,
+		auth:      auth,
+		keys:      store,
+		limiter:   newRateLimiter(opts.Keys),
+		accessLog: opts.AccessLogEnabled,
+	}
 	// Sweep any multipart manifests left in phase=committing across
 	// crashes. Committing manifests whose durable record exists are
 	// promoted to phase=done so ListMultipartUploads stops surfacing
@@ -198,6 +212,7 @@ type router struct {
 	svc       *domain.Service
 	auth      authConfig
 	keys      *keyStore
+	limiter   *rateLimiter // nil when no key has a configured limit
 	accessLog bool
 }
 
@@ -239,6 +254,17 @@ func (r *router) serve(w http.ResponseWriter, req *http.Request) {
 	verified, sigErr := verifyRequest(req, r.auth)
 	if sigErr != nil {
 		writeError(w, req, sigErr.Code, sigErr.Message)
+		return
+	}
+
+	// Rate-limit AFTER auth so anonymous probes don't burn the
+	// budget of a real key, and BEFORE any work so a flooded key
+	// pays the cheapest possible price per rejected request. AWS
+	// uses 503 SlowDown for back-off; well-behaved SDKs (boto3,
+	// awscli, rclone) honour it with exponential backoff.
+	if !r.limiter.allow(verified.AccessKeyID) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, req, errSlowDown, "request rate limit exceeded for this access key")
 		return
 	}
 
