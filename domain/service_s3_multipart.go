@@ -311,6 +311,19 @@ func (s *Service) LookupMultipartUploadRecord(uploadID [16]byte) (*MultipartUplo
 	return s.idx.LookupMultipartUploadRecord(uploadID)
 }
 
+// DeleteMultipartUploadRecord removes the durable uploadId record
+// from Pebble. Used by the cleanup loop after the retention
+// window — once the record is gone, retried Complete calls for
+// that upload will get a fresh redrive (or, if the staging dir
+// is also gone, NoSuchUpload). Idempotent: deleting a missing
+// record is not an error.
+func (s *Service) DeleteMultipartUploadRecord(uploadID [16]byte) error {
+	return s.idx.Batch(func(b Batch) error {
+		b.DelMultipartUploadRecord(uploadID)
+		return nil
+	})
+}
+
 // hashLocalFile is a tiny helper to whole-body-MD5-hash a file on
 // disk. Matches the format used elsewhere (lowercase hex).
 func (s *Service) hashLocalFile(absPath string) (string, error) {

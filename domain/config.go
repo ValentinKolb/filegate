@@ -58,6 +58,27 @@ type S3Config struct {
 	// whatever the request signs with determines which bucket
 	// whitelist applies. Order is irrelevant.
 	Keys []S3KeyConfig `mapstructure:"keys"`
+
+	// Cleanup controls the recurring sweep that retires finished
+	// multipart manifests + their durable Pebble records, and
+	// forcibly aborts uploads stuck open past a max age. Without
+	// it, .fg-uploads/s3-* and the 0x07 keyspace grow unbounded.
+	// All zero values mean "use defaults" — see
+	// MultipartCleanupConfig in the s3 adapter for the policy.
+	Cleanup S3CleanupConfig `mapstructure:"cleanup"`
+}
+
+// S3CleanupConfig controls the multipart-cleanup sweep cadence
+// and retention policy. Zero values fall back to the adapter's
+// DefaultMultipartCleanupConfig (24h done / 1h aborted / 7d
+// stuck-upload, 1h interval). Set Interval to a negative duration
+// to disable the loop entirely (operator opts out — staging dir
+// growth is then their responsibility).
+type S3CleanupConfig struct {
+	DoneRetention     time.Duration `mapstructure:"done_retention"`
+	AbortedRetention  time.Duration `mapstructure:"aborted_retention"`
+	StuckUploadMaxAge time.Duration `mapstructure:"stuck_upload_max_age"`
+	Interval          time.Duration `mapstructure:"interval"`
 }
 
 // S3KeyConfig is one entry in the multi-tenant S3 key store. The

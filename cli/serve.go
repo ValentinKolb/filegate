@@ -122,6 +122,7 @@ func newDaemonServeCmd() *cobra.Command {
 			// list; legacy single-tenant AccessKey/SecretKey is
 			// folded into the key store by the adapter.
 			var s3Srv *http.Server
+			var s3CleanupDone chan struct{}
 			if cfg.S3.Enabled {
 				if cfg.S3.AccessKey == "" && cfg.S3.SecretKey == "" && len(cfg.S3.Keys) == 0 {
 					cancel()
@@ -167,6 +168,20 @@ func newDaemonServeCmd() *cobra.Command {
 					log.Printf("[filegate-s3] listening on %s", cfg.S3.Listen)
 					errCh <- s3Srv.ListenAndServe()
 				}()
+
+				// Multipart cleanup loop: retires done/aborted
+				// manifests + their durable Pebble records past the
+				// retention window, forcibly aborts uploads stuck
+				// open past max age. Interval < 0 disables it.
+				cleanupCfg := resolveS3CleanupConfig(cfg.S3.Cleanup)
+				if cleanupCfg.Interval > 0 {
+					log.Printf("[filegate-s3] multipart cleanup: interval=%s done-retention=%s aborted-retention=%s stuck-max-age=%s",
+						cleanupCfg.Interval, cleanupCfg.DoneRetention, cleanupCfg.AbortedRetention, cleanupCfg.StuckUploadMaxAge)
+					s3CleanupDone = make(chan struct{})
+					go runMultipartCleanupLoop(ctx, svc, cleanupCfg, s3CleanupDone)
+				} else {
+					log.Printf("[filegate-s3] multipart cleanup: disabled (interval=%s)", cleanupCfg.Interval)
+				}
 			}
 
 			sigCh := make(chan os.Signal, 1)
@@ -181,6 +196,9 @@ func newDaemonServeCmd() *cobra.Command {
 					detector.Close()
 					<-detectorDone
 					<-prunerDone
+					if s3CleanupDone != nil {
+						<-s3CleanupDone
+					}
 					if routerCloser != nil {
 						_ = routerCloser.Close()
 					}
@@ -199,6 +217,9 @@ func newDaemonServeCmd() *cobra.Command {
 			detector.Close()
 			<-detectorDone
 			<-prunerDone
+			if s3CleanupDone != nil {
+				<-s3CleanupDone
+			}
 			if routerCloser != nil {
 				_ = routerCloser.Close()
 			}
