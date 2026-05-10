@@ -87,9 +87,9 @@ func TestDecideRetentionPolicy(t *testing.T) {
 		{"in_progress stuck → force-abort",
 			multipartManifest{Phase: phaseInProgress, Initiated: ms(now.Add(-8 * 24 * time.Hour))},
 			cleanupForceAbort},
-		{"committing stuck → force-abort (transient phase doesn't survive 7d)",
+		{"committing stuck → KEEP (race-safe — only the startup recovery sweep touches committing)",
 			multipartManifest{Phase: phaseCommitting, Initiated: ms(now.Add(-8 * 24 * time.Hour))},
-			cleanupForceAbort},
+			cleanupKeep},
 		{"committing fresh → keep (recovery sweep handles it)",
 			multipartManifest{Phase: phaseCommitting, Initiated: ms(now.Add(-1 * time.Hour))},
 			cleanupKeep},
@@ -344,6 +344,37 @@ func TestDecodeUploadIDMalformed(t *testing.T) {
 	}
 	if _, ok := decodeUploadID("00000000000000000000000000000001"); !ok {
 		t.Errorf("decodeUploadID of valid hex returned ok=false")
+	}
+}
+
+// TestSweepLeavesActiveCommittingAlone pins the safety contract
+// for phase=committing manifests: even past StuckUploadMaxAge,
+// the cleanup loop never deletes them. A request that's actively
+// being committed sets phase=committing right before the rename
+// + Pebble batch — racing the cleanup loop here would let us
+// delete the staging dir + durable record out from under an
+// in-flight CompleteMultipartUpload. The startup recovery sweep
+// is the only thing that touches phase=committing, and it uses
+// the durable-record check for safety.
+func TestSweepLeavesActiveCommittingAlone(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+	mountAbs := lookupMountAbs(t, handler, mount)
+
+	// Old + committing — exactly the case codex flagged.
+	stuckID := writeTestManifest(t, mountAbs, multipartManifest{
+		Bucket:    mount,
+		Key:       "active.bin",
+		Phase:     phaseCommitting,
+		Initiated: time.Now().Add(-30 * 24 * time.Hour).UnixMilli(),
+	})
+
+	res := SweepMultipartCleanup(svc, DefaultMultipartCleanupConfig())
+	if res.StuckAborted != 0 {
+		t.Errorf("StuckAborted=%d, want 0 — committing must NEVER be force-aborted by the cleanup loop", res.StuckAborted)
+	}
+	if _, err := os.Stat(stageDirFor(mountAbs, stuckID)); err != nil {
+		t.Errorf("committing stage dir was deleted: err=%v", err)
 	}
 }
 

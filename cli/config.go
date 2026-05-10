@@ -63,6 +63,18 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v.SetDefault("s3.region", "us-east-1")
 	v.SetDefault("s3.access_key", "")
 	v.SetDefault("s3.secret_key", "")
+	// Multipart cleanup loop tunables. Zero = adapter default;
+	// negative interval = disable. Defaults are documented on
+	// s3adapter.MultipartCleanupConfig (24h done, 1h aborted,
+	// 7d stuck-upload, 1h interval). Registering them here is
+	// what lets FILEGATE_S3_CLEANUP_INTERVAL=-1s (and the
+	// other knobs) actually reach the cleanup loop via env-only
+	// deployments — viper's Unmarshal doesn't pick up
+	// AutomaticEnv values for keys that have no SetDefault.
+	v.SetDefault("s3.cleanup.done_retention", time.Duration(0))
+	v.SetDefault("s3.cleanup.aborted_retention", time.Duration(0))
+	v.SetDefault("s3.cleanup.stuck_upload_max_age", time.Duration(0))
+	v.SetDefault("s3.cleanup.interval", time.Duration(0))
 
 	configFile = strings.TrimSpace(configFile)
 	if configFile == "" {

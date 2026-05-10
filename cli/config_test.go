@@ -84,6 +84,39 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 	}
 }
 
+// TestLoadConfigS3CleanupEnvOverrides pins that the
+// FILEGATE_S3_CLEANUP_* env vars actually reach the resolved
+// config. Without explicit SetDefault calls in loadConfig, viper's
+// AutomaticEnv silently misses them — operators who set
+// FILEGATE_S3_CLEANUP_INTERVAL=-1s to disable the loop would
+// then quietly fall back to the 1h default. Codex flagged this
+// as a P2 on the M5-1 commit.
+func TestLoadConfigS3CleanupEnvOverrides(t *testing.T) {
+	t.Setenv("FILEGATE_STORAGE_BASE_PATHS", t.TempDir())
+	t.Setenv("FILEGATE_AUTH_BEARER_TOKEN", "test-token")
+	t.Setenv("FILEGATE_S3_CLEANUP_DONE_RETENTION", "5m")
+	t.Setenv("FILEGATE_S3_CLEANUP_ABORTED_RETENTION", "10m")
+	t.Setenv("FILEGATE_S3_CLEANUP_STUCK_UPLOAD_MAX_AGE", "30m")
+	t.Setenv("FILEGATE_S3_CLEANUP_INTERVAL", "-1s") // disable
+
+	cfg, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.S3.Cleanup.DoneRetention != 5*time.Minute {
+		t.Errorf("DoneRetention=%s, want 5m", cfg.S3.Cleanup.DoneRetention)
+	}
+	if cfg.S3.Cleanup.AbortedRetention != 10*time.Minute {
+		t.Errorf("AbortedRetention=%s, want 10m", cfg.S3.Cleanup.AbortedRetention)
+	}
+	if cfg.S3.Cleanup.StuckUploadMaxAge != 30*time.Minute {
+		t.Errorf("StuckUploadMaxAge=%s, want 30m", cfg.S3.Cleanup.StuckUploadMaxAge)
+	}
+	if cfg.S3.Cleanup.Interval != -1*time.Second {
+		t.Errorf("Interval=%s, want -1s (disable signal)", cfg.S3.Cleanup.Interval)
+	}
+}
+
 func TestLoadConfigExplicitMissingFileReturnsError(t *testing.T) {
 	_, err := loadConfig(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err == nil {

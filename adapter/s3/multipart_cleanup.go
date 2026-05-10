@@ -132,6 +132,17 @@ const (
 
 // decideRetention is the policy split out so it can be unit-tested
 // without filesystem state.
+//
+// IMPORTANT: phase=committing is NOT eligible for force-abort,
+// even past StuckUploadMaxAge. A request that's actively being
+// committed sets phase=committing right before doing the rename
+// + Pebble batch — racing the cleanup loop against an in-flight
+// CompleteMultipartUpload would let us delete the staging dir
+// AND the durable record out from under it. The startup recovery
+// sweep is the only thing that touches phase=committing, and it
+// uses the durable-record check for safety. If a phase=committing
+// manifest is genuinely stuck post-restart, the recovery sweep
+// will see it and decide what to do.
 func decideRetention(m *multipartManifest, now time.Time, cfg MultipartCleanupConfig) cleanupAction {
 	switch m.Phase {
 	case phaseDone:
@@ -149,13 +160,12 @@ func decideRetention(m *multipartManifest, now time.Time, cfg MultipartCleanupCo
 		if ts > 0 && now.Sub(time.UnixMilli(ts)) >= cfg.AbortedRetention {
 			return cleanupRetireAborted
 		}
-	case phaseInProgress, phaseCommitting:
+	case phaseInProgress:
 		if m.Initiated > 0 && now.Sub(time.UnixMilli(m.Initiated)) >= cfg.StuckUploadMaxAge {
-			// Committing is a transient phase — if it's been
-			// stuck this long, the recovery sweep already had
-			// many chances and the upload was abandoned.
 			return cleanupForceAbort
 		}
+	case phaseCommitting:
+		// Deliberately do nothing. See type comment.
 	}
 	return cleanupKeep
 }
