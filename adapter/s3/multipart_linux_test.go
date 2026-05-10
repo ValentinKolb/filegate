@@ -417,7 +417,7 @@ func TestCompleteMultipartUploadRoundTrip(t *testing.T) {
 	if got := getRec.Header().Get("Content-Type"); got != "application/octet-stream" {
 		t.Errorf("GET Content-Type=%q", got)
 	}
-	if got := getRec.Header().Get("X-Amz-Meta-Author"); got != "alice" {
+	if got := getMetaHeader(getRec.Header(), "x-amz-meta-author"); got != "alice" {
 		t.Errorf("GET x-amz-meta-author=%q, want alice", got)
 	}
 }
@@ -715,7 +715,7 @@ func TestMultipartETagSurvivesDetectorResync(t *testing.T) {
 	if got := hRec.Header().Get("Content-Type"); got != "image/png" {
 		t.Errorf("HEAD Content-Type=%q after detector sync, want preserved image/png", got)
 	}
-	if got := hRec.Header().Get("X-Amz-Meta-Author"); got != "alice" {
+	if got := getMetaHeader(hRec.Header(), "x-amz-meta-author"); got != "alice" {
 		t.Errorf("HEAD x-amz-meta-author=%q after detector sync, want preserved 'alice'", got)
 	}
 }

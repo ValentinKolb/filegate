@@ -71,6 +71,64 @@ func newTestServer(t *testing.T) (svc *domain.Service, handler http.Handler, mou
 	return svc, handler, "data", cleanup
 }
 
+// TestUserMetadataHeadersAreLowercase pins the contract that
+// x-amz-meta-* response headers are emitted lowercase on the wire.
+// AWS S3 emits them lowercase; SDK parsers (boto3, awscli) strip
+// the prefix and keep the remaining case as-is, so a title-cased
+// "X-Amz-Meta-Author" surfaces as ".Metadata.Author" instead of
+// ".Metadata.author" and breaks code that round-trips metadata.
+//
+// Pre-fix Go's http.Header.Set canonicalized the key into Title-
+// Case. The fix writes directly to the map with a lowercased key
+// so net/http leaves it alone on the wire.
+func TestUserMetadataHeadersAreLowercase(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	body := []byte("body")
+	req := httptest.NewRequest(http.MethodPut, "/"+mount+"/m.txt", bytes.NewReader(body))
+	req.Host = "example.com"
+	req.Header.Set("x-amz-meta-author", "alice")
+	req.Header.Set("x-amz-meta-build-id", "42")
+	signRequestPayload(req, body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed PUT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	hReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/m.txt", nil)
+	hReq.Host = "example.com"
+	signRequestPayload(hReq, nil)
+	hRec := httptest.NewRecorder()
+	handler.ServeHTTP(hRec, hReq)
+
+	// httptest's recorder preserves header case via its Header
+	// map. Look up by the lowercase form directly via the helper —
+	// it does map access without Go's canonicalization, so it sees
+	// the wire-form keys filegate emits.
+	got := hRec.Header()
+	if v := getMetaHeader(got, "x-amz-meta-author"); v != "alice" {
+		t.Errorf("x-amz-meta-author not present as lowercase header; got headers: %v", got)
+	}
+	if v := getMetaHeader(got, "x-amz-meta-build-id"); v != "42" {
+		t.Errorf("x-amz-meta-build-id not present as lowercase header; got headers: %v", got)
+	}
+}
+
+// getMetaHeader looks up an x-amz-meta-* response header without
+// going through http.Header.Get's canonicalization (which would
+// look for "X-Amz-Meta-Foo" when our wire-lowercase storage is
+// keyed "x-amz-meta-foo"). Tests use this so they exercise the
+// lowercase form clients see on the wire.
+func getMetaHeader(h http.Header, name string) string {
+	values := h[strings.ToLower(name)]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
 // signRequestPayload signs an http.Request with SigV4 over the given
 // payload — equivalent to what a real S3 client SDK does.
 func signRequestPayload(req *http.Request, payload []byte) {
@@ -266,10 +324,10 @@ func TestUserMetadataRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HEAD status=%d", rec.Code)
 	}
-	if got := rec.Header().Get("x-amz-meta-author"); got != "alice" {
+	if got := getMetaHeader(rec.Header(), "x-amz-meta-author"); got != "alice" {
 		t.Errorf("x-amz-meta-author=%q, want alice", got)
 	}
-	if got := rec.Header().Get("x-amz-meta-purpose"); got != "demo" {
+	if got := getMetaHeader(rec.Header(), "x-amz-meta-purpose"); got != "demo" {
 		t.Errorf("x-amz-meta-purpose=%q, want demo", got)
 	}
 }

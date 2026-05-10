@@ -472,7 +472,17 @@ func applyResponseS3Headers(headers http.Header, meta *domain.FileMeta, view *do
 	}
 	if userMeta, _ := readUserMetadata(view); userMeta != nil {
 		for k, v := range userMeta {
-			headers.Set("x-amz-meta-"+k, v)
+			// Bypass http.Header.Set's MIME canonicalization
+			// (which would Title-Case "x-amz-meta-author" into
+			// "X-Amz-Meta-Author"). Real AWS S3 returns these
+			// headers lowercase, and SDK parsers (boto3/awscli)
+			// preserve the case when stripping the prefix —
+			// title-cased headers surface as ".Metadata.Author"
+			// instead of ".Metadata.author", breaking client
+			// code that round-trips metadata. Direct map access
+			// preserves the lowercase key on the wire.
+			name := strings.ToLower("x-amz-meta-" + k)
+			headers[name] = []string{v}
 		}
 	}
 }

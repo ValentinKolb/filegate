@@ -120,7 +120,7 @@ func TestCopyObjectMetadataDirectiveCopy(t *testing.T) {
 	if got := hRec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
 		t.Errorf("dest Content-Type=%q, want inherited", got)
 	}
-	if got := hRec.Header().Get("X-Amz-Meta-Author"); got != "alice" {
+	if got := getMetaHeader(hRec.Header(), "x-amz-meta-author"); got != "alice" {
 		t.Errorf("dest x-amz-meta-author=%q, want inherited 'alice'", got)
 	}
 }
@@ -163,10 +163,10 @@ func TestCopyObjectMetadataDirectiveReplace(t *testing.T) {
 	if got := hRec.Header().Get("Content-Type"); got != "image/png" {
 		t.Errorf("REPLACE dest Content-Type=%q, want image/png", got)
 	}
-	if got := hRec.Header().Get("X-Amz-Meta-Replaced"); got != "yes" {
+	if got := getMetaHeader(hRec.Header(), "x-amz-meta-replaced"); got != "yes" {
 		t.Errorf("REPLACE dest x-amz-meta-replaced=%q", got)
 	}
-	if got := hRec.Header().Get("X-Amz-Meta-Original"); got != "" {
+	if got := getMetaHeader(hRec.Header(), "x-amz-meta-original"); got != "" {
 		t.Errorf("REPLACE dest x-amz-meta-original=%q, want empty (source metadata dropped)", got)
 	}
 }
