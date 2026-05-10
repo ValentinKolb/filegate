@@ -187,44 +187,40 @@ func newDaemonServeCmd() *cobra.Command {
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+			// Build the shutdown plan so both the signal-driven
+			// path and the listener-error path drain identically.
+			plan := shutdownPlan{
+				Timeout: cfg.Server.ShutdownTimeout,
+				Listeners: []namedListener{
+					{Name: "rest", Server: srv},
+					{Name: "s3", Server: s3Srv}, // nil-safe: runShutdown skips
+				},
+				CancelBackground: cancel,
+				BackgroundDone:   []chan struct{}{detectorDone, prunerDone, s3CleanupDone},
+				AfterDrain: []func() error{
+					func() error { detector.Close(); return nil },
+					func() error {
+						if routerCloser != nil {
+							return routerCloser.Close()
+						}
+						return nil
+					},
+					idx.Close,
+				},
+			}
+
 			select {
 			case sig := <-sigCh:
 				log.Printf("[filegate] received signal %s, shutting down", sig)
+				return runShutdown(plan)
 			case err := <-errCh:
 				if err != nil && !errors.Is(err, http.ErrServerClosed) {
-					cancel()
-					detector.Close()
-					<-detectorDone
-					<-prunerDone
-					if s3CleanupDone != nil {
-						<-s3CleanupDone
-					}
-					if routerCloser != nil {
-						_ = routerCloser.Close()
-					}
-					_ = idx.Close()
+					log.Printf("[filegate] listener errored, shutting down: %v", err)
+					_ = runShutdown(plan)
 					return err
 				}
+				return runShutdown(plan)
 			}
-
-			shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
-			defer stop()
-			_ = srv.Shutdown(shutdownCtx)
-			if s3Srv != nil {
-				_ = s3Srv.Shutdown(shutdownCtx)
-			}
-			cancel()
-			detector.Close()
-			<-detectorDone
-			<-prunerDone
-			if s3CleanupDone != nil {
-				<-s3CleanupDone
-			}
-			if routerCloser != nil {
-				_ = routerCloser.Close()
-			}
-			_ = idx.Close()
-			return nil
 		},
 	}
 	cmd.Flags().StringVar(&configFile, "config", "", "path to config file")

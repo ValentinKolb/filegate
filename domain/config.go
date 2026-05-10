@@ -103,6 +103,16 @@ type ServerConfig struct {
 	Listen           string        `mapstructure:"listen"`
 	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
 	AccessLogEnabled bool          `mapstructure:"access_log_enabled"`
+	// ShutdownTimeout bounds how long the daemon waits for
+	// in-flight HTTP handlers to finish on SIGINT/SIGTERM
+	// before force-closing the listener. The S3 multipart
+	// Complete path can take several seconds on large uploads
+	// (concat parts → fsync → rename → Pebble batch); a too-
+	// short timeout aborts those mid-commit. Default: 60s.
+	// Connections still active after the timeout get force-
+	// closed via http.Server.Close — clients see RST, the
+	// crash-recovery sweep handles any half-committed state.
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 }
 
 // AuthConfig contains authentication settings.
