@@ -117,6 +117,47 @@ func TestLoadConfigS3CleanupEnvOverrides(t *testing.T) {
 	}
 }
 
+// TestLoadConfigMetricsEnvOverrides pins that FILEGATE_METRICS_* env
+// vars reach the resolved config (same SetDefault-needed-for-env
+// precedent as the s3.cleanup.* knobs).
+func TestLoadConfigMetricsEnvOverrides(t *testing.T) {
+	t.Setenv("FILEGATE_STORAGE_BASE_PATHS", t.TempDir())
+	t.Setenv("FILEGATE_AUTH_BEARER_TOKEN", "test-token")
+	t.Setenv("FILEGATE_METRICS_ENABLED", "true")
+	t.Setenv("FILEGATE_METRICS_PATH", "/internal/metrics")
+	t.Setenv("FILEGATE_METRICS_TOKEN", "scrape-secret")
+
+	cfg, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Errorf("Metrics.Enabled=false, want true")
+	}
+	if cfg.Metrics.Path != "/internal/metrics" {
+		t.Errorf("Metrics.Path=%q, want /internal/metrics", cfg.Metrics.Path)
+	}
+	if cfg.Metrics.Token != "scrape-secret" {
+		t.Errorf("Metrics.Token=%q, want scrape-secret", cfg.Metrics.Token)
+	}
+}
+
+// TestLoadConfigMetricsDefaults pins the off-by-default contract.
+func TestLoadConfigMetricsDefaults(t *testing.T) {
+	t.Setenv("FILEGATE_STORAGE_BASE_PATHS", t.TempDir())
+	t.Setenv("FILEGATE_AUTH_BEARER_TOKEN", "test-token")
+	cfg, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Errorf("Metrics.Enabled defaults to true, want false")
+	}
+	if cfg.Metrics.Path != "/metrics" {
+		t.Errorf("Metrics.Path default=%q, want /metrics", cfg.Metrics.Path)
+	}
+}
+
 func TestLoadConfigExplicitMissingFileReturnsError(t *testing.T) {
 	_, err := loadConfig(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err == nil {

@@ -94,3 +94,16 @@ s3:
   # any keys[] entry's access_key.
   # access_key: ""
   # secret_key: ""
+
+# ─── Prometheus metrics (optional) ─────────────────────────────
+# Served on the REST listener (server.listen, :8080 above) — no
+# extra port. Off by default. Auth is layered: metrics.token if
+# set, else the auth.bearer_token above, else open. See
+# docs/metrics.md for the full metric reference + PromQL examples.
+metrics:
+  enabled: false
+  path: "/metrics"
+  # Dedicated scrape token. Leave blank to fall back to
+  # auth.bearer_token; blank both for an open endpoint (only on a
+  # trusted internal network).
+  token: ""

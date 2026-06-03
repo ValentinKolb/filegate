@@ -12,5 +12,6 @@
 - CLI command reference: [cli.md](https://github.com/ValentinKolb/filegate/blob/main/docs/cli.md)
 - Code patterns and engineering conventions: [code-patterns.md](https://github.com/ValentinKolb/filegate/blob/main/docs/code-patterns.md)
 - Benchmarks and reproducible benchmark scripts: [benchmarks.md](https://github.com/ValentinKolb/filegate/blob/main/docs/benchmarks.md)
+- Prometheus metrics (RED, saturation, disk-fill alerting): [metrics.md](https://github.com/ValentinKolb/filegate/blob/main/docs/metrics.md)
 - Deployment (binary, Docker, deb/rpm, systemd): [deployment.md](https://github.com/ValentinKolb/filegate/blob/main/docs/deployment.md)
 - Sysadmin deployment and operations guide: [sysadmin.md](https://github.com/ValentinKolb/filegate/blob/main/docs/sysadmin.md)

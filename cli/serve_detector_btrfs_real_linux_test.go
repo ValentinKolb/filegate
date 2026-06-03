@@ -77,7 +77,7 @@ func startRealBTRFSDetector(t *testing.T, subvol string) (*domain.Service, strin
 	}
 	runner.Start(ctx)
 	t.Cleanup(func() { runner.Close() })
-	go consumeDetectorEvents(ctx, svc, runner.Events())
+	go consumeDetectorEvents(ctx, svc, runner.Events(), nil)
 
 	return svc, rootName, bus
 }

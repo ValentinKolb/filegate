@@ -44,6 +44,21 @@ type MultipartCompleteResult struct {
 	Replayed bool // true when the uploadId record already existed
                   // and we returned its stored result without re-doing
                   // the install
+	// Timings reports per-phase durations of the domain-side install
+	// (zero on the Replayed fast path, which does no install). The
+	// adapter observes these into the complete-phase histogram —
+	// the trace-substitute that tells operators whether a slow
+	// Complete is lock contention, the whole-body re-hash, or the
+	// Pebble commit. The concat phase is measured adapter-side.
+	Timings MultipartCompleteTimings
+}
+
+// MultipartCompleteTimings holds the domain-side sub-phase durations
+// of a multipart Complete install.
+type MultipartCompleteTimings struct {
+	LockWait    time.Duration // time spent acquiring the destination path-lock
+	Hash        time.Duration // whole-body MD5 of the installed object
+	PebbleBatch time.Duration // the atomic entity + record commit
 }
 
 // CompleteMultipartUpload commits a multipart upload atomically:
@@ -133,7 +148,10 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 		leafRel = prel + "/" + fileName
 	}
 	leafKey := pathLockKey(pmount, leafRel)
+	var timings MultipartCompleteTimings
+	lockStart := time.Now()
 	release := s.pathLocks.AcquirePoint(leafKey)
+	timings.LockWait = time.Since(lockStart)
 	defer release()
 
 	// Re-check uploadId record under the lock (a concurrent Complete
@@ -220,7 +238,9 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 	// body MD5; distinct from the composite multipart ETag). The
 	// rename is atomic and we hold the path-lock — no other writer
 	// can mutate the file between rename and hash.
+	hashStart := time.Now()
 	wholeBodyMD5, hashErr := s.hashLocalFile(destAbs)
+	timings.Hash = time.Since(hashStart)
 	if hashErr != nil {
 		// Best-effort — leave etag_md5 empty; the rescan will
 		// populate it later.
@@ -259,6 +279,7 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 	// short-circuits idempotently.
 	now := time.Now().UnixMilli()
 	mountRel := strings.Join(parts[1:], "/")
+	batchStart := time.Now()
 	if err := s.idx.Batch(func(b Batch) error {
 		b.PutEntity(entity)
 		b.PutChild(parentID, fileName, dirEntry)
@@ -274,6 +295,7 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 	}); err != nil {
 		return MultipartCompleteResult{}, err
 	}
+	timings.PebbleBatch = time.Since(batchStart)
 
 	// Cache invalidation mirrors what syncSingle does — without it
 	// stale path-cache entries can keep handing out the prior fileID
@@ -300,6 +322,7 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 	return MultipartCompleteResult{
 		Meta:    finalMeta,
 		Created: created,
+		Timings: timings,
 	}, nil
 }
 

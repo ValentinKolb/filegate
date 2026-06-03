@@ -132,8 +132,12 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	}
 
 	// Concat parts → complete.tmp while computing the composite ETag.
+	// This is the adapter-measured phase of the trace-substitute
+	// histogram; the domain returns the other three (lock/hash/batch).
 	completeTmp := filepath.Join(loc.StageDir, multipartCompleteTmp)
+	concatStart := time.Now()
 	composite, concatErr := concatPartsAndComputeCompositeETag(loc.StageDir, validatedParts, completeTmp)
+	concatDur := time.Since(concatStart)
 	if concatErr != nil {
 		_ = os.Remove(completeTmp)
 		writeError(w, r, errInternalError, fmt.Sprintf("could not assemble parts: %s", concatErr), withBucket(bucket), withKey(key))
@@ -185,6 +189,15 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		// could lose data we'd otherwise recover.
 		mapDomainError(w, r, domErr, bucket, key)
 		return
+	}
+
+	// Observe the four Complete sub-phases. Skipped on the Replayed
+	// fast path (no install happened, timings are zero). nil-safe.
+	if !result.Replayed {
+		rt.metrics.ObserveCompletePhase("concat", concatDur.Seconds())
+		rt.metrics.ObserveCompletePhase("lock_wait", result.Timings.LockWait.Seconds())
+		rt.metrics.ObserveCompletePhase("hash", result.Timings.Hash.Seconds())
+		rt.metrics.ObserveCompletePhase("pebble_batch", result.Timings.PebbleBatch.Seconds())
 	}
 
 	// Mark manifest phase=done with the result snapshot. Best-effort

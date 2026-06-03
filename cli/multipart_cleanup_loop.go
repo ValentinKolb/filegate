@@ -7,6 +7,7 @@ import (
 
 	s3adapter "github.com/valentinkolb/filegate/adapter/s3"
 	"github.com/valentinkolb/filegate/domain"
+	"github.com/valentinkolb/filegate/infra/metrics"
 )
 
 // resolveS3CleanupConfig fills in the adapter's defaults for any
@@ -42,7 +43,7 @@ func resolveS3CleanupConfig(cfg domain.S3CleanupConfig) s3adapter.MultipartClean
 // (not at startup) so a flapping daemon doesn't churn through
 // recently-completed uploads on every restart. Logs only when the
 // pass actually retired or aborted something — quiet steady-state.
-func runMultipartCleanupLoop(ctx context.Context, svc *domain.Service, cfg s3adapter.MultipartCleanupConfig, done chan<- struct{}) {
+func runMultipartCleanupLoop(ctx context.Context, svc *domain.Service, cfg s3adapter.MultipartCleanupConfig, reg *metrics.Registry, done chan<- struct{}) {
 	defer close(done)
 	if cfg.Interval <= 0 {
 		cfg.Interval = time.Hour
@@ -55,10 +56,21 @@ func runMultipartCleanupLoop(ctx context.Context, svc *domain.Service, cfg s3ada
 			return
 		case <-ticker.C:
 			res := s3adapter.SweepMultipartCleanup(svc, cfg)
+			recordCleanupResult(reg, res)
 			if res.DoneRetired > 0 || res.AbortedRetired > 0 || res.StuckAborted > 0 || res.Errors > 0 {
 				log.Printf("[filegate-s3] multipart cleanup: scanned=%d done-retired=%d aborted-retired=%d stuck-aborted=%d errors=%d",
 					res.StageDirsScanned, res.DoneRetired, res.AbortedRetired, res.StuckAborted, res.Errors)
 			}
 		}
 	}
+}
+
+// recordCleanupResult tallies a cleanup-sweep result into the metrics
+// counters. reg may be nil (no-op). Split out so the wiring is
+// unit-testable without driving the ticker loop.
+func recordCleanupResult(reg *metrics.Registry, res s3adapter.MultipartCleanupResult) {
+	reg.CleanupRetired("done", res.DoneRetired)
+	reg.CleanupRetired("aborted", res.AbortedRetired)
+	reg.CleanupRetired("stuck", res.StuckAborted)
+	reg.CleanupErrors(res.Errors)
 }

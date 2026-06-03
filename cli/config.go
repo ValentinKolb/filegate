@@ -76,6 +76,13 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v.SetDefault("s3.cleanup.aborted_retention", time.Duration(0))
 	v.SetDefault("s3.cleanup.stuck_upload_max_age", time.Duration(0))
 	v.SetDefault("s3.cleanup.interval", time.Duration(0))
+	// Prometheus /metrics endpoint. Registering the defaults is what
+	// lets FILEGATE_METRICS_ENABLED / _PATH / _TOKEN bind via env-only
+	// deployments (viper's AutomaticEnv only picks up keys that have
+	// a SetDefault — same precedent as s3.cleanup.* above).
+	v.SetDefault("metrics.enabled", false)
+	v.SetDefault("metrics.path", "/metrics")
+	v.SetDefault("metrics.token", "")
 
 	configFile = strings.TrimSpace(configFile)
 	if configFile == "" {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/valentinkolb/filegate/domain"
+	"github.com/valentinkolb/filegate/infra/metrics"
 )
 
 // Options configures the S3 listener.
@@ -29,6 +30,13 @@ type Options struct {
 	SecretKey string
 	// AccessLogEnabled mirrors the REST adapter's setting.
 	AccessLogEnabled bool
+	// Metrics, when non-nil, receives the dedicated rate-limit
+	// rejection counter. The generic HTTP RED metrics (which count
+	// the 503 in the 5xx class) are recorded by the middleware in
+	// cli/serve.go; this is the specific signal that distinguishes
+	// rate-limit 503s from other 503s. nil-safe: a nil Registry's
+	// methods are no-ops.
+	Metrics *metrics.Registry
 }
 
 // KeyEntry is the in-memory shape of one entry in the multi-tenant
@@ -134,6 +142,7 @@ func NewHandler(svc *domain.Service, opts Options) (http.Handler, error) {
 		keys:      store,
 		limiter:   newRateLimiter(opts.Keys),
 		accessLog: opts.AccessLogEnabled,
+		metrics:   opts.Metrics,
 	}
 	// Sweep any multipart manifests left in phase=committing across
 	// crashes. Committing manifests whose durable record exists are
@@ -223,6 +232,7 @@ type router struct {
 	keys      *keyStore
 	limiter   *rateLimiter // nil when no key has a configured limit
 	accessLog bool
+	metrics   *metrics.Registry // nil-safe; receives the rate-limit reject counter
 }
 
 // keyForRequest returns the verified key's record. The verifier has
@@ -266,6 +276,7 @@ func (r *router) serve(w http.ResponseWriter, req *http.Request) {
 	// verifyRequest below. See peekAccessKey for the trust-model
 	// rationale.
 	if accessKey := peekAccessKey(req); accessKey != "" && !r.limiter.allow(accessKey) {
+		r.metrics.RatelimitRejected()
 		w.Header().Set("Retry-After", "1")
 		writeError(w, req, errSlowDown, "request rate limit exceeded for this access key")
 		return
@@ -287,6 +298,7 @@ func (r *router) serve(w http.ResponseWriter, req *http.Request) {
 		// "/" — root operations. Only ListBuckets in M1.
 		switch req.Method {
 		case http.MethodGet:
+			metrics.SetOp(req.Context(), "ListBuckets")
 			r.handleListBuckets(w, req, verified)
 		default:
 			writeError(w, req, errMethodNotAllowed, "only GET / is supported at the root")
@@ -369,14 +381,17 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verifi
 		//   ?uploads          → ListMultipartUploads
 		//   (default)         → ListObjectsV2 (list-type=2 expected)
 		if _, ok := req.URL.Query()["uploads"]; ok {
+			metrics.SetOp(req.Context(), "ListMultipartUploads")
 			r.handleListMultipartUploads(w, req, verified, bucket)
 			return
 		}
+		metrics.SetOp(req.Context(), "ListObjectsV2")
 		r.handleListObjectsV2(w, req, verified, bucket)
 	case http.MethodPost:
 		// Bucket-level POST sub-resource:
 		//   ?delete           → DeleteObjects (bulk delete, XML body)
 		if _, ok := req.URL.Query()["delete"]; ok {
+			metrics.SetOp(req.Context(), "DeleteObjects")
 			r.handleDeleteObjects(w, req, verified, bucket)
 			return
 		}
@@ -385,6 +400,7 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verifi
 		writeError(w, req, errMethodNotAllowed, "buckets come from filegate config; CreateBucket/DeleteBucket are rejected")
 	case http.MethodHead:
 		// HEAD on a bucket = bucket existence check (HEAD bucket).
+		metrics.SetOp(req.Context(), "HeadBucket")
 		w.WriteHeader(http.StatusOK)
 	default:
 		writeError(w, req, errMethodNotAllowed, "method not supported")
@@ -416,33 +432,44 @@ func (r *router) handleObjectOp(w http.ResponseWriter, req *http.Request, verifi
 	switch req.Method {
 	case http.MethodGet:
 		if uploadID != "" {
+			metrics.SetOp(req.Context(), "ListParts")
 			r.handleListParts(w, req, verified, bucket, key)
 			return
 		}
+		metrics.SetOp(req.Context(), "GetObject")
 		r.handleGetObject(w, req, verified, bucket, key)
 	case http.MethodHead:
+		metrics.SetOp(req.Context(), "HeadObject")
 		r.handleHeadObject(w, req, verified, bucket, key)
 	case http.MethodPut:
 		if uploadID != "" {
+			metrics.SetOp(req.Context(), "UploadPart")
 			r.handleUploadPart(w, req, verified, bucket, key)
 			return
 		}
+		// PutObject vs CopyObject: handlePutObject re-labels to
+		// CopyObject when x-amz-copy-source is present.
+		metrics.SetOp(req.Context(), "PutObject")
 		r.handlePutObject(w, req, verified, bucket, key)
 	case http.MethodPost:
 		if hasUploads {
+			metrics.SetOp(req.Context(), "CreateMultipartUpload")
 			r.handleCreateMultipartUpload(w, req, verified, bucket, key)
 			return
 		}
 		if uploadID != "" {
+			metrics.SetOp(req.Context(), "CompleteMultipartUpload")
 			r.handleCompleteMultipartUpload(w, req, verified, bucket, key)
 			return
 		}
 		writeError(w, req, errMethodNotAllowed, "POST requires ?uploads or ?uploadId")
 	case http.MethodDelete:
 		if uploadID != "" {
+			metrics.SetOp(req.Context(), "AbortMultipartUpload")
 			r.handleAbortMultipartUpload(w, req, verified, bucket, key)
 			return
 		}
+		metrics.SetOp(req.Context(), "DeleteObject")
 		r.handleDeleteObject(w, req, verified, bucket, key)
 	default:
 		writeError(w, req, errMethodNotAllowed, "method not supported")

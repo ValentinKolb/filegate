@@ -49,6 +49,15 @@ type RouterOptions struct {
 	ThumbnailMaxSourceBytes  int64
 	ThumbnailMaxPixels       int64
 	Rescan                   func() error
+
+	// MetricsHandler, when non-nil, is mounted at MetricsPath on the
+	// REST listener (no separate port). Auth is layered: MetricsToken
+	// if set, else the REST BearerToken, else open. The caller
+	// (cli/serve.go) validates MetricsPath does not collide with /v1
+	// or /health before constructing the router.
+	MetricsHandler http.Handler
+	MetricsPath    string
+	MetricsToken   string
 }
 
 type closeableHandler struct {
@@ -122,6 +131,18 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
+
+	// Prometheus /metrics on the REST listener with layered-token
+	// auth. Mounted only when the caller supplies a handler (i.e.
+	// metrics.enabled). The caller pre-validates the path.
+	if opts.MetricsHandler != nil {
+		metricsPath := opts.MetricsPath
+		if strings.TrimSpace(metricsPath) == "" {
+			metricsPath = "/metrics"
+		}
+		root.Handle("GET "+metricsPath,
+			metricsAuthMiddleware(opts.MetricsToken, opts.BearerToken)(opts.MetricsHandler))
+	}
 
 	auth := authMiddleware(opts.BearerToken)
 	handleV1 := func(pattern string, handler http.HandlerFunc) {
@@ -1127,6 +1148,61 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 		log.Printf("[filegate] method=%s path=%s status=%d dur=%s remote=%s",
 			r.Method, r.URL.Path, sw.status, time.Since(start), r.RemoteAddr)
 	})
+}
+
+// ValidateMetricsPath rejects a metrics path that would collide with
+// the REST route surface. Called at startup so a misconfiguration
+// fails loudly instead of producing a confusing ServeMux conflict or
+// shadowing a real route. The path must be absolute and must not be
+// "/health" or live under "/v1".
+func ValidateMetricsPath(path string) error {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return errors.New("metrics.path must not be empty")
+	}
+	if !strings.HasPrefix(p, "/") {
+		return errors.New("metrics.path must start with /")
+	}
+	if p == "/health" {
+		return errors.New("metrics.path must not be /health (reserved)")
+	}
+	if p == "/v1" || strings.HasPrefix(p, "/v1/") {
+		return errors.New("metrics.path must not live under /v1 (reserved for the REST API)")
+	}
+	return nil
+}
+
+// metricsAuthMiddleware guards the /metrics endpoint with the layered
+// token rule: require metricsToken if set, else require bearerToken,
+// else serve openly. The "open" case is intentional — operators on a
+// trusted internal network where the Prometheus scraper holds no
+// filegate credentials can leave both empty and rely on network
+// isolation. Comparison is constant-time to avoid leaking the token
+// via timing.
+func metricsAuthMiddleware(metricsToken, bearerToken string) func(http.Handler) http.Handler {
+	effective := strings.TrimSpace(metricsToken)
+	if effective == "" {
+		effective = strings.TrimSpace(bearerToken)
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if effective == "" {
+				next.ServeHTTP(w, r) // open — no credential configured
+				return
+			}
+			auth := strings.TrimSpace(r.Header.Get("Authorization"))
+			if !strings.HasPrefix(auth, "Bearer ") {
+				writeErr(w, http.StatusUnauthorized, "missing bearer token")
+				return
+			}
+			provided := strings.TrimPrefix(auth, "Bearer ")
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(effective)) != 1 {
+				writeErr(w, http.StatusUnauthorized, "invalid bearer token")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func authMiddleware(token string) func(http.Handler) http.Handler {

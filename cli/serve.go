@@ -21,10 +21,52 @@ import (
 	"github.com/valentinkolb/filegate/infra/detect"
 	"github.com/valentinkolb/filegate/infra/eventbus"
 	"github.com/valentinkolb/filegate/infra/filesystem"
+	"github.com/valentinkolb/filegate/infra/metrics"
 	indexpebble "github.com/valentinkolb/filegate/infra/pebble"
 
 	"github.com/spf13/cobra"
 )
+
+// Build identity, injectable via ldflags
+// (-X github.com/valentinkolb/filegate/cli.buildVersion=...). Default
+// to "dev"/"none" so an unstamped build still emits a well-formed
+// filegate_build_info series.
+var (
+	buildVersion = "dev"
+	buildCommit  = "none"
+)
+
+// metricsRESTHandler returns the /metrics http.Handler when metrics is
+// enabled, or nil otherwise (NewRouter then doesn't mount the route).
+// The registry is always live; this only gates the endpoint.
+func metricsRESTHandler(cfg domain.Config, reg *metrics.Registry) http.Handler {
+	if !cfg.Metrics.Enabled {
+		return nil
+	}
+	return reg.Handler()
+}
+
+// wrapMetrics wraps an adapter handler with the RED middleware when
+// metrics is enabled, otherwise returns it untouched (zero per-request
+// overhead when disabled). skipPath, when set, bypasses instrumentation
+// for that exact path — used to keep the /metrics scrape endpoint from
+// counting itself on every scrape.
+func wrapMetrics(h http.Handler, reg *metrics.Registry, adapter string, enabled bool, skipPath string) http.Handler {
+	if !enabled {
+		return h
+	}
+	instrumented := reg.Middleware(adapter)(h)
+	if skipPath == "" {
+		return instrumented
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == skipPath {
+			h.ServeHTTP(w, r)
+			return
+		}
+		instrumented.ServeHTTP(w, r)
+	})
+}
 
 func newDaemonServeCmd() *cobra.Command {
 	var configFile string
@@ -51,10 +93,29 @@ func newDaemonServeCmd() *cobra.Command {
 				return err
 			}
 
+			// Validate the metrics path before doing any work so a
+			// misconfiguration fails loudly at startup, not on the
+			// first scrape.
+			if cfg.Metrics.Enabled {
+				if err := httpadapter.ValidateMetricsPath(cfg.Metrics.Path); err != nil {
+					return err
+				}
+			}
+
 			idx, svc, err := buildCore(cfg)
 			if err != nil {
 				return err
 			}
+
+			// Metrics registry: always constructed so the background-
+			// loop + rate-limit counters are live from boot. Only the
+			// /metrics endpoint and the per-request middleware are
+			// gated on metrics.enabled. Pass it to the adapters and
+			// loops below.
+			metricsReg := metrics.New(
+				metrics.BuildInfo{Version: buildVersion, Commit: buildCommit},
+				metricsStatsProvider{svc: svc, indexPath: cfg.Storage.IndexPath},
+			)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -69,7 +130,7 @@ func newDaemonServeCmd() *cobra.Command {
 			detectorDone := make(chan struct{})
 			go func() {
 				defer close(detectorDone)
-				consumeDetectorEvents(ctx, svc, detector.Events())
+				consumeDetectorEvents(ctx, svc, detector.Events(), metricsReg)
 			}()
 
 			versioningEnabled := versioningShouldEnable(cfg.Versioning, cfg.Storage.BasePaths)
@@ -78,7 +139,7 @@ func newDaemonServeCmd() *cobra.Command {
 			if versioningEnabled {
 				log.Printf("[filegate] versioning: enabled (cooldown=%s, pruner_interval=%s)",
 					cfg.Versioning.Cooldown, cfg.Versioning.PrunerInterval)
-				go runVersioningPruner(ctx, svc, cfg.Versioning.PrunerInterval, prunerDone)
+				go runVersioningPruner(ctx, svc, cfg.Versioning.PrunerInterval, metricsReg, prunerDone)
 			} else {
 				close(prunerDone)
 				log.Printf("[filegate] versioning: disabled (config=%q, btrfs check failed for at least one mount)",
@@ -104,6 +165,9 @@ func newDaemonServeCmd() *cobra.Command {
 				ThumbnailMaxSourceBytes:  cfg.Thumbnail.MaxSourceBytes,
 				ThumbnailMaxPixels:       cfg.Thumbnail.MaxPixels,
 				Rescan:                   svc.Rescan,
+				MetricsHandler:           metricsRESTHandler(cfg, metricsReg),
+				MetricsPath:              cfg.Metrics.Path,
+				MetricsToken:             cfg.Metrics.Token,
 			})
 			var routerCloser interface{ Close() error }
 			if closer, ok := router.(interface{ Close() error }); ok {
@@ -112,7 +176,7 @@ func newDaemonServeCmd() *cobra.Command {
 
 			srv := &http.Server{
 				Addr:              cfg.Server.Listen,
-				Handler:           router,
+				Handler:           wrapMetrics(router, metricsReg, "rest", cfg.Metrics.Enabled, cfg.Metrics.Path),
 				ReadHeaderTimeout: 10 * time.Second,
 				ReadTimeout:       30 * time.Second,
 				WriteTimeout:      cfg.Server.WriteTimeout,
@@ -158,6 +222,7 @@ func newDaemonServeCmd() *cobra.Command {
 					SecretKey:        cfg.S3.SecretKey,
 					Keys:             keys,
 					AccessLogEnabled: cfg.Server.AccessLogEnabled,
+					Metrics:          metricsReg,
 				})
 				if hErr != nil {
 					cancel()
@@ -169,7 +234,7 @@ func newDaemonServeCmd() *cobra.Command {
 				}
 				s3Srv = &http.Server{
 					Addr:              cfg.S3.Listen,
-					Handler:           s3Handler,
+					Handler:           wrapMetrics(s3Handler, metricsReg, "s3", cfg.Metrics.Enabled, ""),
 					ReadHeaderTimeout: 10 * time.Second,
 					ReadTimeout:       30 * time.Second,
 					WriteTimeout:      cfg.Server.WriteTimeout,
@@ -190,7 +255,7 @@ func newDaemonServeCmd() *cobra.Command {
 					log.Printf("[filegate-s3] multipart cleanup: interval=%s done-retention=%s aborted-retention=%s stuck-max-age=%s",
 						cleanupCfg.Interval, cleanupCfg.DoneRetention, cleanupCfg.AbortedRetention, cleanupCfg.StuckUploadMaxAge)
 					s3CleanupDone = make(chan struct{})
-					go runMultipartCleanupLoop(ctx, svc, cleanupCfg, s3CleanupDone)
+					go runMultipartCleanupLoop(ctx, svc, cleanupCfg, metricsReg, s3CleanupDone)
 				} else {
 					log.Printf("[filegate-s3] multipart cleanup: disabled (interval=%s)", cleanupCfg.Interval)
 				}
@@ -282,7 +347,7 @@ func buildCore(cfg domain.Config) (*indexpebble.Index, *domain.Service, error) {
 	return idx, svc, nil
 }
 
-func consumeDetectorEvents(ctx context.Context, svc *domain.Service, events <-chan []detect.Event) {
+func consumeDetectorEvents(ctx context.Context, svc *domain.Service, events <-chan []detect.Event, reg *metrics.Registry) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -298,6 +363,7 @@ func consumeDetectorEvents(ctx context.Context, svc *domain.Service, events <-ch
 			if len(merged) == 0 {
 				continue
 			}
+			recordDetectorEvents(reg, merged)
 			if err := applyDetectorBatch(svc, merged); err != nil {
 				if isDetectorTerminalError(err) {
 					log.Printf("[filegate] detector stopping: %v", err)
@@ -314,6 +380,32 @@ func consumeDetectorEvents(ctx context.Context, svc *domain.Service, events <-ch
 			}
 		}
 	}
+}
+
+// recordDetectorEvents tallies a coalesced detector batch into the
+// per-type counter. Counting after coalescing (not per raw event)
+// keeps it cheap. reg may be nil (no-op).
+func recordDetectorEvents(reg *metrics.Registry, batch []detect.Event) {
+	if reg == nil {
+		return
+	}
+	var created, changed, deleted, unknown int
+	for _, e := range batch {
+		switch e.Type {
+		case detect.EventCreated:
+			created++
+		case detect.EventChanged:
+			changed++
+		case detect.EventDeleted:
+			deleted++
+		default:
+			unknown++
+		}
+	}
+	reg.DetectorEvents("created", created)
+	reg.DetectorEvents("changed", changed)
+	reg.DetectorEvents("deleted", deleted)
+	reg.DetectorEvents("unknown", unknown)
 }
 
 func coalesceDetectorBatches(ctx context.Context, events <-chan []detect.Event, first []detect.Event) []detect.Event {

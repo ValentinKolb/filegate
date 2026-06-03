@@ -68,3 +68,31 @@ volumes:
   filegate-index:
   caddy-data:
   caddy-config:
+
+# ─── Prometheus metrics ────────────────────────────────────────
+# Enable metrics in your filegate config (no extra port — served on
+# the REST listener):
+#
+#   metrics:
+#     enabled: true
+#     path: "/metrics"
+#     token: "scrape-secret"      # or leave blank to reuse the REST bearer token
+#
+# Then point Prometheus at the REST listener. Example scrape_config
+# (prometheus.yml), assuming filegate's REST port :8080 is reachable
+# from your Prometheus instance:
+#
+#   scrape_configs:
+#     - job_name: filegate
+#       metrics_path: /metrics
+#       static_configs:
+#         - targets: ["filegate:8080"]
+#       authorization:
+#         type: Bearer
+#         credentials: "scrape-secret"
+#
+# Grafana dashboards are yours to build — filegate exposes the
+# metrics, you visualize them. See docs/metrics.md for the full
+# metric reference and ready-to-use PromQL (5xx rate, p95 latency,
+# disk-fill alert, FD-leak detection, multipart-Complete phase
+# breakdown).

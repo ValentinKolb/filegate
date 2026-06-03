@@ -38,7 +38,7 @@ func TestConsumeDetectorEventsWithPollerSyncsExternalChanges(t *testing.T) {
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
-		consumeDetectorEvents(ctx, svc, poller.Events())
+		consumeDetectorEvents(ctx, svc, poller.Events(), nil)
 	}()
 	defer func() {
 		cancel()
@@ -215,7 +215,7 @@ func TestConsumeDetectorEventsStressWithDuplicates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan []detect.Event, 8192)
-	go consumeDetectorEvents(ctx, svc, ch)
+	go consumeDetectorEvents(ctx, svc, ch, nil)
 
 	rnd := rand.New(rand.NewSource(42))
 	for round := 0; round < 12; round++ {
@@ -309,7 +309,7 @@ func TestConsumeDetectorEventsSoak(t *testing.T) {
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
-		consumeDetectorEvents(ctx, svc, poller.Events())
+		consumeDetectorEvents(ctx, svc, poller.Events(), nil)
 	}()
 	defer func() {
 		cancel()
@@ -393,7 +393,7 @@ func TestConsumeDetectorEventsChaos(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := make(chan []detect.Event, 16384)
-	go consumeDetectorEvents(ctx, svc, ch)
+	go consumeDetectorEvents(ctx, svc, ch, nil)
 
 	for i := 0; i < 1200; i++ {
 		name := fmt.Sprintf("chaos-seed-%04d.bin", i)
@@ -481,7 +481,7 @@ func TestConsumeDetectorEventsWithRealBTRFS(t *testing.T) {
 	}
 	runner.Start(ctx)
 	defer runner.Close()
-	go consumeDetectorEvents(ctx, svc, runner.Events())
+	go consumeDetectorEvents(ctx, svc, runner.Events(), nil)
 
 	target := filepath.Join(subvol, "real-btrfs.txt")
 	if err := os.WriteFile(target, []byte("one"), 0o644); err != nil {

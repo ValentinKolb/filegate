@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/valentinkolb/filegate/domain"
+	"github.com/valentinkolb/filegate/infra/metrics"
 )
 
 // handleCopyObject implements S3 CopyObject. The wire shape is
@@ -35,6 +36,10 @@ import (
 //   - Single-object copy: dest etag_md5 == source's; multipart_etag
 //     CLEARED on the destination.
 func (rt *router) handleCopyObject(w http.ResponseWriter, r *http.Request, verified *sigV4Result, destBucket, destKey string) {
+	// Re-label the op: the dispatcher set "PutObject" before
+	// detecting the x-amz-copy-source header. SetOp overwrites the
+	// holder so the metric attributes this to CopyObject.
+	metrics.SetOp(r.Context(), "CopyObject")
 	if err := validateObjectKey(destKey); err != nil {
 		writeError(w, r, errInvalidArgument, err.Error(), withBucket(destBucket), withKey(destKey))
 		return

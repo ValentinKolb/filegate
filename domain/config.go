@@ -14,6 +14,21 @@ type Config struct {
 	Thumbnail  ThumbnailConfig  `mapstructure:"thumbnail"`
 	Versioning VersioningConfig `mapstructure:"versioning"`
 	S3         S3Config         `mapstructure:"s3"`
+	Metrics    MetricsConfig    `mapstructure:"metrics"`
+}
+
+// MetricsConfig controls the optional Prometheus /metrics endpoint.
+// The endpoint is served on the EXISTING REST listener (no extra
+// port) at Path. Auth is layered: if Token is set it is required;
+// otherwise the REST Auth.BearerToken is required; if neither is set
+// the endpoint is served openly (suitable for an internal-only
+// network where the scraper has no credentials).
+//
+// Enabled defaults to false — REST/S3-only deployments pay nothing.
+type MetricsConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Path    string `mapstructure:"path"`
+	Token   string `mapstructure:"token"`
 }
 
 // S3Config controls the optional S3-compatible HTTP frontend. When

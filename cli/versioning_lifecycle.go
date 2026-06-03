@@ -9,6 +9,7 @@ import (
 
 	"github.com/valentinkolb/filegate/domain"
 	"github.com/valentinkolb/filegate/infra/detect"
+	"github.com/valentinkolb/filegate/infra/metrics"
 )
 
 // versionsDirName mirrors domain.versionsDirName — kept here so the CLI
@@ -63,7 +64,7 @@ func versioningShouldEnable(cfg domain.VersioningConfig, basePaths []string) boo
 // context is cancelled. The first prune happens after one interval (not
 // at startup) so a flapping daemon doesn't immediately churn through
 // reflinked blobs after every restart.
-func runVersioningPruner(ctx context.Context, svc *domain.Service, interval time.Duration, done chan<- struct{}) {
+func runVersioningPruner(ctx context.Context, svc *domain.Service, interval time.Duration, reg *metrics.Registry, done chan<- struct{}) {
 	defer close(done)
 	if interval <= 0 {
 		interval = 5 * time.Minute
@@ -80,6 +81,7 @@ func runVersioningPruner(ctx context.Context, svc *domain.Service, interval time
 				log.Printf("[filegate] versioning pruner: %v", err)
 				continue
 			}
+			reg.PruneStats(stats.VersionsDeleted, stats.VersionsKept, stats.Errors)
 			if stats.VersionsDeleted > 0 || stats.OrphansPurged > 0 {
 				log.Printf("[filegate] versioning pruner: scanned=%d kept=%d deleted=%d orphans=%d errors=%d",
 					stats.FilesScanned, stats.VersionsKept, stats.VersionsDeleted,
