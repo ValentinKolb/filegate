@@ -26,6 +26,14 @@ rely on network isolation. Use `metrics.token` when you want the scraper
 to authenticate with a credential distinct from the REST API token (e.g.
 a read-only scrape secret you can rotate independently).
 
+> **Reaching the open mode:** `auth.bearer_token` is normally required at
+> startup. It may be left empty **only when `s3.enabled=true`** — an
+> S3-only deployment authenticates via SigV4 and runs with the REST API
+> locked down (every `/v1` route returns 401). That is the configuration
+> in which both tokens can be blank and `/metrics` is served openly. A
+> REST-enabled daemon always has a bearer token, so `/metrics` falls back
+> to it rather than serving openly.
+
 `metrics.path` must not collide with the REST surface — `/health` and
 anything under `/v1` are rejected at startup.
 

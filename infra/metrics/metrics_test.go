@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,6 +121,80 @@ func TestMiddlewareOpDefaultsToMethod(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodDelete, "/", nil))
 	if got := testutil.ToFloat64(r.httpRequests.WithLabelValues("rest", "DELETE", "2xx")); got != 1 {
 		t.Errorf("op did not default to method DELETE")
+	}
+}
+
+// readOnly hides any WriterTo on the wrapped reader so io.Copy is
+// forced down the dst.ReadFrom path (mirrors *os.File as a source).
+type readOnly struct{ r io.Reader }
+
+func (ro readOnly) Read(p []byte) (int, error) { return ro.r.Read(p) }
+
+// readerFromRecorder wraps httptest.ResponseRecorder and additionally
+// implements io.ReaderFrom, simulating net/http's sendfile-capable
+// writer so we can prove the wrapper delegates and counts.
+type readerFromRecorder struct {
+	*httptest.ResponseRecorder
+	readFromUsed bool
+}
+
+func (r *readerFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	r.readFromUsed = true
+	n, err := io.Copy(r.ResponseRecorder.Body, src)
+	return n, err
+}
+
+func TestMiddlewareReadFromDelegatesAndCounts(t *testing.T) {
+	reg := New(BuildInfo{}, nil)
+	rec := &readerFromRecorder{ResponseRecorder: httptest.NewRecorder()}
+	payload := bytes.Repeat([]byte("x"), 4096)
+
+	h := reg.Middleware("rest")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Wrap the source so it does NOT implement io.WriterTo —
+		// otherwise io.Copy would use src.WriteTo and never reach our
+		// dst.ReadFrom. This mirrors the production GetObject case
+		// where the source is an *os.File (no WriteTo).
+		src := readOnly{bytes.NewReader(payload)}
+		if _, err := io.Copy(w, src); err != nil {
+			t.Errorf("copy: %v", err)
+		}
+	}))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if !rec.readFromUsed {
+		t.Errorf("ReadFrom fast path was hidden by the wrapper")
+	}
+	// response_size histogram must reflect the 4096 bytes copied via
+	// the ReaderFrom path.
+	if c := testutil.CollectAndCount(reg.httpRespBytes); c == 0 {
+		t.Errorf("response-size not recorded through ReadFrom")
+	}
+	if rec.Body.Len() != len(payload) {
+		t.Errorf("body length=%d, want %d", rec.Body.Len(), len(payload))
+	}
+}
+
+func TestMiddlewareReadFromFallbackCounts(t *testing.T) {
+	// A plain recorder does NOT implement io.ReaderFrom, so the wrapper
+	// falls back to the Write-counting loop. Bytes must still be
+	// counted and delivered.
+	reg := New(BuildInfo{}, nil)
+	rec := httptest.NewRecorder()
+	payload := bytes.Repeat([]byte("y"), 2048)
+	h := reg.Middleware("rest")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Call ReadFrom explicitly via io.Copy; the underlying recorder
+		// lacks ReaderFrom so our fallback runs.
+		sw, ok := w.(io.ReaderFrom)
+		if !ok {
+			t.Fatalf("wrapper must implement io.ReaderFrom")
+		}
+		if _, err := sw.ReadFrom(bytes.NewReader(payload)); err != nil {
+			t.Errorf("ReadFrom: %v", err)
+		}
+	}))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Body.Len() != len(payload) {
+		t.Errorf("fallback body length=%d, want %d", rec.Body.Len(), len(payload))
 	}
 }
 
@@ -241,11 +317,13 @@ func TestHandlerServesMetrics(t *testing.T) {
 	for _, want := range []string{
 		"filegate_build_info",
 		"filegate_s3_ratelimit_rejected_total 1",
-		"go_goroutines",       // Go collector
-		"process_open_fds",    // process collector — the FD-leak signal
+		"go_goroutines", // Go collector — portable across platforms
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics body missing %q", want)
 		}
 	}
+	// NOTE: process_open_fds (the FD-leak signal) is asserted in the
+	// linux-tagged test below — client_golang's process collector is
+	// /proc-backed and emits nothing on macOS/BSD.
 }

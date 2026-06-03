@@ -131,8 +131,15 @@ func loadConfig(configFile string) (domain.Config, error) {
 	if len(cfg.Storage.BasePaths) == 0 {
 		return cfg, fmt.Errorf("storage.base_paths is required")
 	}
-	if strings.TrimSpace(cfg.Auth.BearerToken) == "" {
-		return cfg, fmt.Errorf("auth.bearer_token is required")
+	// auth.bearer_token guards the REST API. It is required UNLESS the
+	// S3 listener is enabled — an S3-only deployment authenticates via
+	// SigV4 and legitimately runs with the REST API locked down (the
+	// REST auth middleware fails closed on an empty token, returning
+	// 401 for every /v1 route). Allowing an empty bearer token here is
+	// what makes the documented open /metrics mode reachable for an
+	// S3-only daemon on a trusted internal network.
+	if strings.TrimSpace(cfg.Auth.BearerToken) == "" && !cfg.S3.Enabled {
+		return cfg, fmt.Errorf("auth.bearer_token is required (unless s3.enabled=true for an S3-only deployment)")
 	}
 
 	cfg.Detection.PollInterval = v.GetDuration("detection.poll_interval")

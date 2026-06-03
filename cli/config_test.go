@@ -158,6 +158,29 @@ func TestLoadConfigMetricsDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadConfigBearerOptionalForS3Only pins that an empty
+// auth.bearer_token is allowed when s3.enabled=true (S3-only
+// deployment, REST locked down), and rejected otherwise. This is what
+// makes the documented open /metrics mode reachable.
+func TestLoadConfigBearerOptionalForS3Only(t *testing.T) {
+	t.Run("empty bearer + s3 enabled = ok", func(t *testing.T) {
+		t.Setenv("FILEGATE_STORAGE_BASE_PATHS", t.TempDir())
+		t.Setenv("FILEGATE_AUTH_BEARER_TOKEN", "")
+		t.Setenv("FILEGATE_S3_ENABLED", "true")
+		if _, err := loadConfig(""); err != nil {
+			t.Errorf("S3-only with empty bearer should load, got %v", err)
+		}
+	})
+	t.Run("empty bearer + s3 disabled = error", func(t *testing.T) {
+		t.Setenv("FILEGATE_STORAGE_BASE_PATHS", t.TempDir())
+		t.Setenv("FILEGATE_AUTH_BEARER_TOKEN", "")
+		t.Setenv("FILEGATE_S3_ENABLED", "false")
+		if _, err := loadConfig(""); err == nil {
+			t.Errorf("empty bearer without S3 should error")
+		}
+	})
+}
+
 func TestLoadConfigExplicitMissingFileReturnsError(t *testing.T) {
 	_, err := loadConfig(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err == nil {

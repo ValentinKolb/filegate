@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -136,3 +137,39 @@ func (w *sizeStatusWriter) Write(b []byte) (int, error) {
 	w.written += int64(n)
 	return n, err
 }
+
+// ReadFrom preserves net/http's sendfile fast path. io.Copy /
+// io.CopyBuffer check whether the destination implements io.ReaderFrom
+// and, for an *os.File source, the http response writer uses sendfile.
+// Without this method the wrapper would hide ReaderFrom and force every
+// large download (GetObject, REST content streaming) through a buffered
+// copy. We delegate to the underlying writer's ReaderFrom when present
+// and count the bytes it reports; otherwise we copy through Write
+// (which counts) via a writer-only shim so io.Copy can't re-enter here.
+func (w *sizeStatusWriter) ReadFrom(src io.Reader) (int64, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+	}
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(src)
+		w.written += n
+		return n, err
+	}
+	return io.Copy(writeOnly{w}, src)
+}
+
+// Flush delegates to the underlying writer so streaming handlers keep
+// working when instrumented. A no-op when the underlying writer isn't
+// a Flusher.
+func (w *sizeStatusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// writeOnly exposes only Write, so io.Copy in the ReadFrom fallback
+// uses the buffered loop (counting via sizeStatusWriter.Write) instead
+// of recursing into ReadFrom.
+type writeOnly struct{ w *sizeStatusWriter }
+
+func (c writeOnly) Write(b []byte) (int, error) { return c.w.Write(b) }
