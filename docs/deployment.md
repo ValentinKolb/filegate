@@ -43,6 +43,21 @@ The package installs:
 
 Service is installed but not auto-started by design.
 
+## Package Upgrade
+
+Package upgrades are offline operations. The preinstall script refuses to replace package files while `filegate.service` is active, so stop the daemon before upgrading:
+
+```bash
+sudo systemctl stop filegate
+sudo dpkg -i ./dist/filegate_<version>_linux_amd64.deb
+# or:
+sudo rpm -Uvh ./dist/filegate-<version>-1.x86_64.rpm
+sudo systemctl start filegate
+sudo systemctl status filegate
+```
+
+If the service is still running, the package manager exits before installing the new version and prints the stop instruction. The script does not stop the service automatically.
+
 ## systemd Operations
 
 ```bash

@@ -1,6 +1,20 @@
 #!/bin/sh
 set -eu
 
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl is-active --quiet filegate.service >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+filegate.service is currently running.
+
+Stop the service before installing or upgrading Filegate:
+  sudo systemctl stop filegate
+
+Then rerun the package install/upgrade command and start the service again.
+EOF
+    exit 1
+  fi
+fi
+
 if ! getent group filegate >/dev/null 2>&1; then
   groupadd --system filegate >/dev/null 2>&1 || true
 fi
@@ -21,4 +35,3 @@ if ! id -u filegate >/dev/null 2>&1; then
 fi
 
 exit 0
-
