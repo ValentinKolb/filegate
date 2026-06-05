@@ -3,7 +3,8 @@
 Base requirements:
 
 - API prefix: `/v1`
-- Auth: `Authorization: Bearer <token>` on all `/v1/*` routes
+- Auth: `Authorization: Bearer <token>` on `/v1/*` routes, except the final
+  `PUT /v1/uploads/direct/{token}` request
 - Health route without auth: `GET /health`
 - JSON errors: `{ "error": "..." }`. On `409 Conflict`, the body also
   carries `"existingId"` and `"existingPath"` so clients can render a
@@ -157,6 +158,37 @@ notes.
   - May return `507` when storage free-space guard rejects new writes
 
 Chunk staging location is mount-local: `<mount>/.fg-uploads/<uploadId>/`.
+
+## Direct Upload URLs
+
+Direct upload URLs let a trusted backend mint a short-lived browser upload URL
+without exposing the Filegate bearer token to the browser.
+
+- `POST /v1/uploads/direct`
+  - Requires `Authorization: Bearer <token>`
+  - Body:
+    - `path` (required): virtual target path, for example `data/inbox/a.jpg`
+    - `expiresInSeconds` (optional): default `900`, maximum `86400`
+    - `contentType` (optional): required by the final uploader when set
+    - `onConflict` (optional): `error|overwrite|rename`, default `error`
+    - `maxBytes` (optional): per-URL body cap, must be `<= upload.max_upload_bytes`
+  - Returns `201` with:
+    - `uploadUrl`: absolute `PUT` URL
+    - `method`: `PUT`
+    - `path`
+    - `expiresAt`: Unix seconds
+    - `maxBytes`
+- `PUT /v1/uploads/direct/{token}`
+  - Does not accept the REST bearer token; the URL token is the credential
+  - Body: binary stream
+  - Returns the same node JSON and `X-Node-Id` / `X-Created-Id` headers as
+    `PUT /v1/paths/{path...}`
+  - Returns `401` for expired, malformed, or tampered URLs
+  - Returns `413` when the body exceeds the URL's `maxBytes`
+
+`server.public_url` controls the base URL used in `uploadUrl`. Leave it empty
+only when the authenticated minting request already arrives with the public
+host and scheme.
 
 ## Index Maintenance
 

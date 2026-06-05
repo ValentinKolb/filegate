@@ -75,7 +75,7 @@ Current extension usage:
 ## Security-relevant Design Points
 
 - Virtual path sanitization and root confinement in domain/path helpers
-- Bearer auth enforced for all `/v1/*`
+- Bearer auth enforced for `/v1/*`, except signed direct-upload PUT URLs
 - Directory content download as tar stream with preflight checks
 - Ownership/mode updates via explicit API fields (no implicit elevation path)
 - Max body limits for JSON and upload endpoints

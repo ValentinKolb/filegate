@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ type configFlagSpec struct {
 func allConfigFlagSpecs() []configFlagSpec {
 	return []configFlagSpec{
 		{Name: "server-listen", Path: "server.listen", Kind: configFlagString, Usage: "REST listener address"},
+		{Name: "server-public-url", Path: "server.public_url", Kind: configFlagString, Usage: "public REST base URL used when minting direct upload URLs"},
 		{Name: "server-write-timeout", Path: "server.write_timeout", Kind: configFlagDuration, Usage: "HTTP response write timeout"},
 		{Name: "server-access-log-enabled", Path: "server.access_log_enabled", Kind: configFlagBool, Usage: "enable REST and S3 access logs"},
 		{Name: "server-shutdown-timeout", Path: "server.shutdown_timeout", Kind: configFlagDuration, Usage: "graceful shutdown timeout"},
@@ -133,6 +135,8 @@ func applyChangedConfigFlag(flags *pflag.FlagSet, spec configFlagSpec, cfg *doma
 	switch spec.Path {
 	case "server.listen":
 		cfg.Server.Listen = getFlagString(flags, spec.Name)
+	case "server.public_url":
+		cfg.Server.PublicURL = strings.TrimRight(getFlagString(flags, spec.Name), "/")
 	case "server.write_timeout":
 		cfg.Server.WriteTimeout = getFlagDuration(flags, spec.Name)
 	case "server.access_log_enabled":
@@ -412,6 +416,9 @@ func validateResolvedConfig(cfg domain.Config) error {
 	if strings.TrimSpace(cfg.Auth.BearerToken) == "" && !cfg.S3.Enabled {
 		return fmt.Errorf("auth.bearer_token is required (unless s3.enabled=true for an S3-only deployment)")
 	}
+	if err := validatePublicURL(cfg.Server.PublicURL); err != nil {
+		return err
+	}
 	backend := strings.ToLower(strings.TrimSpace(cfg.Detection.Backend))
 	if backend == "" {
 		backend = "auto"
@@ -435,6 +442,21 @@ func validateResolvedConfig(cfg domain.Config) error {
 	}
 	if err := validateS3Config(cfg); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validatePublicURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("server.public_url must be an absolute http(s) URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("server.public_url must use http or https")
 	}
 	return nil
 }

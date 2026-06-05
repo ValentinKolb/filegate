@@ -4,7 +4,13 @@ export type { FetchImpl } from "./core.js";
 
 export type { GetPathOptions, PathPutResponse, PutPathOptions } from "./paths.js";
 export type { ThumbnailOptions } from "./nodes.js";
-export type { ChunkedSendResult } from "./uploads.js";
+export {
+  uploadDirect,
+  type ChunkedSendResult,
+  type DirectUploadFinish,
+  type DirectUploadOptions,
+  type DirectUploadResult,
+} from "./uploads.js";
 export type { GlobOptions } from "./search.js";
 export type {
   ListVersionsOptions,
@@ -28,6 +34,8 @@ export type {
   ChunkedProgressResponse,
   ChunkedStartRequest,
   ChunkedStatusResponse,
+  DirectUploadURLRequest,
+  DirectUploadURLResponse,
   ErrorResponse,
   GlobSearchError,
   GlobSearchMeta,

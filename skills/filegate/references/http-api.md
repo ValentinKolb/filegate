@@ -5,7 +5,8 @@ For runtimes without a Filegate SDK (Python, Rust, curl, ...), or when you need 
 ## Universal rules
 
 - **Base path**: all routes (except `/health`) live under `/v1`.
-- **Auth**: every `/v1/*` request must include `Authorization: Bearer <token>`. No exceptions.
+- **Auth**: every `/v1/*` request must include `Authorization: Bearer <token>`,
+  except the final `PUT /v1/uploads/direct/{token}` request.
 - **JSON**: request and response bodies use `application/json` unless explicitly noted (file uploads/downloads use the actual content type).
 - **Errors**: `{ "error": "..." }` for all non-2xx. **On 409 the body
   may also carry** `{ "existingId": "...", "existingPath": "..." }` —
@@ -135,6 +136,35 @@ PUT /v1/uploads/chunked/{uploadId}/chunks/{index}
   }
 → may return 409 (authoritative conflict check at finalize)
 ```
+
+## Direct upload URLs
+
+```
+POST /v1/uploads/direct
+Authorization: Bearer <token>
+body: {
+  "path": "data/inbox/photo.jpg",
+  "expiresInSeconds": 900,
+  "contentType": "image/jpeg",
+  "onConflict": "error" | "overwrite" | "rename",
+  "maxBytes": 52428800
+}
+→ {
+  "uploadUrl": "https://files.example.com/v1/uploads/direct/<token>",
+  "method": "PUT",
+  "path": "data/inbox/photo.jpg",
+  "expiresAt": 1780000000,
+  "maxBytes": 52428800
+}
+
+PUT /v1/uploads/direct/{token}
+Body: <file bytes>
+→ 201 Created or 200 OK with Node metadata
+→ headers: X-Node-Id, X-Created-Id (only on create)
+```
+
+Use this for browser uploads where your backend holds the Filegate bearer
+token but the browser should stream the file directly to Filegate.
 
 ## Versions
 

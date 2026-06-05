@@ -7,6 +7,9 @@
 
 server:
   listen: ":8080"
+  # Public REST base URL used when minting direct browser upload URLs.
+  # Example: "https://files.example.com". Leave empty when unused.
+  public_url: ""
   write_timeout: "5m"
   shutdown_timeout: "60s"
   access_log_enabled: true

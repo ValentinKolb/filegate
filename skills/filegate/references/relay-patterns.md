@@ -239,6 +239,7 @@ try {
 ```
 
 Server-side staging happens on Filegate's host, not in your backend — the
-chunks pass through your relay but are never buffered there. The browser
-cannot talk to Filegate directly without holding the daemon token, and
-Filegate has no token-minting endpoint. Always relay through your backend.
+chunks pass through your relay but are never buffered there. For single
+browser uploads that should bypass your backend's request-body path, mint a
+direct upload URL on the backend and use `uploadDirect(...)` in the browser.
+For all other API calls, relay through your backend.

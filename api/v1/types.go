@@ -256,6 +256,28 @@ type ChunkedCompleteResponse struct {
 	File      NodeWithChecksum `json:"file"`
 }
 
+// DirectUploadURLRequest is the body for POST /v1/uploads/direct.
+//
+// Filegate returns a short-lived unauthenticated PUT URL scoped to exactly
+// Path. The caller must be authenticated with the REST bearer token to mint
+// the URL, but the final uploader only needs the returned URL.
+type DirectUploadURLRequest struct {
+	Path             string `json:"path"`
+	ExpiresInSeconds int64  `json:"expiresInSeconds,omitempty"`
+	ContentType      string `json:"contentType,omitempty"`
+	OnConflict       string `json:"onConflict,omitempty"`
+	MaxBytes         int64  `json:"maxBytes,omitempty"`
+}
+
+// DirectUploadURLResponse is returned after minting a direct upload URL.
+type DirectUploadURLResponse struct {
+	UploadURL string `json:"uploadUrl"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	ExpiresAt int64  `json:"expiresAt"`
+	MaxBytes  int64  `json:"maxBytes"`
+}
+
 // IndexResolveRequest is the body for POST /v1/index/resolve.
 type IndexResolveRequest struct {
 	Path  string   `json:"path,omitempty"`

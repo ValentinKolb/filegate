@@ -6,7 +6,7 @@ This document lists core runtime assumptions and behavioral guarantees.
 
 - Linux-only runtime support
 - No backward-compatibility guarantee with legacy TS-only implementation
-- Bearer token auth for `/v1/*`
+- Bearer token auth for `/v1/*`, except the final `PUT` to a signed direct-upload URL
 
 ## Virtual Filesystem Model
 
@@ -44,6 +44,7 @@ Detector cost model:
 ## Write Behavior
 
 - One-shot upload: `PUT /v1/paths/{path...}`
+- Direct signed upload: `PUT /v1/uploads/direct/{token}` after `POST /v1/uploads/direct`
 - Node content replace: `PUT /v1/nodes/{id}` (file nodes only)
 - Directory creation: `POST /v1/nodes/{id}/mkdir`
 - Metadata update: `PATCH /v1/nodes/{id}`

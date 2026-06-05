@@ -26,6 +26,7 @@ You are integrating Filegate into an application. Filegate is a Linux-only HTTP 
 | One-shot upload at a virtual path (small files)   | [`references/ts-sdk.md`](references/ts-sdk.md) or [`references/go-sdk.md`](references/go-sdk.md) |
 | Large/resumable uploads with progress             | [`references/chunked-uploads.md`](references/chunked-uploads.md)    |
 | Browser → my backend → Filegate (streaming relay) | [`references/relay-patterns.md`](references/relay-patterns.md)      |
+| Direct browser upload URL from a backend          | [`references/ts-sdk.md`](references/ts-sdk.md) and [`references/http-api.md`](references/http-api.md) |
 | User uploads a file with a name that already exists | [`references/conflict-handling.md`](references/conflict-handling.md) |
 | Build a thumbnail gallery / glob search           | [`references/function-overview.md`](references/function-overview.md) (sections "Thumbnails" + "Search") |
 | Wire up auth, handle errors, build deployment     | [`references/auth-and-errors.md`](references/auth-and-errors.md)    |
@@ -34,7 +35,9 @@ You are integrating Filegate into an application. Filegate is a Linux-only HTTP 
 
 ## Hard rules — non-negotiable
 
-- **All `/v1/*` requests need `Authorization: Bearer <token>`.** No exceptions. The only auth-free endpoint is `GET /health`.
+- **All `/v1/*` requests need `Authorization: Bearer <token>` except
+  signed direct-upload PUT URLs.** The other auth-free endpoint is
+  `GET /health`.
 - **Use the right client construction for your runtime.** Server (Node/Bun)
   → env-based default. **Public browser apps must NOT construct a
   `Filegate` client at all** — Filegate's bearer token must never reach an

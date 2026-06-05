@@ -129,6 +129,7 @@ type S3KeyConfig struct {
 // ServerConfig controls HTTP server behavior.
 type ServerConfig struct {
 	Listen           string        `mapstructure:"listen"`
+	PublicURL        string        `mapstructure:"public_url"`
 	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
 	AccessLogEnabled bool          `mapstructure:"access_log_enabled"`
 	// ShutdownTimeout bounds how long the daemon waits for

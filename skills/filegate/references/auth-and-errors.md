@@ -8,9 +8,13 @@ Filegate has exactly one auth mechanism: a single bearer token configured at dae
 Authorization: Bearer <token>
 ```
 
-Required on every `/v1/*` request. Missing or wrong → `401 Unauthorized`.
+Required on every `/v1/*` request except `PUT /v1/uploads/direct/{token}`.
+Missing or wrong → `401 Unauthorized`.
 
-The only auth-free endpoint is `GET /health` (for k8s liveness probes and similar).
+Auth-free endpoints:
+
+- `GET /health` (for k8s liveness probes and similar)
+- `PUT /v1/uploads/direct/{token}` after a trusted backend minted the signed URL
 
 ### What this means
 
@@ -30,9 +34,10 @@ The only auth-free endpoint is `GET /health` (for k8s liveness probes and simila
 | Secret manager (Vault, etc.)  | Production backend                                    |
 
 **Never** embed the Filegate token in browser code or a public repo.
-Filegate has no token-minting endpoint, no expiry, and no scopes — leaking
-it is a full compromise. Browsers should always go through your backend
-(see [`relay-patterns.md`](relay-patterns.md)).
+The bearer token has no scopes or per-user auth — leaking it is a full
+compromise. Browsers should use your backend relay, or a direct upload URL
+that your backend minted for one path and expiry (see
+[`relay-patterns.md`](relay-patterns.md)).
 
 ## Error model
 

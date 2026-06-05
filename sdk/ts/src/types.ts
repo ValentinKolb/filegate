@@ -200,6 +200,24 @@ export interface ChunkedCompleteResponse {
   file: NodeWithChecksum;
 }
 
+// --- Direct uploads ---
+
+export interface DirectUploadURLRequest {
+  path: string;
+  expiresInSeconds?: number;
+  contentType?: string;
+  onConflict?: FileConflictMode;
+  maxBytes?: number;
+}
+
+export interface DirectUploadURLResponse {
+  uploadUrl: string;
+  method: "PUT";
+  path: string;
+  expiresAt: number;
+  maxBytes: number;
+}
+
 // --- Index resolve ---
 
 export interface IndexResolveRequest {

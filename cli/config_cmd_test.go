@@ -16,6 +16,7 @@ func TestConfigSetWritesYAMLBackupAndLoads(t *testing.T) {
 	out, err := executeCLI(
 		"config", "--config", cfgPath, "set",
 		"--server-listen", ":9091",
+		"--server-public-url", "https://files.example.test",
 		"--s3-enabled",
 		"--s3-access-key", "FGLEGACYACCESS",
 		"--s3-secret-key", "legacy-secret",
@@ -34,6 +35,9 @@ func TestConfigSetWritesYAMLBackupAndLoads(t *testing.T) {
 	}
 	if cfg.Server.Listen != ":9091" {
 		t.Fatalf("server.listen=%q, want :9091", cfg.Server.Listen)
+	}
+	if cfg.Server.PublicURL != "https://files.example.test" {
+		t.Fatalf("server.public_url=%q, want https://files.example.test", cfg.Server.PublicURL)
 	}
 	if !cfg.S3.Enabled || cfg.S3.AccessKey != "FGLEGACYACCESS" || cfg.S3.SecretKey != "legacy-secret" {
 		t.Fatalf("s3 legacy fields not written: %+v", cfg.S3)

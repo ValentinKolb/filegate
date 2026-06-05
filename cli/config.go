@@ -17,6 +17,7 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v := viper.New()
 
 	v.SetDefault("server.listen", ":8080")
+	v.SetDefault("server.public_url", "")
 	v.SetDefault("server.write_timeout", "5m")
 	v.SetDefault("server.access_log_enabled", true)
 	v.SetDefault("server.shutdown_timeout", "60s")

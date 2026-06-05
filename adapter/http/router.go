@@ -34,6 +34,7 @@ import (
 type RouterOptions struct {
 	BearerToken              string
 	AccessLogEnabled         bool
+	PublicURL                string
 	IndexPath                string
 	JobWorkers               int
 	JobQueueSize             int
@@ -120,6 +121,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		opts.MaxConcurrentChunkWrites,
 		opts.UploadMinFreeBytes,
 	)
+	directUploads := newDirectUploadManager(svc, opts.BearerToken, opts.PublicURL, opts.MaxUploadBytes)
 	thumbs := newThumbnailer(
 		svc,
 		opts.ThumbnailLRUCacheSize,
@@ -144,6 +146,8 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		root.Handle("GET "+metricsPath,
 			metricsAuthMiddleware(opts.MetricsToken, opts.BearerToken)(opts.MetricsHandler))
 	}
+
+	root.HandleFunc("PUT /v1/uploads/direct/{token}", directUploads.handlePut)
 
 	auth := authMiddleware(opts.BearerToken)
 	handleV1 := func(pattern string, handler http.HandlerFunc) {
@@ -536,6 +540,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 	handleV1("POST /v1/uploads/chunked/start", chunked.handleStart)
 	handleV1("GET /v1/uploads/chunked/{uploadId}", chunked.handleStatus)
 	handleV1("PUT /v1/uploads/chunked/{uploadId}/chunks/{index}", chunked.handleChunk)
+	handleV1("POST /v1/uploads/direct", directUploads.handleCreate)
 
 	handleV1("POST /v1/index/rescan", func(w http.ResponseWriter, _ *http.Request) {
 		if opts.Rescan == nil {

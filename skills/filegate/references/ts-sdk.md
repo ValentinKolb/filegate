@@ -51,24 +51,37 @@ Use this when:
 ### Public browser apps — DO NOT construct `Filegate` directly
 
 Filegate's bearer token grants full access to all data on the daemon.
-There is no token-minting endpoint, no scopes, no per-user auth. Putting
-that token in JavaScript that ships to end-users (a public web app, a
-mobile webview, an embedded widget) is a full compromise the moment a
-single user opens devtools.
+There are no bearer-token scopes or per-user auth. Putting that token in
+JavaScript that ships to end-users (a public web app, a mobile webview,
+an embedded widget) is a full compromise the moment a single user opens
+devtools.
 
-Instead, run a **backend relay** in front of Filegate:
+For general API calls, run a **backend relay** in front of Filegate:
 
 ```
 Browser (no token) ──HTTP──▶ Your backend (holds token) ──HTTP──▶ Filegate
 ```
 
+For browser uploads, the backend can also mint a direct upload URL:
+
+```ts
+const direct = await fg.uploads.createDirectUploadURL({
+  path: "data/inbox/photo.jpg",
+  contentType: "image/jpeg",
+  expiresInSeconds: 900,
+});
+```
+
+The browser then calls `uploadDirect(uploadUrl, file, handlers)` without a
+Filegate bearer token.
+
 The backend uses the SDK normally; the browser talks to your backend
-endpoints with whatever auth you already have (sessions, JWT, OAuth,
-etc.). See [`relay-patterns.md`](relay-patterns.md) for full
-upload/download patterns. For purely-client-side helpers like file
-hashing or chunk math (no Filegate connection needed), import from
-`@valentinkolb/filegate/utils` — those are pure functions and ship
-without the HTTP client.
+endpoints with whatever auth you already have (sessions, JWT, OAuth, etc.)
+or to the single-purpose direct upload URL. See
+[`relay-patterns.md`](relay-patterns.md) for full upload/download patterns.
+For purely-client-side helpers like file hashing or chunk math (no Filegate
+connection needed), import from `@valentinkolb/filegate/utils` — those are
+pure functions and ship without the HTTP client.
 
 ## Scoped namespaces
 

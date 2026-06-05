@@ -74,6 +74,7 @@ mkdir -p /tmp/filegate/data /tmp/filegate/index
 # conf.yaml
 server:
   listen: ":8080"
+  public_url: "http://127.0.0.1:8080"
 
 auth:
   bearer_token: "dev-token"
@@ -130,7 +131,8 @@ sudo fg config mount add --config /etc/filegate/conf.yaml /srv/filegate/photos
 
 sudo fg config set --config /etc/filegate/conf.yaml \
   --auth-bearer-token '<strong-token>' \
-  --server-listen ':8080'
+  --server-listen ':8080' \
+  --server-public-url 'https://files.example.com'
 ```
 
 Mutating `fg config` commands require explicit `--config`, create a timestamped backup by default, validate the resulting YAML before replacing it, and print a restart reminder. They do not hot-reload a running daemon.
@@ -143,7 +145,7 @@ fg serve --config ./conf.yaml --server-listen ':9090'
 
 ## REST API
 
-All `/v1/*` routes require `Authorization: Bearer <token>`. `/health` is public.
+All `/v1/*` routes require `Authorization: Bearer <token>` except the final `PUT` to a signed direct-upload URL. `/health` is public.
 
 ```bash
 # List roots.
@@ -162,6 +164,20 @@ curl -fsS -H 'Authorization: Bearer dev-token' \
 ```
 
 REST routes cover path and ID lookup, file content, directory listings, uploads, transfers, search, thumbnails, stats, and version operations.
+
+### Direct browser upload URLs
+
+For browser uploads, keep the Filegate bearer token on your application server. The server asks Filegate for a short-lived upload URL and gives that URL to the browser.
+
+```bash
+curl -fsS -X POST \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"data/inbox/photo.jpg","contentType":"image/jpeg","expiresInSeconds":900,"onConflict":"rename"}' \
+  http://127.0.0.1:8080/v1/uploads/direct
+```
+
+Set `server.public_url` (`--server-public-url`, `FILEGATE_SERVER_PUBLIC_URL`) to the external REST URL behind Traefik/Caddy/nginx. If it is empty, Filegate builds URLs from the incoming request host.
 
 ## S3 listener
 
@@ -206,8 +222,10 @@ import { filegate } from "@valentinkolb/filegate/client";
 process.env.FILEGATE_URL = "http://127.0.0.1:8080";
 process.env.FILEGATE_TOKEN = "dev-token";
 
-const roots = await filegate.paths.list();
-console.log(roots.items.map((node) => `${node.name} ${node.id}`));
+const roots = await filegate.paths.get();
+if ("items" in roots) {
+  console.log(roots.items.map((node) => `${node.name} ${node.id}`));
+}
 ```
 
 For dependency injection:
@@ -221,7 +239,26 @@ const fg = new Filegate({
 });
 ```
 
-Do not put the Filegate bearer token in browser bundles. Filegate has no scoped browser tokens or token-minting endpoint; relay through your backend or an auth proxy you control.
+Do not put the Filegate bearer token in browser bundles. For direct browser uploads, mint a short-lived URL on your backend and upload with the token-free helper:
+
+```ts
+import { uploadDirect } from "@valentinkolb/filegate/client";
+
+await uploadDirect(uploadUrlFromYourBackend, file, {
+  onSuccess: async ({ node }) => {
+    await fetch("/api/uploads/complete", {
+      method: "POST",
+      body: JSON.stringify({ filegateId: node.id }),
+    });
+  },
+  onError: async (error) => {
+    await fetch("/api/uploads/failed", { method: "POST", body: String(error) });
+  },
+  onFinish: async () => {
+    console.log("upload attempt finished");
+  },
+});
+```
 
 ## Bun S3Client
 

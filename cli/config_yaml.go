@@ -237,6 +237,7 @@ func configDisplayMap(cfg domain.Config, showSecrets bool) map[string]any {
 	return map[string]any{
 		"server": map[string]any{
 			"listen":             cfg.Server.Listen,
+			"public_url":         cfg.Server.PublicURL,
 			"write_timeout":      cfg.Server.WriteTimeout.String(),
 			"access_log_enabled": cfg.Server.AccessLogEnabled,
 			"shutdown_timeout":   cfg.Server.ShutdownTimeout.String(),

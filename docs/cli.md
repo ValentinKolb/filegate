@@ -97,6 +97,7 @@ Special host handling:
 
 ```bash
 --server-listen
+--server-public-url
 --server-write-timeout
 --server-access-log-enabled
 --server-shutdown-timeout

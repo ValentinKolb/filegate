@@ -21,7 +21,7 @@ import { filegate } from "@valentinkolb/filegate/client";
 process.env.FILEGATE_URL = "http://127.0.0.1:8080";
 process.env.FILEGATE_TOKEN = "dev-token";
 
-const roots = await filegate.paths.list();
+const roots = await filegate.paths.get();
 ```
 
 Behavior expectation:
@@ -30,9 +30,11 @@ Behavior expectation:
 - reads `FILEGATE_URL` and `FILEGATE_TOKEN`
 - safe to import without immediate side effects
 
-### Mode B: explicit instance (browser and explicit server wiring)
+### Mode B: explicit instance
 
-Use this in browsers and anywhere you want explicit dependency injection.
+Use this when you want explicit dependency injection. Keep the Filegate bearer
+token in trusted server runtimes; browser uploads should use direct upload URLs
+instead.
 
 ```ts
 import { Filegate } from "@valentinkolb/filegate/client";
@@ -49,7 +51,7 @@ const fg = new Filegate({
 ### List roots and stat a path
 
 ```ts
-const roots = await fg.paths.list();
+const roots = await fg.paths.get();
 const node = await fg.paths.get("data/invoices/2026", { pageSize: 100 });
 ```
 
@@ -149,6 +151,57 @@ Notes:
 - duplicate chunks are allowed when content matches
 - server auto-finalizes
 
+### Direct browser upload
+
+Use this when your app architecture is:
+
+```text
+browser <-> app/RBAC server <-> filegate
+```
+
+The app server keeps the Filegate bearer token, creates a short-lived upload
+URL, and returns it to the browser. Configure `server.public_url` on Filegate
+when the public URL differs from the internal listener URL.
+
+Server-side minting:
+
+```ts
+const direct = await fg.uploads.createDirectUploadURL({
+  path: "data/inbox/photo.jpg",
+  contentType: "image/jpeg",
+  expiresInSeconds: 15 * 60,
+  onConflict: "rename",
+  maxBytes: 50 * 1024 * 1024,
+});
+
+return Response.json({ uploadUrl: direct.uploadUrl });
+```
+
+Browser-side upload:
+
+```ts
+import { uploadDirect } from "@valentinkolb/filegate/client";
+
+await uploadDirect(uploadUrlFromYourServer, file, {
+  onSuccess: async ({ node }) => {
+    await fetch("/api/uploads/complete", {
+      method: "POST",
+      body: JSON.stringify({ filegateId: node.id }),
+    });
+  },
+  onError: async (error) => {
+    await fetch("/api/uploads/failed", { method: "POST", body: String(error) });
+  },
+  onFinish: async (outcome) => {
+    console.log(outcome.ok ? "done" : "failed");
+  },
+});
+```
+
+The signed URL is scoped to one virtual path, conflict mode, expiry, content
+type, and byte limit. It is a bearer credential until it expires; do not log it
+as a durable secret.
+
 ### Versions
 
 Per-file version history is REST-only and available when versioning is enabled
@@ -202,9 +255,9 @@ This is critical for backend observability under load.
 
 ## Browser Notes
 
-- Always use explicit `new Filegate(...)`.
 - Do not rely on `process.env` defaults in browser bundles.
-- Filegate has no scoped browser tokens. Do not expose the Filegate bearer token in browser bundles; relay through your backend or an auth proxy you control.
+- Do not expose the Filegate bearer token in browser bundles.
+- Use `uploadDirect(...)` for direct uploads that should bypass your app server's request body path.
 
 ## Contract Source of Truth
 

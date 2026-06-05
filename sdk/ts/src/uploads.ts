@@ -1,10 +1,13 @@
-import { ClientCore } from "./core.js";
+import { ClientCore, type FetchImpl } from "./core.js";
 import { ensureSuccess } from "./errors.js";
 import type {
   ChunkedCompleteResponse,
   ChunkedProgressResponse,
   ChunkedStartRequest,
   ChunkedStatusResponse,
+  DirectUploadURLRequest,
+  DirectUploadURLResponse,
+  Node,
 } from "./types.js";
 
 export interface ChunkedSendResult {
@@ -80,7 +83,94 @@ export class ChunkedUploadClient {
 export class UploadsClient {
   readonly chunked: ChunkedUploadClient;
 
-  constructor(core: ClientCore) {
+  constructor(private readonly core: ClientCore) {
     this.chunked = new ChunkedUploadClient(core);
   }
+
+  /** Mint a short-lived direct PUT URL for a browser/client upload. */
+  async createDirectUploadURL(req: DirectUploadURLRequest): Promise<DirectUploadURLResponse> {
+    return this.core.doJSON<DirectUploadURLResponse>(
+      "POST",
+      "/v1/uploads/direct",
+      undefined,
+      JSON.stringify(req),
+      "application/json",
+    );
+  }
+}
+
+export interface DirectUploadResult {
+  node: Node;
+  nodeId: string;
+  createdId: string;
+  statusCode: number;
+  headers: Headers;
+}
+
+export type DirectUploadFinish =
+  | { ok: true; result: DirectUploadResult }
+  | { ok: false; error: unknown };
+
+export interface DirectUploadOptions {
+  fetchImpl?: FetchImpl;
+  contentType?: string;
+  signal?: AbortSignal;
+  onSuccess?: (result: DirectUploadResult) => void | Promise<void>;
+  onError?: (error: unknown) => void | Promise<void>;
+  onFinish?: (outcome: DirectUploadFinish) => void | Promise<void>;
+}
+
+/** Upload to a presigned Filegate direct-upload URL without a REST bearer token. */
+export async function uploadDirect(
+  uploadUrl: string,
+  data: BodyInit,
+  opts?: DirectUploadOptions,
+): Promise<DirectUploadResult> {
+  const fetchImpl = opts?.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+  if (!fetchImpl) throw new Error("fetch is not available");
+  if (!uploadUrl.trim()) throw new Error("uploadUrl is required");
+
+  let result: DirectUploadResult | undefined;
+  let caught: unknown;
+  try {
+    const headers: Record<string, string> = {};
+    const contentType = opts?.contentType ?? bodyContentType(data);
+    if (contentType) headers["Content-Type"] = contentType;
+
+    const resp = await fetchImpl(uploadUrl, {
+      method: "PUT",
+      headers,
+      body: data,
+      signal: opts?.signal,
+    });
+    await ensureSuccess(resp, "PUT", uploadUrl);
+    const node = (await resp.json()) as Node;
+    result = {
+      node,
+      nodeId: resp.headers.get("X-Node-Id") ?? "",
+      createdId: resp.headers.get("X-Created-Id") ?? "",
+      statusCode: resp.status,
+      headers: resp.headers,
+    };
+    await opts?.onSuccess?.(result);
+    return result;
+  } catch (err) {
+    caught = err;
+    await opts?.onError?.(err);
+    throw err;
+  } finally {
+    if (result) {
+      await opts?.onFinish?.({ ok: true, result });
+    } else {
+      await opts?.onFinish?.({ ok: false, error: caught });
+    }
+  }
+}
+
+function bodyContentType(data: BodyInit): string | undefined {
+  const maybeTyped = data as { type?: unknown };
+  if (typeof maybeTyped.type === "string" && maybeTyped.type.trim()) {
+    return maybeTyped.type;
+  }
+  return undefined;
 }
