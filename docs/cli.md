@@ -1,27 +1,27 @@
 # CLI Reference
 
-Filegate CLI is intentionally local-ops focused.
+Filegate CLI is intentionally local-ops focused. The installed binary is `filegate`; packages also install `fg` as the short command used in these examples.
 
 ## Core Commands
 
 ```bash
-filegate serve [--config /etc/filegate/conf.yaml]
-filegate config show [--config /etc/filegate/conf.yaml] [--format yaml|json] [--show-secrets]
-filegate config validate [--config /etc/filegate/conf.yaml]
-filegate config set --config /etc/filegate/conf.yaml [config flags...]
-filegate config s3 key generate
-filegate config s3 key list [--config /etc/filegate/conf.yaml] [--show-secrets]
-filegate config s3 key add --config /etc/filegate/conf.yaml (--bucket <name>... | --all-buckets) [--access-key <key>] [--secret-key <secret>]
-filegate config s3 key disable --config /etc/filegate/conf.yaml <access-key>
-filegate config s3 key remove --config /etc/filegate/conf.yaml <access-key>
-filegate config mount list [--config /etc/filegate/conf.yaml]
-filegate config mount add --config /etc/filegate/conf.yaml <path>
-filegate config mount remove --config /etc/filegate/conf.yaml <path-or-bucket>
-filegate health [--host <host-or-url>] [--config /etc/filegate/conf.yaml] [--timeout 10s]
-filegate status [--host <host-or-url>] [--token <bearer>] [--config /etc/filegate/conf.yaml] [--timeout 10s]
-filegate index stats [--config /etc/filegate/conf.yaml]
-filegate index rescan [--config /etc/filegate/conf.yaml]
-filegate index rescan --new [--skip-backup] [--config /etc/filegate/conf.yaml]
+fg serve [--config /etc/filegate/conf.yaml]
+fg config show [--config /etc/filegate/conf.yaml] [--format yaml|json] [--show-secrets]
+fg config validate [--config /etc/filegate/conf.yaml]
+fg config set --config /etc/filegate/conf.yaml [config flags...]
+fg config s3 key generate
+fg config s3 key list [--config /etc/filegate/conf.yaml] [--show-secrets]
+fg config s3 key add --config /etc/filegate/conf.yaml (--bucket <name>... | --all-buckets) [--access-key <key>] [--secret-key <secret>]
+fg config s3 key disable --config /etc/filegate/conf.yaml <access-key>
+fg config s3 key remove --config /etc/filegate/conf.yaml <access-key>
+fg config mount list [--config /etc/filegate/conf.yaml]
+fg config mount add --config /etc/filegate/conf.yaml <path>
+fg config mount remove --config /etc/filegate/conf.yaml <path-or-bucket>
+fg health [--host <host-or-url>] [--config /etc/filegate/conf.yaml] [--timeout 10s]
+fg status [--host <host-or-url>] [--token <bearer>] [--config /etc/filegate/conf.yaml] [--timeout 10s]
+fg index stats [--config /etc/filegate/conf.yaml]
+fg index rescan [--config /etc/filegate/conf.yaml]
+fg index rescan --new [--skip-backup] [--config /etc/filegate/conf.yaml]
 ```
 
 ## Semantics
@@ -93,7 +93,7 @@ Special host handling:
 
 ## Config Value Flags
 
-`filegate serve` accepts these flags as runtime overrides. `filegate config set --config <path>` accepts the same flags and writes them to YAML.
+`fg serve` accepts these flags as runtime overrides. `fg config set --config <path>` accepts the same flags and writes them to YAML.
 
 ```bash
 --server-listen
@@ -146,7 +146,7 @@ Special host handling:
 List fields use repeatable flags:
 
 ```bash
-filegate config set --config /etc/filegate/conf.yaml \
+fg config set --config /etc/filegate/conf.yaml \
   --storage-base-paths /srv/filegate/photos \
   --storage-base-paths /srv/filegate/backups
 ```
@@ -154,10 +154,10 @@ filegate config set --config /etc/filegate/conf.yaml \
 Composite list fields use `key=value` pairs:
 
 ```bash
-filegate config set --config /etc/filegate/conf.yaml \
+fg config set --config /etc/filegate/conf.yaml \
   --versioning-retention-bucket keep_for=1h,max_count=-1 \
   --versioning-retention-bucket keep_for=24h,max_count=24
 
-filegate config set --config /etc/filegate/conf.yaml \
+fg config set --config /etc/filegate/conf.yaml \
   --s3-key 'access_key=FGALICE,secret_key=alice-secret,buckets=photos|docs,requests_per_second=20,burst=40'
 ```

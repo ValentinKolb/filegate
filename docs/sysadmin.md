@@ -4,9 +4,9 @@ This guide is for deploying, operating, and maintaining Filegate in production.
 
 ## 1. Deployment Modes
 
-- Container: run `ghcr.io/valentinkolb/filegate` behind your backend/API layer.
-- Package install: RPM/DEB with systemd unit.
+- Package install: RPM/DEB with systemd unit. This is the recommended production path.
 - Static binary: direct service management with your own unit.
+- Container: useful for local evaluation, CI smoke tests, or container-standardized environments.
 
 Target platform is Linux.
 
@@ -27,7 +27,7 @@ Reference config template:
 
 ## 3. Required Settings
 
-Minimum required:
+Minimum required for REST or mixed REST+S3 deployments:
 
 ```yaml
 auth:
@@ -37,10 +37,14 @@ storage:
     - /var/lib/filegate/data
 ```
 
+For S3-only deployments, `auth.bearer_token` may be empty when
+`s3.enabled: true`; the REST `/v1` API stays locked down with 401,
+while `/health` and optional `/metrics` remain on `server.listen`.
+
 Strongly recommended explicit settings:
 
 - `storage.index_path`
-- `server.listen`
+- `server.listen`, `server.shutdown_timeout`
 - `upload.max_*`
 - `jobs.*`
 - `detection.backend` and `detection.poll_interval`
@@ -62,6 +66,16 @@ sudo journalctl -u filegate -f
 ```
 
 The package intentionally does not auto-start the service.
+
+Package install provides `/usr/bin/fg`. It can also add the optional shell alias:
+
+```bash
+sudo FILEGATE_INSTALL_ALIAS_FG=1 dpkg -i ./dist/filegate_<version>_linux_amd64.deb
+# or:
+sudo FILEGATE_INSTALL_ALIAS_FG=1 rpm -Uvh ./dist/filegate-<version>-1.x86_64.rpm
+```
+
+Bash and Zsh get `alias fg='filegate'` in the invoking user's shell config. Other shells receive the snippet on stdout.
 
 ## 5. systemd Hardening and Base Path Access
 
@@ -147,9 +161,12 @@ Main levers:
 
 - `cache.path_cache_size`
 - `jobs.workers`, `jobs.queue_size`
-- `jobs.thumbnail_*`, `jobs.exif_*`
+- `jobs.thumbnail_*`
 - `upload.max_chunk_bytes`, `upload.max_upload_bytes`, `upload.max_chunked_upload_bytes`
 - `upload.max_concurrent_chunk_writes`, `upload.min_free_bytes`
+
+`upload.max_chunked_upload_bytes` must be greater than or equal to
+`upload.max_chunk_bytes`; startup rejects the config otherwise.
 
 Host-level levers:
 
@@ -183,12 +200,12 @@ curl -fsS -H 'Authorization: Bearer <token>' http://127.0.0.1:8080/v1/stats
 Index ops:
 
 ```bash
-	filegate index stats --config /etc/filegate/conf.yaml
-filegate index rescan --config /etc/filegate/conf.yaml
-filegate index rescan --new --config /etc/filegate/conf.yaml
-filegate index rescan --new --skip-backup --config /etc/filegate/conf.yaml
-filegate health --config /etc/filegate/conf.yaml
-filegate status --config /etc/filegate/conf.yaml
+fg index stats --config /etc/filegate/conf.yaml
+fg index rescan --config /etc/filegate/conf.yaml
+fg index rescan --new --config /etc/filegate/conf.yaml
+fg index rescan --new --skip-backup --config /etc/filegate/conf.yaml
+fg health --config /etc/filegate/conf.yaml
+fg status --config /etc/filegate/conf.yaml
 ```
 
 Important for `index rescan --new`:
@@ -235,4 +252,4 @@ Rollback:
 - delayed external updates: detector backend/poll settings too conservative.
 - chunk finalize failures: checksum mismatch or incomplete upload set.
 - `507 insufficient storage`: upload guard (`upload.min_free_bytes`) prevented writes near full disk.
-- index startup error with malformed/corrupt Pebble files: stop daemon, run `filegate index rescan --new`, start daemon.
+- index startup error with malformed/corrupt Pebble files: stop daemon, run `fg index rescan --new`, start daemon.

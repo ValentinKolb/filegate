@@ -22,6 +22,8 @@ Artifacts are written to `dist/`.
 
 ## Package Install
 
+This is the recommended production deployment path: install the package, configure `/etc/filegate/conf.yaml`, and run Filegate through `filegate.service`.
+
 ### Debian/Ubuntu
 
 ```bash
@@ -37,11 +39,22 @@ sudo rpm -Uvh ./dist/filegate-<version>-1.x86_64.rpm
 The package installs:
 
 - binary: `/usr/bin/filegate`
+- short command link: `/usr/bin/fg`
 - config: `/etc/filegate/conf.yaml`
 - systemd unit: `/lib/systemd/system/filegate.service`
 - data/log dirs: `/var/lib/filegate`, `/var/log/filegate`
 
 Service is installed but not auto-started by design.
+
+The `fg` command works after package install. To also install the optional shell alias at package install time:
+
+```bash
+sudo FILEGATE_INSTALL_ALIAS_FG=1 dpkg -i ./dist/filegate_<version>_linux_amd64.deb
+# or:
+sudo FILEGATE_INSTALL_ALIAS_FG=1 rpm -Uvh ./dist/filegate-<version>-1.x86_64.rpm
+```
+
+The postinstall script writes `alias fg='filegate'` to the invoking user's `.bashrc` or `.zshrc`. For other shells it prints the snippet and leaves shell config unchanged.
 
 ## Package Upgrade
 
@@ -69,7 +82,7 @@ sudo systemctl status filegate
 
 ## Container Deployment
 
-Use the provided Dockerfile or compose examples.
+Use the provided Dockerfile or compose examples for local evaluation, CI smoke tests, or environments that explicitly standardize on containers. For ordinary Linux production hosts, prefer package install plus systemd.
 
 For production, mount:
 

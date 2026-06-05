@@ -78,13 +78,13 @@ Filegate loads the key store **once at startup**. Config changes are offline edi
 Generate a new credential pair:
 
 ```bash
-filegate config s3 key generate
+fg config s3 key generate
 ```
 
 Add the new key to the YAML:
 
 ```bash
-filegate config s3 key add --config /etc/filegate/conf.yaml \
+fg config s3 key add --config /etc/filegate/conf.yaml \
   --bucket alice-photos \
   --access-key FGALICENEW \
   --secret-key '<new-secret>'
@@ -95,16 +95,16 @@ Omit `--access-key` and/or `--secret-key` to let the CLI generate the missing va
 After clients have switched, stage revocation by disabling the old key:
 
 ```bash
-filegate config s3 key disable --config /etc/filegate/conf.yaml FGALICEOLD
+fg config s3 key disable --config /etc/filegate/conf.yaml FGALICEOLD
 ```
 
 The disabled key still authenticates but has an empty bucket list, so every bucket operation returns `403 AccessDenied`. Remove it after the cutover window:
 
 ```bash
-filegate config s3 key remove --config /etc/filegate/conf.yaml FGALICEOLD
+fg config s3 key remove --config /etc/filegate/conf.yaml FGALICEOLD
 ```
 
-Every mutating `filegate config` command validates the resulting YAML, creates a timestamped backup by default, and prints a restart reminder. It does not hot-reload a running filegate process.
+Every mutating `fg config` command validates the resulting YAML, creates a timestamped backup by default, and prints a restart reminder. It does not hot-reload a running filegate process.
 
 ---
 
@@ -129,7 +129,7 @@ When `s3.enabled=true`, every mount basename must:
 - Be 3-63 characters.
 - Use only lowercase letters, digits, and hyphens.
 - Not start or end with a hyphen.
-- Not contain consecutive dots.
+- Not contain dots; Filegate deliberately keeps bucket names path-style-safe.
 - Not match an IP-address shape (`192.168.1.1`).
 - Not start with `xn-`, `sthree-`, or `amzn-s3-demo-` (AWS reservations).
 - Not end with `-s3alias`, `--ol-s3`, `--x-s3`, or `--table-s3`.
@@ -190,9 +190,11 @@ The same `server.access_log_enabled` flag controls both the REST and S3 access l
 ```
 [filegate-s3] PutObject bucket=alice-photos key=2024/cat.jpg by=AKIAALICEKEY00000001 create
 [filegate-s3] CompleteMultipartUpload bucket=backups key=archive.tar by=AKIABACKUPKEY0000001 uploadId=… parts=42 etag=… replayed=false
+[filegate-s3] recover: committing upload … bucket=backups key=archive.tar has no durable record; leaving for CompleteMultipartUpload retry (stage=/srv/filegate/backups/.fg-uploads/s3-…)
 ```
 
 The `by=` field is the verified access key. No secrets ever appear in the log.
+The recovery line means startup found an incomplete multipart Complete after a crash or forced shutdown. Retry CompleteMultipartUpload with the original parts list when the client still has it. If the upload is abandoned, confirm the object was not created, then remove the logged staging directory.
 
 ---
 
@@ -203,7 +205,7 @@ The S3 listener uses two internal namespaces under each mount root:
 - `<mount>/.fg-versions/<file-id>/<version-id>.bin` — the REST versioning feature's per-file blobs (only created on btrfs mounts and when versioning is enabled).
 - `<mount>/.fg-uploads/s3-<uploadId>/` — multipart upload staging (`manifest.json`, `parts/00001.bin`, …, and ephemeral `complete.tmp`).
 
-Both are filegate-private. Object keys can't reach them: the validator rejects any key whose first segment is `.fg-versions` or `.fg-uploads`.
+Both are filegate-private. Object keys can't reach them: the validator rejects `.fg-versions` and `.fg-uploads` as path segments anywhere in the key.
 
 ---
 
