@@ -216,6 +216,39 @@ const fg = new Filegate({
 
 Do not put the Filegate bearer token in browser bundles. Filegate has no scoped browser tokens or token-minting endpoint; relay through your backend or an auth proxy you control.
 
+## Bun S3Client
+
+Bun's native `S3Client` works with Filegate's path-style S3 endpoint.
+
+```ts
+import { S3Client } from "bun";
+
+const s3 = new S3Client({
+  accessKeyId: process.env.FILEGATE_S3_ACCESS_KEY!,
+  secretAccessKey: process.env.FILEGATE_S3_SECRET_KEY!,
+  region: "us-east-1",
+  endpoint: "http://127.0.0.1:9100",
+  bucket: "data",
+});
+```
+
+```ts
+await s3.write("notes/hello.txt", "hello from Bun\n", {
+  type: "text/plain",
+});
+
+const text = await s3.file("notes/hello.txt").text();
+const stat = await s3.stat("notes/hello.txt");
+const firstFive = await s3.file("notes/hello.txt").slice(0, 5).text();
+
+const page = await s3.list({ prefix: "notes/" });
+const keys = (page.contents ?? []).map((item) => item.key);
+
+await s3.delete("notes/hello.txt");
+```
+
+For large listings, use a client path that exposes S3 continuation tokens. Filegate paginates S3 listings at the normal page boundary.
+
 ## Package upgrades
 
 The package does not auto-start the service. Package upgrades are offline: stop `filegate` before installing a new package. The preinstall script refuses to replace package files while `filegate.service` is active.
