@@ -194,7 +194,20 @@ The same `server.access_log_enabled` flag controls both the REST and S3 access l
 ```
 
 The `by=` field is the verified access key. No secrets ever appear in the log.
-The recovery line means startup found an incomplete multipart Complete after a crash or forced shutdown. Retry CompleteMultipartUpload with the original parts list when the client still has it. If the upload is abandoned, confirm the object was not created, then remove the logged staging directory.
+The recovery line means startup found an incomplete multipart Complete after a crash or forced shutdown. Retry CompleteMultipartUpload with the original parts list when the client still has it. If the upload is abandoned, confirm the object was not created, then abort the upload or remove the logged staging directory.
+
+---
+
+## Write concurrency
+
+Large folder uploads can open many multipart uploads at once. `s3.max_concurrent_writes` bounds the number of S3 `PutObject`, `UploadPart`, and copy writes that may write to local storage concurrently.
+
+```yaml
+s3:
+  max_concurrent_writes: 32  # 0 uses the default
+```
+
+Lower the value for small disks, container tmpfs mounts, or low `ulimit -n` settings. The limit does not reject clients; extra write requests wait for a slot.
 
 ---
 
@@ -203,9 +216,9 @@ The recovery line means startup found an incomplete multipart Complete after a c
 The S3 listener uses two internal namespaces under each mount root:
 
 - `<mount>/.fg-versions/<file-id>/<version-id>.bin` — the REST versioning feature's per-file blobs (only created on btrfs mounts and when versioning is enabled).
-- `<mount>/.fg-uploads/s3-<uploadId>/` — multipart upload staging (`manifest.json`, `parts/00001.bin`, …, and ephemeral `complete.tmp`).
+- `<mount>/.fg-uploads/s3-<uploadId>/` — multipart upload staging (`parts/00001.bin`, …, and ephemeral `complete.tmp`). Active multipart metadata and part rows are stored in Pebble.
 
-Both are filegate-private. Object keys can't reach them: the validator rejects `.fg-versions` and `.fg-uploads` as path segments anywhere in the key.
+Both are filegate-private. Object keys can't reach them: the validator rejects `.fg-versions`, `.fg-uploads`, and Filegate's internal `.filegate-tmp-*` atomic-write names as path segments.
 
 ---
 

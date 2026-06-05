@@ -150,6 +150,46 @@ type MultipartUploadRecord struct {
 	CompletedAt   int64  // unix milliseconds when the commit landed
 }
 
+// MultipartUploadPhase is the adapter-visible state of an active S3
+// multipart upload. Active uploads are best-effort until Complete returns
+// success; completed commit witnesses live in MultipartUploadRecord.
+type MultipartUploadPhase string
+
+const (
+	MultipartUploadInProgress MultipartUploadPhase = "in_progress"
+	MultipartUploadCommitting MultipartUploadPhase = "committing"
+	MultipartUploadDone       MultipartUploadPhase = "done"
+	MultipartUploadAborted    MultipartUploadPhase = "aborted"
+)
+
+// ActiveMultipartUpload is the mutable, best-effort state for a multipart
+// upload before its final Complete commit is acknowledged.
+type ActiveMultipartUpload struct {
+	UploadID           string
+	Bucket             string
+	Key                string
+	StageDir           string
+	Initiated          int64
+	ContentType        string
+	ContentEncoding    string
+	ContentDisposition string
+	UserMetadata       map[string]string
+	Phase              MultipartUploadPhase
+	CompositeETag      string
+	WholeBodyMD5       string
+	CompletedFileID    string
+	CompletedAt        int64
+}
+
+// ActiveMultipartPart is one uploaded part's mutable state.
+type ActiveMultipartPart struct {
+	UploadID   string
+	PartNumber int
+	Size       int64
+	ETag       string
+	UpdatedAt  int64
+}
+
 // Ownership specifies optional permission overrides for file operations.
 type Ownership struct {
 	UID     *int   `json:"uid,omitempty"`

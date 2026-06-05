@@ -187,6 +187,13 @@ aws --endpoint-url http://127.0.0.1:9100 s3 ls s3://data/
 
 Each mount becomes one bucket named after the path basename. CreateBucket and DeleteBucket are rejected; buckets are operator-configured mounts.
 
+Large folder uploads stage multipart parts under `<mount>/.fg-uploads` until completion. Use a real volume or bind mount with enough free space, and lower concurrent S3 writes on small disks or low `ulimit -n` systems:
+
+```bash
+sudo fg config set --config /etc/filegate/conf.yaml \
+  --s3-max-concurrent-writes 32
+```
+
 ## TypeScript client
 
 ```bash

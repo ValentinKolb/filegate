@@ -64,6 +64,7 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v.SetDefault("s3.region", "us-east-1")
 	v.SetDefault("s3.access_key", "")
 	v.SetDefault("s3.secret_key", "")
+	v.SetDefault("s3.max_concurrent_writes", defaultChunkWriteConcurrency())
 	// Multipart cleanup loop tunables. Zero = adapter default;
 	// negative interval = disable. Defaults are documented on
 	// s3adapter.MultipartCleanupConfig (24h done, 1h aborted,
@@ -197,6 +198,9 @@ func loadConfig(configFile string) (domain.Config, error) {
 	}
 	if cfg.Upload.MinFreeBytes < 0 {
 		cfg.Upload.MinFreeBytes = 0
+	}
+	if cfg.S3.MaxConcurrentWrites <= 0 {
+		cfg.S3.MaxConcurrentWrites = defaultChunkWriteConcurrency()
 	}
 	if cfg.Thumbnail.LRUCacheSize <= 0 {
 		cfg.Thumbnail.LRUCacheSize = 1024

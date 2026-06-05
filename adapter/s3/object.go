@@ -38,6 +38,12 @@ func virtualPathFor(bucket, key string) string {
 // x-amz-copy-source header. We dispatch to handleCopyObject when
 // it's present so the byte-write path stays clean.
 func (rt *router) handlePutObject(w http.ResponseWriter, r *http.Request, verified *sigV4Result, bucket, key string) {
+	if err := rt.acquireWriteSlot(r.Context()); err != nil {
+		writeError(w, r, errIncompleteBody, "request canceled before write slot", withBucket(bucket), withKey(key))
+		return
+	}
+	defer rt.releaseWriteSlot()
+
 	if v := strings.TrimSpace(r.Header.Get("x-amz-copy-source")); v != "" {
 		rt.handleCopyObject(w, r, verified, bucket, key)
 		return
@@ -366,11 +372,15 @@ func validateObjectKey(key string) error {
 		if segment == "." || segment == ".." {
 			return errors.New("object key must not contain . or .. segments")
 		}
-		if segment == ".fg-versions" || segment == ".fg-uploads" {
+		if segment == ".fg-versions" || segment == ".fg-uploads" || isFilegateInternalTempObjectName(segment) {
 			return errors.New("object key uses a filegate-internal reserved namespace")
 		}
 	}
 	return nil
+}
+
+func isFilegateInternalTempObjectName(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.Contains(name, ".filegate-tmp-")
 }
 
 // buildS3WriteOptions translates request headers into the domain
@@ -512,6 +522,8 @@ func mapDomainError(w http.ResponseWriter, r *http.Request, err error, bucket, k
 		writeError(w, r, errInvalidArgument, err.Error(), withBucket(bucket), withKey(key))
 	case errors.Is(err, domain.ErrForbidden):
 		writeError(w, r, errAccessDenied, "operation forbidden", withBucket(bucket), withKey(key))
+	case errors.Is(err, domain.ErrInsufficientStorage), isNoSpaceError(err):
+		writeError(w, r, errInsufficientStorage, "storage is full", withBucket(bucket), withKey(key))
 	default:
 		writeError(w, r, errInternalError, err.Error(), withBucket(bucket), withKey(key))
 	}

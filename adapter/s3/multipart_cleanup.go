@@ -15,30 +15,28 @@ import (
 // returns. The CLI logs this when any field is non-zero.
 type MultipartCleanupResult struct {
 	StageDirsScanned int
-	DoneRetired      int // phaseDone manifests removed (with their durable record)
-	AbortedRetired   int // phaseAborted manifests removed
+	DoneRetired      int // phaseDone uploads removed (with their durable record)
+	AbortedRetired   int // phaseAborted uploads removed
 	StuckAborted     int // phaseInProgress / phaseCommitting older than maxAge → forcibly aborted
 	Errors           int
 }
 
 // MultipartCleanupConfig controls the retention policy.
 //
-//   - DoneRetention: how long a successfully-Completed manifest
-//     stays around so a retried CompleteMultipartUpload short-
-//     circuits via the durable record + manifest. After this, the
-//     manifest, the parts/ dir (already empty), and the durable
-//     0x07 record are GC'd. Default: 24 hours — generous enough
+//   - DoneRetention: how long a successfully-Completed active upload
+//     row stays around for cleanup bookkeeping. Complete retries are
+//     served by the durable 0x07 record. After this, the active row,
+//     staging dir, and durable record are GC'd. Default: 24 hours — generous enough
 //     that any sane client retry has happened, short enough that
 //     a misbehaving client can't pin storage forever.
 //
 //   - AbortedRetention: how long an explicitly-aborted upload's
-//     manifest sticks around. Aborted uploads have already had
-//     their parts/ dir deleted by AbortMultipartUpload; this is
-//     just the manifest itself. Default: 1 hour — the manifest is
-//     small but there's no reason to keep it around long.
+//     active row sticks around. AbortMultipartUpload currently removes
+//     active rows immediately; this retention remains for legacy manifest
+//     cleanup and future explicit aborted-state rows.
 //
 //   - StuckUploadMaxAge: how long an in_progress / committing
-//     manifest can stay open before the cleanup loop forcibly
+//     active row can stay open before the cleanup loop forcibly
 //     aborts it. Catches clients that started a multipart upload
 //     and never came back (network died, process crashed, user
 //     ctrl-C'd). Default: 7 days, matching AWS's default lifecycle
@@ -63,16 +61,39 @@ func DefaultMultipartCleanupConfig() MultipartCleanupConfig {
 	}
 }
 
-// SweepMultipartCleanup runs ONE cleanup pass: walks every mount's
-// .fg-uploads/s3-* dir, retires manifests past their retention
-// threshold, forcibly aborts stuck in-progress uploads. Returns
-// the per-pass summary.
+// SweepMultipartCleanup runs ONE cleanup pass: retires active Pebble
+// multipart rows past their retention threshold, then walks legacy
+// manifest dirs for older deployments. Returns the per-pass summary.
 //
 // Used by the CLI's recurring loop (cli/multipart_cleanup_loop.go)
 // AND by tests that want to drive a single pass deterministically.
 func SweepMultipartCleanup(svc *domain.Service, cfg MultipartCleanupConfig) MultipartCleanupResult {
 	now := time.Now()
 	var res MultipartCleanupResult
+
+	activeUploads, err := svc.ListActiveMultipartUploads("")
+	if err != nil {
+		res.Errors++
+	} else {
+		for _, upload := range activeUploads {
+			res.StageDirsScanned++
+			manifest := manifestFromActive(upload, nil)
+			if action := decideRetention(manifest, now, cfg); action != cleanupKeep {
+				if err := applyActiveCleanupAction(svc, upload, action); err != nil {
+					res.Errors++
+					continue
+				}
+				switch action {
+				case cleanupRetireDone:
+					res.DoneRetired++
+				case cleanupRetireAborted:
+					res.AbortedRetired++
+				case cleanupForceAbort:
+					res.StuckAborted++
+				}
+			}
+		}
+	}
 
 	for _, root := range svc.ListRoot() {
 		mountAbs, err := svc.ResolveAbsPath(root.ID)
@@ -120,7 +141,37 @@ func SweepMultipartCleanup(svc *domain.Service, cfg MultipartCleanupConfig) Mult
 	return res
 }
 
-// cleanupAction is the decision the policy makes for one manifest.
+func manifestFromActive(upload domain.ActiveMultipartUpload, parts []domain.ActiveMultipartPart) *multipartManifest {
+	m := &multipartManifest{
+		Format:             multipartManifestFormat,
+		Kind:               multipartManifestKind,
+		UploadID:           upload.UploadID,
+		Bucket:             upload.Bucket,
+		Key:                upload.Key,
+		Initiated:          upload.Initiated,
+		ContentType:        upload.ContentType,
+		ContentEncoding:    upload.ContentEncoding,
+		ContentDisposition: upload.ContentDisposition,
+		UserMetadata:       upload.UserMetadata,
+		Parts:              map[int]multipartPart{},
+		Phase:              multipartPhase(upload.Phase),
+		CompositeETag:      upload.CompositeETag,
+		WholeBodyMD5:       upload.WholeBodyMD5,
+		CompletedFileID:    upload.CompletedFileID,
+		CompletedAt:        upload.CompletedAt,
+	}
+	for _, part := range parts {
+		m.Parts[part.PartNumber] = multipartPart{
+			PartNumber: part.PartNumber,
+			Size:       part.Size,
+			ETag:       part.ETag,
+			UpdatedAt:  part.UpdatedAt,
+		}
+	}
+	return m
+}
+
+// cleanupAction is the decision the policy makes for one upload.
 type cleanupAction int
 
 const (
@@ -141,8 +192,8 @@ const (
 // AND the durable record out from under it. The startup recovery
 // sweep is the only thing that touches phase=committing, and it
 // uses the durable-record check for safety. If a phase=committing
-// manifest is genuinely stuck post-restart, the recovery sweep
-// will see it and decide what to do.
+// upload is genuinely stuck post-restart, the recovery sweep will
+// see it and decide what to do.
 func decideRetention(m *multipartManifest, now time.Time, cfg MultipartCleanupConfig) cleanupAction {
 	switch m.Phase {
 	case phaseDone:
@@ -194,6 +245,31 @@ func applyCleanupAction(svc *domain.Service, stageDir string, m *multipartManife
 		// successful Complete). Just remove whatever's left.
 		if err := os.RemoveAll(stageDir); err != nil {
 			return fmt.Errorf("remove aborted stage dir %s: %w", stageDir, err)
+		}
+	}
+	return nil
+}
+
+func applyActiveCleanupAction(svc *domain.Service, upload domain.ActiveMultipartUpload, action cleanupAction) error {
+	switch action {
+	case cleanupRetireDone, cleanupForceAbort:
+		if uploadID, ok := decodeUploadID(upload.UploadID); ok {
+			if err := svc.DeleteMultipartUploadRecord(uploadID); err != nil {
+				return fmt.Errorf("delete pebble record %s: %w", upload.UploadID, err)
+			}
+		}
+		if err := svc.DeleteActiveMultipartUpload(upload.UploadID); err != nil {
+			return fmt.Errorf("delete active upload %s: %w", upload.UploadID, err)
+		}
+		if err := os.RemoveAll(upload.StageDir); err != nil {
+			return fmt.Errorf("remove stage dir %s: %w", upload.StageDir, err)
+		}
+	case cleanupRetireAborted:
+		if err := svc.DeleteActiveMultipartUpload(upload.UploadID); err != nil {
+			return fmt.Errorf("delete active upload %s: %w", upload.UploadID, err)
+		}
+		if err := os.RemoveAll(upload.StageDir); err != nil {
+			return fmt.Errorf("remove aborted stage dir %s: %w", upload.StageDir, err)
 		}
 	}
 	return nil

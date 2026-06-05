@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,6 +50,50 @@ func TestListObjectsV2EmptyBucket(t *testing.T) {
 	}
 	if res.Name != mount {
 		t.Errorf("empty bucket Name=%q, want %q", res.Name, mount)
+	}
+}
+
+func TestListObjectsV2SkipsInternalTempFiles(t *testing.T) {
+	svc, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	mountAbs := lookupMountAbs(t, handler, mount)
+	parent := filepath.Join(mountAbs, "bun-stress")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	tmpPath := filepath.Join(parent, ".object.bin.filegate-tmp-123")
+	if err := os.WriteFile(tmpPath, []byte("temporary bytes"), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	if err := svc.ReconcileDirectory(parent); err != nil {
+		t.Fatalf("ReconcileDirectory: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+mount+"/?list-type=2&prefix=bun-stress/", nil)
+	req.Host = "example.com"
+	signRequestPayload(req, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var res listBucketResultV2
+	if err := xml.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("xml decode: %v", err)
+	}
+	if len(res.Contents) != 0 {
+		t.Fatalf("internal temp file leaked into S3 list: %#v", res.Contents)
+	}
+
+	body := []byte("nope")
+	putReq := httptest.NewRequest(http.MethodPut, "/"+mount+"/bun-stress/.object.bin.filegate-tmp-456", bytes.NewReader(body))
+	putReq.Host = "example.com"
+	signRequestPayload(putReq, body)
+	putRec := httptest.NewRecorder()
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusBadRequest {
+		t.Fatalf("PutObject internal temp key status=%d, want 400; body=%s", putRec.Code, putRec.Body.String())
 	}
 }
 
@@ -506,11 +552,11 @@ func TestListObjectsV2DelimiterPrefix(t *testing.T) {
 	defer cleanup()
 
 	keys := []string{
-		"photos/loose.jpg",       // direct child → Contents
-		"photos/2023/cat.jpg",    // → photos/2023/
-		"photos/2024/cat.jpg",    // → photos/2024/
-		"photos/2024/dog.jpg",    // same group
-		"unrelated/x.txt",        // outside prefix, ignored
+		"photos/loose.jpg",    // direct child → Contents
+		"photos/2023/cat.jpg", // → photos/2023/
+		"photos/2024/cat.jpg", // → photos/2024/
+		"photos/2024/dog.jpg", // same group
+		"unrelated/x.txt",     // outside prefix, ignored
 	}
 	for _, k := range keys {
 		body := []byte("x")

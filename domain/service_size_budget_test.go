@@ -152,3 +152,15 @@ func (f *fakeIndex) IterateFlatKeys(string, string, string, int, func(string, Fi
 func (f *fakeIndex) LookupMultipartUploadRecord([16]byte) (*MultipartUploadRecord, error) {
 	return nil, ErrNotFound
 }
+
+func (f *fakeIndex) LookupActiveMultipartUpload(string) (*ActiveMultipartUpload, error) {
+	return nil, ErrNotFound
+}
+
+func (f *fakeIndex) ListActiveMultipartUploads(string) ([]ActiveMultipartUpload, error) {
+	return nil, nil
+}
+
+func (f *fakeIndex) ListActiveMultipartParts(string) ([]ActiveMultipartPart, error) {
+	return nil, nil
+}

@@ -133,6 +133,7 @@ Special host handling:
 --s3-region
 --s3-access-key
 --s3-secret-key
+--s3-max-concurrent-writes
 --s3-key
 --s3-cleanup-done-retention
 --s3-cleanup-aborted-retention

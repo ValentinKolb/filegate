@@ -71,6 +71,7 @@ func allConfigFlagSpecs() []configFlagSpec {
 		{Name: "s3-region", Path: "s3.region", Kind: configFlagString, Usage: "S3 SigV4 region"},
 		{Name: "s3-access-key", Path: "s3.access_key", Kind: configFlagString, Usage: "legacy single-tenant S3 access key"},
 		{Name: "s3-secret-key", Path: "s3.secret_key", Kind: configFlagString, Usage: "legacy single-tenant S3 secret key"},
+		{Name: "s3-max-concurrent-writes", Path: "s3.max_concurrent_writes", Kind: configFlagInt, Usage: "maximum concurrent S3 object and part writes"},
 		{Name: "s3-key", Path: "s3.keys", Kind: configFlagS3Keys, Usage: "S3 key access_key=<ak>,secret_key=<sk>,buckets=<a|b|*>,requests_per_second=<n>,burst=<n>; repeat for multiple keys"},
 		{Name: "s3-cleanup-done-retention", Path: "s3.cleanup.done_retention", Kind: configFlagDuration, Usage: "multipart done-manifest retention; zero uses adapter default"},
 		{Name: "s3-cleanup-aborted-retention", Path: "s3.cleanup.aborted_retention", Kind: configFlagDuration, Usage: "multipart aborted-manifest retention; zero uses adapter default"},
@@ -208,6 +209,8 @@ func applyChangedConfigFlag(flags *pflag.FlagSet, spec configFlagSpec, cfg *doma
 		cfg.S3.AccessKey = getFlagString(flags, spec.Name)
 	case "s3.secret_key":
 		cfg.S3.SecretKey = getFlagString(flags, spec.Name)
+	case "s3.max_concurrent_writes":
+		cfg.S3.MaxConcurrentWrites = getFlagInt(flags, spec.Name)
 	case "s3.keys":
 		keys, err := parseS3KeyFlags(getFlagStringArray(flags, spec.Name))
 		if err != nil {
@@ -438,6 +441,9 @@ func validateResolvedConfig(cfg domain.Config) error {
 
 func validateS3Config(cfg domain.Config) error {
 	mounts := configuredMountNames(cfg.Storage.BasePaths)
+	if cfg.S3.MaxConcurrentWrites < 0 {
+		return fmt.Errorf("s3.max_concurrent_writes must be >= 0 (use 0 explicitly for the default)")
+	}
 	if cfg.S3.Enabled {
 		if cfg.S3.AccessKey == "" && cfg.S3.SecretKey == "" && len(cfg.S3.Keys) == 0 {
 			return fmt.Errorf("s3.enabled=true requires either s3.access_key/s3.secret_key or at least one s3.keys entry")

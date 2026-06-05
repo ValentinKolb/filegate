@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,24 +21,23 @@ import (
 // handleCompleteMultipartUpload finalizes a multipart upload using
 // the 2-phase commit protocol described in domain/service_s3_multipart.go:
 //
-//  1. Look up the upload's staging dir + manifest.
+//  1. Look up the upload's staging dir + active state.
 //  2. Validate the client-supplied parts list (XML body) against the
-//     manifest: every PartNumber present, ETags match, ascending
+//     active part rows: every PartNumber present, ETags match, ascending
 //     order, ≥5 MiB on every non-final part.
 //  3. Concat parts in order into <stage>/complete.tmp while computing
 //     the composite ETag — hex(MD5(concat-of-part-MD5-bytes)) + "-N".
-//  4. Mark manifest phase=committing (so a crash mid-install can be
+//  4. Mark active state phase=committing (so a crash mid-install can be
 //     reconciled by the recovery sweep).
 //  5. Call domain.CompleteMultipartUpload, which atomically renames
 //     complete.tmp into place and writes the durable uploadId record
 //     in the same Pebble batch. The domain layer owns the path-lock
 //     + idempotency check.
-//  6. Mark manifest phase=done with the result snapshot. The cleanup
-//     loop GCs done manifests on a retention timer.
+//  6. Mark active state phase=done with the result snapshot. The cleanup
+//     loop GCs done active rows on a retention timer.
 //
 // Idempotency: the durable record (Pebble) is the source of truth;
-// the manifest is purely on-disk recovery state. A retried Complete
-// that finds an existing record returns the historical result.
+// a retried Complete that finds an existing record returns the historical result.
 func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Request, verified *sigV4Result, bucket, key string) {
 	uploadID := r.URL.Query().Get("uploadId")
 	if uploadID == "" {
@@ -48,21 +48,8 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		writeError(w, r, errInvalidArgument, err.Error(), withBucket(bucket), withKey(key))
 		return
 	}
-
-	loc, err := rt.findStageDir(uploadID)
-	if err != nil {
-		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
-		return
-	}
-	manifest, err := readManifest(loc.StageDir)
-	if err != nil {
-		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
-		return
-	}
-	if manifest.Bucket != bucket || manifest.Key != key {
-		writeError(w, r, errInvalidArgument, "uploadId belongs to a different bucket/key", withBucket(bucket), withKey(key))
-		return
-	}
+	releaseUpload := rt.uploadLocks.acquire(uploadID)
+	defer releaseUpload()
 
 	// Decode the 32-hex-char on-disk uploadId into the 16-byte form
 	// the durable record expects. We pin this here so a malformed
@@ -76,22 +63,35 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		copy(uploadIDBytes[:], raw)
 	}
 
-	// Phase=done means the original Complete already succeeded. The
-	// domain layer's idempotency check covers crash-after-batch
-	// (where we never updated the manifest); for the happy-path
-	// retry we can short-circuit here without re-reading parts.
-	if manifest.Phase == phaseDone {
-		writeCompleteResultFromManifest(w, r, bucket, key, manifest)
+	if record, err := rt.svc.LookupMultipartUploadRecord(uploadIDBytes); err == nil && record != nil {
+		if record.Bucket != bucket || record.Key != key {
+			writeError(w, r, errInvalidArgument, "uploadId belongs to a different bucket/key", withBucket(bucket), withKey(key))
+			return
+		}
+		writeCompleteResultFromRecord(w, r, bucket, key, record)
+		return
+	} else if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		writeError(w, r, errInternalError, "could not read multipart upload record", withBucket(bucket), withKey(key))
 		return
 	}
-	if manifest.Phase == phaseAborted {
+
+	upload, err := rt.svc.LookupActiveMultipartUpload(uploadID)
+	if err != nil {
+		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
+		return
+	}
+	if upload.Bucket != bucket || upload.Key != key {
+		writeError(w, r, errInvalidArgument, "uploadId belongs to a different bucket/key", withBucket(bucket), withKey(key))
+		return
+	}
+	if upload.Phase == domain.MultipartUploadDone {
+		writeError(w, r, errNoSuchUpload, "upload has no durable completion record", withBucket(bucket), withKey(key))
+		return
+	}
+	if upload.Phase == domain.MultipartUploadAborted {
 		writeError(w, r, errNoSuchUpload, "upload was aborted", withBucket(bucket), withKey(key))
 		return
 	}
-	// phaseInProgress and phaseCommitting both proceed. The latter
-	// happens when an earlier Complete crashed between manifest.update
-	// and the domain commit — the domain idempotency check decides
-	// whether work needs to be redone or replayed.
 
 	// Parse the request body XML.
 	bodyRaw, readErr := io.ReadAll(verified.BodyReader)
@@ -109,23 +109,20 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Mark phase=committing FIRST — before validation and concat.
-	// handleUploadPart rejects parts when phase != in_progress, so
-	// flipping the phase here closes the race where a concurrent
-	// (or retried) UploadPart could overwrite a part file between
-	// our validation and the concat-stream open. Persisting this
-	// before doing any expensive work also gives the recovery sweep
-	// something to find if we crash mid-validate.
-	if manifest.Phase == phaseInProgress {
-		manifest.Phase = phaseCommitting
-		if err := writeManifest(loc.StageDir, manifest); err != nil {
-			writeError(w, r, errInternalError, "could not write committing manifest", withBucket(bucket), withKey(key))
+	if upload.Phase == domain.MultipartUploadInProgress {
+		upload.Phase = domain.MultipartUploadCommitting
+		if err := rt.svc.UpdateActiveMultipartUpload(*upload); err != nil {
+			writeError(w, r, errInternalError, "could not mark upload committing", withBucket(bucket), withKey(key))
 			return
 		}
 	}
 
-	// Validate the parts list against the manifest.
-	validatedParts, validateErr := validateCompleteParts(req.Parts, manifest)
+	activeParts, err := rt.svc.ListActiveMultipartParts(uploadID)
+	if err != nil {
+		writeError(w, r, errInternalError, "could not list uploaded parts", withBucket(bucket), withKey(key))
+		return
+	}
+	validatedParts, validateErr := validateCompleteParts(req.Parts, activeParts)
 	if validateErr != nil {
 		writeError(w, r, validateErr.Code, validateErr.Message, withBucket(bucket), withKey(key))
 		return
@@ -134,9 +131,9 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	// Concat parts → complete.tmp while computing the composite ETag.
 	// This is the adapter-measured phase of the trace-substitute
 	// histogram; the domain returns the other three (lock/hash/batch).
-	completeTmp := filepath.Join(loc.StageDir, multipartCompleteTmp)
+	completeTmp := filepath.Join(upload.StageDir, multipartCompleteTmp)
 	concatStart := time.Now()
-	composite, concatErr := concatPartsAndComputeCompositeETag(loc.StageDir, validatedParts, completeTmp)
+	composite, concatErr := concatPartsAndComputeCompositeETag(upload.StageDir, validatedParts, completeTmp)
 	concatDur := time.Since(concatStart)
 	if concatErr != nil {
 		_ = os.Remove(completeTmp)
@@ -144,22 +141,19 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Persist the composite ETag now so a crash before the durable
-	// commit lets recovery verify (or surface) what would have been
-	// installed.
-	manifest.CompositeETag = composite
-	if err := writeManifest(loc.StageDir, manifest); err != nil {
+	upload.CompositeETag = composite
+	if err := rt.svc.UpdateActiveMultipartUpload(*upload); err != nil {
 		_ = os.Remove(completeTmp)
-		writeError(w, r, errInternalError, "could not write committing manifest", withBucket(bucket), withKey(key))
+		writeError(w, r, errInternalError, "could not update upload state", withBucket(bucket), withKey(key))
 		return
 	}
 
-	// Build the S3 write options from the captured manifest fields.
+	// Build the S3 write options from the captured CreateMultipartUpload fields.
 	// Note: IfMatch / IfNoneMatchAny are NOT honored on Complete by
 	// AWS — the domain layer ignores them on the multipart path.
 	var userMeta []byte
-	if len(manifest.UserMetadata) > 0 {
-		blob, jerr := json.Marshal(manifest.UserMetadata)
+	if len(upload.UserMetadata) > 0 {
+		blob, jerr := json.Marshal(upload.UserMetadata)
 		if jerr != nil {
 			writeError(w, r, errInternalError, "could not encode user metadata", withBucket(bucket), withKey(key))
 			return
@@ -167,9 +161,9 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		userMeta = blob
 	}
 	opts := domain.S3WriteOptions{
-		ContentType:        manifest.ContentType,
-		ContentEncoding:    manifest.ContentEncoding,
-		ContentDisposition: manifest.ContentDisposition,
+		ContentType:        upload.ContentType,
+		ContentEncoding:    upload.ContentEncoding,
+		ContentDisposition: upload.ContentDisposition,
 		UserMetadata:       userMeta,
 	}
 
@@ -184,9 +178,7 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 	})
 	if domErr != nil {
 		// complete.tmp is left behind on failure — the recovery sweep
-		// (or an Abort) will clean the staging dir. Don't remove it
-		// inline: a crash between os.Remove and the manifest update
-		// could lose data we'd otherwise recover.
+		// (or an Abort) will clean the staging dir. Don't remove it inline.
 		mapDomainError(w, r, domErr, bucket, key)
 		return
 	}
@@ -200,30 +192,22 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 		rt.metrics.ObserveCompletePhase("pebble_batch", result.Timings.PebbleBatch.Seconds())
 	}
 
-	// Mark manifest phase=done with the result snapshot. Best-effort
-	// — the Pebble record is what matters for client semantics. A
-	// failure to update the on-disk manifest after the durable
-	// commit is logged but doesn't fail the response.
-	manifest.Phase = phaseDone
-	manifest.WholeBodyMD5 = ""
+	upload.Phase = domain.MultipartUploadDone
+	upload.WholeBodyMD5 = ""
 	if result.Meta != nil {
-		manifest.WholeBodyMD5 = result.Meta.ETag
-		manifest.CompletedFileID = result.Meta.ID.String()
+		upload.WholeBodyMD5 = result.Meta.ETag
+		upload.CompletedFileID = result.Meta.ID.String()
 	}
-	manifest.CompletedAt = time.Now().UnixMilli()
-	if err := writeManifest(loc.StageDir, manifest); err != nil {
-		// Don't fail the request — Pebble already has the durable
-		// record. Log and move on; recovery will reconcile.
-		fmt.Printf("[filegate-s3] CompleteMultipartUpload: post-commit manifest write failed: %s\n", err)
+	upload.CompletedAt = time.Now().UnixMilli()
+	if err := rt.svc.UpdateActiveMultipartUpload(*upload); err != nil {
+		fmt.Printf("[filegate-s3] CompleteMultipartUpload: post-commit active state write failed: %s\n", err)
 	}
 
 	// Drop the parts/ directory and the assembled complete.tmp now
-	// that the durable commit has landed. The manifest stays so a
-	// retried Complete (until retention sweeps the manifest) can
-	// short-circuit via the phaseDone branch — the Pebble record is
-	// authoritative; the manifest just lets ListMultipartUploads /
-	// retry-Complete answer without a Pebble lookup.
-	cleanupCompletedStaging(loc.StageDir)
+	// that the durable commit has landed. The active done row stays
+	// for retention/cleanup bookkeeping; retry-Complete is served by
+	// the durable Pebble record.
+	cleanupCompletedStaging(upload.StageDir)
 
 	// Build the response.
 	res := completeMultipartUploadResult{
@@ -245,16 +229,20 @@ func (rt *router) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.R
 }
 
 // validateCompleteParts checks the client-supplied parts list against
-// the manifest. AWS rules (errors mirror real S3):
+// active part rows. AWS rules (errors mirror real S3):
 //
-//   - Each PartNumber must exist in the manifest (InvalidPart).
+//   - Each PartNumber must exist in active state (InvalidPart).
 //   - Per-part ETag must match the stored MD5 (InvalidPart).
 //   - The list must be in strictly ascending PartNumber order
 //     (InvalidPartOrder). Duplicates are also InvalidPartOrder.
 //   - Every part except the LAST must be ≥ 5 MiB (EntityTooSmall).
 //
-// On success returns the list as resolved manifestParts in order.
-func validateCompleteParts(reqParts []completeRequestPart, manifest *multipartManifest) ([]multipartPart, *sigV4VerifyError) {
+// On success returns the list as resolved parts in order.
+func validateCompleteParts(reqParts []completeRequestPart, storedParts []domain.ActiveMultipartPart) ([]multipartPart, *sigV4VerifyError) {
+	byNumber := make(map[int]domain.ActiveMultipartPart, len(storedParts))
+	for _, part := range storedParts {
+		byNumber[part.PartNumber] = part
+	}
 	out := make([]multipartPart, 0, len(reqParts))
 	prev := 0
 	for _, rp := range reqParts {
@@ -265,7 +253,7 @@ func validateCompleteParts(reqParts []completeRequestPart, manifest *multipartMa
 			return nil, sigErr(errInvalidPartOrder, "parts must appear in strictly ascending PartNumber order")
 		}
 		prev = rp.PartNumber
-		stored, ok := manifest.Parts[rp.PartNumber]
+		stored, ok := byNumber[rp.PartNumber]
 		if !ok {
 			return nil, sigErr(errInvalidPart, "partNumber %d was not uploaded", rp.PartNumber)
 		}
@@ -275,7 +263,12 @@ func validateCompleteParts(reqParts []completeRequestPart, manifest *multipartMa
 		if !strings.EqualFold(clientETag, stored.ETag) {
 			return nil, sigErr(errInvalidPart, "partNumber %d ETag does not match upload (expected %q, got %q)", rp.PartNumber, stored.ETag, clientETag)
 		}
-		out = append(out, stored)
+		out = append(out, multipartPart{
+			PartNumber: stored.PartNumber,
+			Size:       stored.Size,
+			ETag:       stored.ETag,
+			UpdatedAt:  stored.UpdatedAt,
+		})
 	}
 	// 5 MiB minimum on every part except the last. The last part can
 	// be any size (including very small) — that's how S3 handles
@@ -349,16 +342,12 @@ func concatPartsAndComputeCompositeETag(stageDir string, parts []multipartPart, 
 	return fmt.Sprintf("%s-%d", digest, len(parts)), nil
 }
 
-// writeCompleteResultFromManifest is the phaseDone short-circuit.
-// We can synthesize the response without touching the durable
-// record because manifest fields (CompositeETag, CompletedFileID)
-// were captured by the original Complete.
-func writeCompleteResultFromManifest(w http.ResponseWriter, r *http.Request, bucket, key string, manifest *multipartManifest) {
+func writeCompleteResultFromRecord(w http.ResponseWriter, r *http.Request, bucket, key string, record *domain.MultipartUploadRecord) {
 	res := completeMultipartUploadResult{
 		Location: locationFor(r, bucket, key),
 		Bucket:   bucket,
 		Key:      key,
-		ETag:     quoteETag(manifest.CompositeETag),
+		ETag:     quoteETag(record.CompositeETag),
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("Server", "filegate")
@@ -368,12 +357,10 @@ func writeCompleteResultFromManifest(w http.ResponseWriter, r *http.Request, buc
 }
 
 // cleanupCompletedStaging removes the bulky staging artifacts of a
-// finished multipart upload (parts/ and complete.tmp) while leaving
-// the manifest in place. The manifest is small and serves the
-// idempotent-retry short-circuit; the multipart cleanup loop deletes
-// done manifests + the durable Pebble record after the retention
-// window. Errors are logged but don't fail the request — the bytes
-// are already durable in Pebble.
+// finished multipart upload (parts/ and complete.tmp). Active done
+// state remains in Pebble until the cleanup retention window retires
+// it with the durable record. Errors are logged but don't fail the
+// request — the final object and commit witness are already durable.
 func cleanupCompletedStaging(stageDir string) {
 	partsDir := filepath.Join(stageDir, multipartPartsDirName)
 	if err := os.RemoveAll(partsDir); err != nil {

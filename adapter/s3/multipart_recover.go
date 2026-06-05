@@ -11,14 +11,15 @@ import (
 	"github.com/valentinkolb/filegate/domain"
 )
 
-// recoverPendingMultipartUploads scans every mount's
-// .fg-uploads/s3-* dir for manifests in phase=committing and
-// reconciles them against the durable Pebble record. Two outcomes:
+// recoverPendingMultipartUploads scans active Pebble multipart rows
+// in phase=committing and reconciles them against the durable Pebble
+// record. It also keeps a legacy manifest scan for staging dirs created
+// by older builds. Two outcomes:
 //
 //   - Durable record present: the original Complete succeeded; the
-//     crash happened between Pebble commit and the manifest write.
-//     We backfill the manifest to phase=done so ListMultipartUploads
-//     stops surfacing the upload as in-progress.
+//     crash happened between Pebble commit and the done-state write.
+//     We backfill active state to phase=done so ListMultipartUploads
+//     does not surface the upload as in-progress.
 //
 //   - Durable record absent: the crash happened before the Pebble
 //     commit. We leave phase=committing untouched — a client retry
@@ -26,9 +27,20 @@ import (
 //     disk; the domain CompleteMultipartUpload is idempotent under
 //     lock + record-lookup).
 //
-// The sweep is best-effort: errors on individual manifests are
-// logged but don't abort the loop.
+// The sweep is best-effort: errors on individual uploads are logged
+// but don't abort the loop.
 func recoverPendingMultipartUploads(svc *domain.Service) {
+	uploads, err := svc.ListActiveMultipartUploads("")
+	if err == nil {
+		for _, upload := range uploads {
+			if upload.Phase == domain.MultipartUploadCommitting {
+				reconcileCommittingActiveUpload(svc, upload)
+			}
+		}
+	} else {
+		fmt.Printf("[filegate-s3] recover: list active multipart uploads: %s\n", err)
+	}
+
 	for _, root := range svc.ListRoot() {
 		mountAbs, err := svc.ResolveAbsPath(root.ID)
 		if err != nil {
@@ -57,6 +69,37 @@ func recoverPendingMultipartUploads(svc *domain.Service) {
 			}
 			reconcileCommittingManifest(svc, stageDir, manifest)
 		}
+	}
+}
+
+func reconcileCommittingActiveUpload(svc *domain.Service, upload domain.ActiveMultipartUpload) {
+	uploadID, ok := decodeUploadID(upload.UploadID)
+	if !ok {
+		fmt.Printf("[filegate-s3] recover: malformed active uploadId %q\n", upload.UploadID)
+		return
+	}
+	record, err := svc.LookupMultipartUploadRecord(uploadID)
+	if err != nil || record == nil {
+		fmt.Printf("[filegate-s3] recover: committing upload %s bucket=%s key=%s has no durable record; leaving for CompleteMultipartUpload retry (stage=%s)\n",
+			upload.UploadID, upload.Bucket, upload.Key, upload.StageDir)
+		return
+	}
+	upload.Phase = domain.MultipartUploadDone
+	if upload.CompositeETag == "" {
+		upload.CompositeETag = record.CompositeETag
+	}
+	if upload.CompletedFileID == "" {
+		upload.CompletedFileID = record.FileID.String()
+	}
+	if upload.CompletedAt == 0 {
+		if record.CompletedAt != 0 {
+			upload.CompletedAt = record.CompletedAt
+		} else {
+			upload.CompletedAt = time.Now().UnixMilli()
+		}
+	}
+	if err := svc.UpdateActiveMultipartUpload(upload); err != nil {
+		fmt.Printf("[filegate-s3] recover: write done active upload %s: %s\n", upload.UploadID, err)
 	}
 }
 

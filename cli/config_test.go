@@ -37,6 +37,9 @@ func TestLoadConfigJobDefaults(t *testing.T) {
 	if cfg.Upload.MinFreeBytes != int64(64*1024*1024) {
 		t.Fatalf("upload.min_free_bytes=%d, want %d", cfg.Upload.MinFreeBytes, int64(64*1024*1024))
 	}
+	if cfg.S3.MaxConcurrentWrites <= 0 {
+		t.Fatalf("s3.max_concurrent_writes=%d, want > 0", cfg.S3.MaxConcurrentWrites)
+	}
 	if cfg.Thumbnail.MaxSourceBytes != int64(64*1024*1024) {
 		t.Fatalf("thumbnail.max_source_bytes=%d, want %d",
 			cfg.Thumbnail.MaxSourceBytes, int64(64*1024*1024))
@@ -63,7 +66,9 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 		"  thumbnail_queue_size: 32000\n" +
 		"upload:\n" +
 		"  max_concurrent_chunk_writes: 77\n" +
-		"  min_free_bytes: 123456\n"
+		"  min_free_bytes: 123456\n" +
+		"s3:\n" +
+		"  max_concurrent_writes: 9\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -83,6 +88,9 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 	}
 	if cfg.Upload.MinFreeBytes != 123456 {
 		t.Fatalf("upload.min_free_bytes=%d, want 123456", cfg.Upload.MinFreeBytes)
+	}
+	if cfg.S3.MaxConcurrentWrites != 9 {
+		t.Fatalf("s3.max_concurrent_writes=%d, want 9", cfg.S3.MaxConcurrentWrites)
 	}
 }
 

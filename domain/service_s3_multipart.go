@@ -39,11 +39,11 @@ type MultipartCompleteArgs struct {
 
 // MultipartCompleteResult is what CompleteMultipartUpload returns.
 type MultipartCompleteResult struct {
-	Meta    *FileMeta
-	Created bool // true when the destination didn't exist before
+	Meta     *FileMeta
+	Created  bool // true when the destination didn't exist before
 	Replayed bool // true when the uploadId record already existed
-                  // and we returned its stored result without re-doing
-                  // the install
+	// and we returned its stored result without re-doing
+	// the install
 	// Timings reports per-phase durations of the domain-side install
 	// (zero on the Replayed fast path, which does no install). The
 	// adapter observes these into the complete-phase histogram —
@@ -343,6 +343,47 @@ func (s *Service) LookupMultipartUploadRecord(uploadID [16]byte) (*MultipartUplo
 func (s *Service) DeleteMultipartUploadRecord(uploadID [16]byte) error {
 	return s.idx.Batch(func(b Batch) error {
 		b.DelMultipartUploadRecord(uploadID)
+		return nil
+	})
+}
+
+func (s *Service) CreateActiveMultipartUpload(upload ActiveMultipartUpload) error {
+	return s.idx.Batch(func(b Batch) error {
+		b.PutActiveMultipartUpload(upload)
+		return nil
+	})
+}
+
+func (s *Service) LookupActiveMultipartUpload(uploadID string) (*ActiveMultipartUpload, error) {
+	return s.idx.LookupActiveMultipartUpload(uploadID)
+}
+
+func (s *Service) ListActiveMultipartUploads(bucket string) ([]ActiveMultipartUpload, error) {
+	return s.idx.ListActiveMultipartUploads(bucket)
+}
+
+func (s *Service) PutActiveMultipartPart(part ActiveMultipartPart) error {
+	return s.idx.Batch(func(b Batch) error {
+		b.PutActiveMultipartPart(part)
+		return nil
+	})
+}
+
+func (s *Service) ListActiveMultipartParts(uploadID string) ([]ActiveMultipartPart, error) {
+	return s.idx.ListActiveMultipartParts(uploadID)
+}
+
+func (s *Service) UpdateActiveMultipartUpload(upload ActiveMultipartUpload) error {
+	return s.idx.Batch(func(b Batch) error {
+		b.PutActiveMultipartUpload(upload)
+		return nil
+	})
+}
+
+func (s *Service) DeleteActiveMultipartUpload(uploadID string) error {
+	return s.idx.Batch(func(b Batch) error {
+		b.DelActiveMultipartParts(uploadID)
+		b.DelActiveMultipartUpload(uploadID)
 		return nil
 	})
 }

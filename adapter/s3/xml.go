@@ -34,6 +34,7 @@ const (
 	errBadDigest                errorCode = "BadDigest"
 	errEntityTooLarge           errorCode = "EntityTooLarge"
 	errIncompleteBody           errorCode = "IncompleteBody"
+	errInsufficientStorage      errorCode = "InsufficientStorage"
 	errInternalError            errorCode = "InternalError"
 	errInvalidArgument          errorCode = "InvalidArgument"
 	errInvalidDigest            errorCode = "InvalidDigest"
@@ -74,6 +75,8 @@ func statusFor(code errorCode) int {
 		return http.StatusBadRequest
 	case errSlowDown:
 		return http.StatusServiceUnavailable
+	case errInsufficientStorage:
+		return http.StatusInsufficientStorage
 	case errPreconditionFailed:
 		return http.StatusPreconditionFailed
 	case errRequestTimeTooSkewed:
@@ -183,19 +186,19 @@ func formatHTTPDate(t time.Time) string {
 // don't strictly require positional order, but matching keeps wire
 // diffs tight.
 type listBucketResultV2 struct {
-	XMLName               xml.Name             `xml:"ListBucketResult"`
-	Name                  string               `xml:"Name"`
-	Prefix                string               `xml:"Prefix"`
-	Delimiter             string               `xml:"Delimiter,omitempty"`
-	StartAfter            string               `xml:"StartAfter,omitempty"`
-	EncodingType          string               `xml:"EncodingType,omitempty"`
-	KeyCount              int                  `xml:"KeyCount"`
-	MaxKeys               int                  `xml:"MaxKeys"`
-	IsTruncated           bool                 `xml:"IsTruncated"`
-	ContinuationToken     string               `xml:"ContinuationToken,omitempty"`
-	NextContinuationToken string               `xml:"NextContinuationToken,omitempty"`
-	Contents              []listObjectXML      `xml:"Contents"`
-	CommonPrefixes        []commonPrefixXML    `xml:"CommonPrefixes,omitempty"`
+	XMLName               xml.Name          `xml:"ListBucketResult"`
+	Name                  string            `xml:"Name"`
+	Prefix                string            `xml:"Prefix"`
+	Delimiter             string            `xml:"Delimiter,omitempty"`
+	StartAfter            string            `xml:"StartAfter,omitempty"`
+	EncodingType          string            `xml:"EncodingType,omitempty"`
+	KeyCount              int               `xml:"KeyCount"`
+	MaxKeys               int               `xml:"MaxKeys"`
+	IsTruncated           bool              `xml:"IsTruncated"`
+	ContinuationToken     string            `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string            `xml:"NextContinuationToken,omitempty"`
+	Contents              []listObjectXML   `xml:"Contents"`
+	CommonPrefixes        []commonPrefixXML `xml:"CommonPrefixes,omitempty"`
 }
 
 // commonPrefixXML represents a virtual "directory" entry in
@@ -273,7 +276,7 @@ type uploadXML struct {
 // ascending PartNumber order with the per-part ETag from
 // UploadPart.
 type completeMultipartUploadRequest struct {
-	XMLName xml.Name             `xml:"CompleteMultipartUpload"`
+	XMLName xml.Name              `xml:"CompleteMultipartUpload"`
 	Parts   []completeRequestPart `xml:"Part"`
 }
 
@@ -323,9 +326,9 @@ type deleteRequestObject struct {
 // deleteObjectsResult is the XML response for DeleteObjects. Each
 // successful key produces a <Deleted>; each failure a <Error>.
 type deleteObjectsResult struct {
-	XMLName xml.Name              `xml:"DeleteResult"`
-	Deleted []deletedResultEntry  `xml:"Deleted,omitempty"`
-	Errors  []deleteResultError   `xml:"Error,omitempty"`
+	XMLName xml.Name             `xml:"DeleteResult"`
+	Deleted []deletedResultEntry `xml:"Deleted,omitempty"`
+	Errors  []deleteResultError  `xml:"Error,omitempty"`
 }
 
 type deletedResultEntry struct {
@@ -350,4 +353,3 @@ func quoteETag(s string) string {
 	}
 	return fmt.Sprintf("%q", s)
 }
-

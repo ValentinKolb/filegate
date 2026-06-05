@@ -262,7 +262,7 @@ func sanitizeRelativePath(relPath string) (string, error) {
 		// reflect a user accidentally using the same name. Both cases
 		// are safer to refuse outright than to allow a path that
 		// shadows the namespace.
-		if seg == versionsDirName {
+		if seg == versionsDirName || isFilegateInternalTempName(seg) {
 			return "", ErrForbidden
 		}
 	}
@@ -1423,6 +1423,10 @@ func (s *Service) isPathInsideVersionsNamespace(absPath string) bool {
 	return false
 }
 
+func isFilegateInternalTempName(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.Contains(name, ".filegate-tmp-")
+}
+
 // MkdirRelative creates relPath under parentID. The leaf segment respects
 // the supplied ConflictMode (error/skip/rename). Intermediate segments are
 // always treated as ConflictSkip — an existing directory in the middle of
@@ -2478,6 +2482,9 @@ func (s *Service) syncSingle(absPath string) error {
 	if s.isPathInsideVersionsNamespace(absPath) {
 		return nil
 	}
+	if isFilegateInternalTempName(filepath.Base(absPath)) {
+		return nil
+	}
 	// Lstat is sufficient for the symlink check AND the metadata path.
 	// For non-symlinks Lstat == Stat, and we already reject symlinks
 	// here — so the second Stat call would be a redundant syscall.
@@ -2824,6 +2831,9 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 		if e.Type()&os.ModeSymlink != 0 {
 			continue
 		}
+		if isFilegateInternalTempName(e.Name()) {
+			continue
+		}
 		if mountRoot && e.Name() == versionsDirName {
 			continue
 		}
@@ -3133,6 +3143,12 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 			// regular files. SkipDir prunes the whole subtree.
 			if d.IsDir() && current == filepath.Join(basePath, versionsDirName) {
 				return filepath.SkipDir
+			}
+			if isFilegateInternalTempName(d.Name()) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			if d.Type()&os.ModeSymlink != 0 {
 				return nil

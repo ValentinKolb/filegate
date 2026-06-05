@@ -126,7 +126,8 @@ await s3.write("hello.txt", "hello, filegate");
 // Read
 const text = await s3.file("hello.txt").text();
 
-// Multipart upload (Bun handles part sizing automatically)
+// Large upload. Filegate accepts either PutObject or multipart,
+// depending on the wire format Bun chooses for the payload.
 await s3.write("big.bin", new Uint8Array(50_000_000));
 
 // Stream copy

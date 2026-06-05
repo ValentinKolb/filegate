@@ -36,6 +36,9 @@ type Index interface {
 	// means the Complete already succeeded once and any retry must
 	// return its stored result, not re-do the install.
 	LookupMultipartUploadRecord(uploadID [16]byte) (*MultipartUploadRecord, error)
+	LookupActiveMultipartUpload(uploadID string) (*ActiveMultipartUpload, error)
+	ListActiveMultipartUploads(bucket string) ([]ActiveMultipartUpload, error)
+	ListActiveMultipartParts(uploadID string) ([]ActiveMultipartPart, error)
 	Batch(fn func(Batch) error) error
 	Close() error
 }
@@ -76,6 +79,11 @@ type Batch interface {
 	// Used by AbortMultipartUpload and the cleanup loop after the
 	// retention window elapses.
 	DelMultipartUploadRecord(uploadID [16]byte)
+	PutActiveMultipartUpload(upload ActiveMultipartUpload)
+	DelActiveMultipartUpload(uploadID string)
+	PutActiveMultipartPart(part ActiveMultipartPart)
+	DelActiveMultipartPart(uploadID string, partNumber int)
+	DelActiveMultipartParts(uploadID string)
 }
 
 // Store is the port interface for filesystem I/O operations.

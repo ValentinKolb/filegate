@@ -67,6 +67,10 @@ type S3Config struct {
 	Region    string `mapstructure:"region"`
 	AccessKey string `mapstructure:"access_key"`
 	SecretKey string `mapstructure:"secret_key"`
+	// MaxConcurrentWrites bounds concurrent S3 object/part writes.
+	// This protects file descriptors and staging space when clients
+	// upload many large files in parallel. 0 means use the default.
+	MaxConcurrentWrites int `mapstructure:"max_concurrent_writes"`
 
 	// Keys is the multi-tenant key store. Each entry exists
 	// independently and is matched at request time by AccessKey;

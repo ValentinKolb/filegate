@@ -59,6 +59,9 @@ s3:
   # Region clients sign with. Single-instance deployments can keep
   # us-east-1; multi-instance routing benefits from distinct names.
   region: "us-east-1"
+  # Bounds concurrent PutObject/UploadPart/CopyObject writes. 0
+  # uses the default. Lower this for small disks or low ulimit.
+  max_concurrent_writes: 0
 
   # ─── Multi-tenant key store ──────────────────────────────────
   # Each entry: a unique access_key, its secret, and the list of

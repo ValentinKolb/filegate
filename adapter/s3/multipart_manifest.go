@@ -6,24 +6,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/valentinkolb/filegate/infra/filesystem"
 )
 
-// Multipart upload manifest layout.
+// Multipart upload staging layout.
 //
 // On disk under each mount we use the existing .fg-uploads staging
 // dir; multipart uploads live under their own subprefix so the
 // existing chunked-upload cleanup loop and the new multipart
 // cleanup loop don't trip over each other:
 //
-//   <mountAbs>/.fg-uploads/s3-<uploadId>/manifest.json
-//   <mountAbs>/.fg-uploads/s3-<uploadId>/parts/00001.bin
-//   <mountAbs>/.fg-uploads/s3-<uploadId>/parts/00002.bin
-//   ...
-//   <mountAbs>/.fg-uploads/s3-<uploadId>/complete.tmp   (only during Complete)
+//	<mountAbs>/.fg-uploads/s3-<uploadId>/parts/00001.bin
+//	<mountAbs>/.fg-uploads/s3-<uploadId>/parts/00002.bin
+//	...
+//	<mountAbs>/.fg-uploads/s3-<uploadId>/complete.tmp   (only during Complete)
+//
+// Active upload metadata and part rows live in Pebble. The manifest
+// helpers below are kept for legacy cleanup/recovery tests and old
+// staging dirs from pre-Pebble-active builds.
 //
 // uploadId is 32 lowercase-hex chars (16 random bytes). We pick our
 // own format rather than emit AWS-shape uploadIds (long opaque
@@ -42,27 +43,26 @@ const (
 	multipartMaxPartCount = 10000
 )
 
-// Multipart upload phases. The set is ordered by progression: a
-// crash mid-upload is recoverable as long as the manifest tells us
-// where we were.
+// Multipart upload phases. Kept in the adapter for legacy manifest
+// cleanup; active uploads use domain.MultipartUploadPhase with the
+// same string values.
 type multipartPhase string
 
 const (
 	phaseInProgress multipartPhase = "in_progress" // accepting UploadPart
 	phaseCommitting multipartPhase = "committing"  // Complete in flight; recovery needs work
-	phaseDone       multipartPhase = "done"        // Complete succeeded; manifest kept for retention
+	phaseDone       multipartPhase = "done"        // Complete succeeded; state kept for retention
 	phaseAborted    multipartPhase = "aborted"     // AbortMultipartUpload called (or recovery decided abort)
 )
 
-// multipartManifest is what we serialize to manifest.json. Format
-// version is bumped if the schema changes incompatibly.
+// multipartManifest is the legacy manifest.json shape.
 type multipartManifest struct {
-	Format    int            `json:"format"`
-	Kind      string         `json:"kind"` // "s3-multipart" — distinguishes from chunked-upload manifests
-	UploadID  string         `json:"upload_id"`
-	Bucket    string         `json:"bucket"`
-	Key       string         `json:"key"`
-	Initiated int64          `json:"initiated_unix_ms"`
+	Format    int    `json:"format"`
+	Kind      string `json:"kind"` // "s3-multipart" — distinguishes from chunked-upload manifests
+	UploadID  string `json:"upload_id"`
+	Bucket    string `json:"bucket"`
+	Key       string `json:"key"`
+	Initiated int64  `json:"initiated_unix_ms"`
 
 	// Per-PUT user-supplied object metadata that would normally go
 	// on the resulting object. Captured at CreateMultipartUpload
@@ -83,16 +83,16 @@ type multipartManifest struct {
 	CompositeETag    string `json:"composite_etag,omitempty"`
 	WholeBodyMD5     string `json:"whole_body_md5,omitempty"`
 	PreInstallExists bool   `json:"pre_install_exists,omitempty"`
-	PreInstallRaw   []byte  `json:"pre_install_raw,omitempty"` // base64 bytes of pre-install fgbin entity record
-	CompletedFileID string  `json:"completed_file_id,omitempty"`
-	CompletedAt     int64   `json:"completed_at_unix_ms,omitempty"`
+	PreInstallRaw    []byte `json:"pre_install_raw,omitempty"` // base64 bytes of pre-install fgbin entity record
+	CompletedFileID  string `json:"completed_file_id,omitempty"`
+	CompletedAt      int64  `json:"completed_at_unix_ms,omitempty"`
 }
 
 // multipartPart is one part's recorded state.
 type multipartPart struct {
 	PartNumber int    `json:"part_number"`
 	Size       int64  `json:"size"`
-	ETag       string `json:"etag"`           // hex MD5 of part bytes
+	ETag       string `json:"etag"` // hex MD5 of part bytes
 	UpdatedAt  int64  `json:"updated_unix_ms"`
 }
 
@@ -163,27 +163,6 @@ func writeManifest(stageDir string, m *multipartManifest) error {
 // staging dir / manifest. The router maps this to NoSuchUpload.
 var errMultipartNotFound = errors.New("s3: multipart upload not found")
 
-// findStageDir walks every mount looking for the staging dir for
-// uploadId. Returns ErrNotFound when no mount has it. Used to
-// resolve uploadId to a (mountAbs, stageDir) pair without the
-// adapter needing to know which mount the upload was created on.
-func (rt *router) findStageDir(uploadID string) (multipartLocator, error) {
-	if uploadID == "" {
-		return multipartLocator{}, errMultipartNotFound
-	}
-	for _, root := range rt.svc.ListRoot() {
-		mountAbs, err := rt.svc.ResolveAbsPath(root.ID)
-		if err != nil {
-			continue
-		}
-		dir := stageDirFor(mountAbs, uploadID)
-		if _, err := os.Stat(dir); err == nil {
-			return multipartLocator{MountAbs: mountAbs, StageDir: dir, UploadID: uploadID}, nil
-		}
-	}
-	return multipartLocator{}, errMultipartNotFound
-}
-
 // stageDirForBucket: the inverse — given a bucket name, find its
 // mount-abs and synthesize the staging dir for a NEW uploadId.
 // Used by CreateMultipartUpload.
@@ -204,36 +183,3 @@ func (rt *router) stageDirForBucket(bucket, uploadID string) (multipartLocator, 
 	}
 	return multipartLocator{}, errMultipartNotFound
 }
-
-// listMultipartUploadsForBucket scans the .fg-uploads/s3-* dirs in
-// a bucket and returns their manifests sorted by Initiated time
-// (oldest first, matching AWS behaviour). Manifests in phase=done
-// or phase=aborted are skipped — the cleanup loop GC's them on a
-// retention timer; clients shouldn't see them as in-progress.
-func listMultipartUploadsForBucket(mountAbs string) ([]multipartManifest, error) {
-	stageRoot := filepath.Join(mountAbs, ".fg-uploads")
-	entries, err := os.ReadDir(stageRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []multipartManifest
-	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), multipartDirPrefix) {
-			continue
-		}
-		m, err := readManifest(filepath.Join(stageRoot, e.Name()))
-		if err != nil {
-			continue
-		}
-		if m.Phase != phaseInProgress && m.Phase != phaseCommitting {
-			continue
-		}
-		out = append(out, *m)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Initiated < out[j].Initiated })
-	return out, nil
-}
-

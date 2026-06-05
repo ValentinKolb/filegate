@@ -7,22 +7,24 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/valentinkolb/filegate/domain"
 	"github.com/valentinkolb/filegate/infra/filesystem"
 )
 
 // handleCreateMultipartUpload implements the POST /{bucket}/{key}?uploads
 // flow. Generates a fresh uploadId, captures the per-PUT object
-// metadata in the manifest, and returns the InitiateMultipartUpload
+// metadata in active Pebble state, and returns the InitiateMultipartUpload
 // XML response.
 func (rt *router) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Request, verified *sigV4Result, bucket, key string) {
 	if err := validateObjectKey(key); err != nil {
@@ -33,8 +35,7 @@ func (rt *router) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 	// Enforce the same 2 KiB user-metadata budget the single-PUT
 	// path enforces. Without this, clients could smuggle arbitrarily
 	// large x-amz-meta-* blobs through CreateMultipartUpload —
-	// inconsistent with PutObject and an unbounded resource cost on
-	// the manifest.
+	// inconsistent with PutObject and an unbounded active-state cost.
 	userMeta := collectUserMetadata(r)
 	if len(userMeta) > 0 {
 		blob, jerr := json.Marshal(userMeta)
@@ -59,26 +60,25 @@ func (rt *router) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	manifest := &multipartManifest{
-		Format:             multipartManifestFormat,
-		Kind:               multipartManifestKind,
+	upload := domain.ActiveMultipartUpload{
 		UploadID:           uploadID,
 		Bucket:             bucket,
 		Key:                key,
+		StageDir:           loc.StageDir,
 		Initiated:          time.Now().UnixMilli(),
 		ContentType:        r.Header.Get("Content-Type"),
 		ContentEncoding:    r.Header.Get("Content-Encoding"),
 		ContentDisposition: r.Header.Get("Content-Disposition"),
 		UserMetadata:       userMeta,
-		Parts:              map[int]multipartPart{},
-		Phase:              phaseInProgress,
+		Phase:              domain.MultipartUploadInProgress,
 	}
 	if err := os.MkdirAll(filepath.Join(loc.StageDir, multipartPartsDirName), 0o755); err != nil {
 		writeError(w, r, errInternalError, "could not prepare staging dir", withBucket(bucket), withKey(key))
 		return
 	}
-	if err := writeManifest(loc.StageDir, manifest); err != nil {
-		writeError(w, r, errInternalError, "could not write manifest", withBucket(bucket), withKey(key))
+	if err := rt.svc.CreateActiveMultipartUpload(upload); err != nil {
+		_ = os.RemoveAll(loc.StageDir)
+		writeError(w, r, errInternalError, "could not record multipart upload", withBucket(bucket), withKey(key))
 		return
 	}
 
@@ -99,7 +99,7 @@ func (rt *router) handleCreateMultipartUpload(w http.ResponseWriter, r *http.Req
 
 // handleUploadPart implements PUT /{bucket}/{key}?partNumber=N&uploadId=X.
 // Body is the raw part bytes; we tee through MD5 while writing,
-// store the part-MD5 in the manifest, and return ETag.
+// store the part-MD5 in active Pebble state, and return ETag.
 //
 // AWS spec rules:
 //   - partNumber range 1-10000 (errInvalidArgument otherwise)
@@ -119,59 +119,81 @@ func (rt *router) handleUploadPart(w http.ResponseWriter, r *http.Request, verif
 		writeError(w, r, errInvalidArgument, fmt.Sprintf("partNumber must be 1-%d", multipartMaxPartCount), withBucket(bucket), withKey(key))
 		return
 	}
-
-	loc, err := rt.findStageDir(uploadID)
+	upload, err := rt.svc.LookupActiveMultipartUpload(uploadID)
 	if err != nil {
 		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
 		return
 	}
-	manifest, err := readManifest(loc.StageDir)
-	if err != nil {
-		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
-		return
-	}
-	if manifest.Phase != phaseInProgress {
+	if upload.Phase != domain.MultipartUploadInProgress {
 		writeError(w, r, errInvalidRequest, "upload is not in_progress", withBucket(bucket), withKey(key))
 		return
 	}
-	if manifest.Bucket != bucket || manifest.Key != key {
+	if upload.Bucket != bucket || upload.Key != key {
 		// Defense against client confusion or replay across keys.
 		writeError(w, r, errInvalidArgument, "uploadId belongs to a different bucket/key", withBucket(bucket), withKey(key))
 		return
 	}
 
-	// Stream body to part file while computing MD5.
-	partPath := partPathFor(loc.StageDir, partNumber)
-	written, partETag, sigErrV := writePartTeeMD5(verified.BodyReader, partPath)
+	if err := rt.acquireWriteSlot(r.Context()); err != nil {
+		writeError(w, r, errIncompleteBody, "request canceled before write slot", withBucket(bucket), withKey(key))
+		return
+	}
+	defer rt.releaseWriteSlot()
+
+	expectedPartETag := ""
+	if v := strings.TrimSpace(r.Header.Get("Content-MD5")); v != "" {
+		raw, decErr := base64.StdEncoding.DecodeString(v)
+		if decErr != nil || len(raw) != 16 {
+			writeError(w, r, errInvalidDigest, "Content-MD5 must be a 16-byte base64-encoded value", withBucket(bucket), withKey(key))
+			return
+		}
+		expectedPartETag = hex.EncodeToString(raw)
+	}
+
+	releasePart := rt.partLocks.acquire(fmt.Sprintf("%s:%d", uploadID, partNumber))
+	defer releasePart()
+
+	partPath := partPathFor(upload.StageDir, partNumber)
+	tmpPath, written, partETag, sigErrV := writePartTempTeeMD5(verified.BodyReader, partPath, expectedPartETag)
 	if sigErrV != nil {
 		writeError(w, r, sigErrV.Code, sigErrV.Message, withBucket(bucket), withKey(key))
 		return
 	}
+	committedPart := false
+	defer func() {
+		if !committedPart {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	// Optional Content-MD5 verification.
-	if v := strings.TrimSpace(r.Header.Get("Content-MD5")); v != "" {
-		raw, decErr := base64.StdEncoding.DecodeString(v)
-		if decErr != nil || len(raw) != 16 {
-			_ = os.Remove(partPath)
-			writeError(w, r, errInvalidDigest, "Content-MD5 must be a 16-byte base64-encoded value", withBucket(bucket), withKey(key))
-			return
-		}
-		if hex.EncodeToString(raw) != partETag {
-			_ = os.Remove(partPath)
-			writeError(w, r, errBadDigest, "Content-MD5 does not match part body", withBucket(bucket), withKey(key))
-			return
-		}
+	releaseUpload := rt.uploadLocks.acquire(uploadID)
+	defer releaseUpload()
+	latest, err := rt.svc.LookupActiveMultipartUpload(uploadID)
+	if err != nil {
+		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
+		return
 	}
-
-	// Update manifest: overwrite if duplicate.
-	manifest.Parts[partNumber] = multipartPart{
+	if latest.Phase != domain.MultipartUploadInProgress {
+		writeError(w, r, errInvalidRequest, "upload is not in_progress", withBucket(bucket), withKey(key))
+		return
+	}
+	if latest.Bucket != bucket || latest.Key != key {
+		writeError(w, r, errInvalidArgument, "uploadId belongs to a different bucket/key", withBucket(bucket), withKey(key))
+		return
+	}
+	if err := os.Rename(tmpPath, partPath); err != nil {
+		writeError(w, r, errInternalError, "rename part: "+err.Error(), withBucket(bucket), withKey(key))
+		return
+	}
+	committedPart = true
+	if err := rt.svc.PutActiveMultipartPart(domain.ActiveMultipartPart{
+		UploadID:   uploadID,
 		PartNumber: partNumber,
 		Size:       written,
 		ETag:       partETag,
 		UpdatedAt:  time.Now().UnixMilli(),
-	}
-	if err := writeManifest(loc.StageDir, manifest); err != nil {
-		writeError(w, r, errInternalError, "could not update manifest", withBucket(bucket), withKey(key))
+	}); err != nil {
+		writeError(w, r, errInternalError, "could not record part", withBucket(bucket), withKey(key))
 		return
 	}
 
@@ -191,13 +213,19 @@ func (rt *router) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, errInvalidArgument, "uploadId required", withBucket(bucket), withKey(key))
 		return
 	}
-	loc, err := rt.findStageDir(uploadID)
+	releaseUpload := rt.uploadLocks.acquire(uploadID)
+	defer releaseUpload()
+	upload, err := rt.svc.LookupActiveMultipartUpload(uploadID)
 	if err != nil {
 		// Idempotent: already gone.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err := os.RemoveAll(loc.StageDir); err != nil {
+	if err := rt.svc.DeleteActiveMultipartUpload(uploadID); err != nil {
+		writeError(w, r, errInternalError, "could not remove upload state", withBucket(bucket), withKey(key))
+		return
+	}
+	if err := os.RemoveAll(upload.StageDir); err != nil {
 		writeError(w, r, errInternalError, "could not remove staging dir", withBucket(bucket), withKey(key))
 		return
 	}
@@ -215,33 +243,26 @@ func (rt *router) handleListParts(w http.ResponseWriter, r *http.Request, verifi
 		writeError(w, r, errInvalidArgument, "uploadId required", withBucket(bucket), withKey(key))
 		return
 	}
-	loc, err := rt.findStageDir(uploadID)
+	upload, err := rt.svc.LookupActiveMultipartUpload(uploadID)
 	if err != nil {
 		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
 		return
 	}
-	manifest, err := readManifest(loc.StageDir)
-	if err != nil {
-		writeError(w, r, errNoSuchUpload, "upload not found", withBucket(bucket), withKey(key))
-		return
-	}
-	if manifest.Bucket != bucket || manifest.Key != key {
+	if upload.Bucket != bucket || upload.Key != key {
 		writeError(w, r, errInvalidArgument, "uploadId belongs to a different bucket/key", withBucket(bucket), withKey(key))
 		return
 	}
-
-	parts := make([]int, 0, len(manifest.Parts))
-	for n := range manifest.Parts {
-		parts = append(parts, n)
+	parts, err := rt.svc.ListActiveMultipartParts(uploadID)
+	if err != nil {
+		writeError(w, r, errInternalError, "could not list parts", withBucket(bucket), withKey(key))
+		return
 	}
-	sort.Ints(parts)
 	res := listPartsResult{
 		Bucket:   bucket,
 		Key:      key,
 		UploadID: uploadID,
 	}
-	for _, n := range parts {
-		p := manifest.Parts[n]
+	for _, p := range parts {
 		res.Parts = append(res.Parts, partXML{
 			PartNumber:   p.PartNumber,
 			LastModified: time.UnixMilli(p.UpdatedAt).UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -262,12 +283,11 @@ func (rt *router) handleListParts(w http.ResponseWriter, r *http.Request, verifi
 // handleListMultipartUploads implements GET /{bucket}?uploads.
 // Returns in-progress (and committing) uploads in the bucket.
 func (rt *router) handleListMultipartUploads(w http.ResponseWriter, r *http.Request, verified *sigV4Result, bucket string) {
-	loc, err := rt.stageDirForBucket(bucket, "" /* uploadId not relevant here */)
-	if err != nil {
+	if _, err := rt.stageDirForBucket(bucket, "" /* uploadId not relevant here */); err != nil {
 		writeError(w, r, errNoSuchBucket, "bucket does not exist", withBucket(bucket))
 		return
 	}
-	manifests, err := listMultipartUploadsForBucket(loc.MountAbs)
+	uploads, err := rt.svc.ListActiveMultipartUploads(bucket)
 	if err != nil {
 		writeError(w, r, errInternalError, fmt.Sprintf("listing failed: %s", err), withBucket(bucket))
 		return
@@ -275,11 +295,14 @@ func (rt *router) handleListMultipartUploads(w http.ResponseWriter, r *http.Requ
 	res := listMultipartUploadsResult{
 		Bucket: bucket,
 	}
-	for _, m := range manifests {
+	for _, upload := range uploads {
+		if upload.Phase != domain.MultipartUploadInProgress && upload.Phase != domain.MultipartUploadCommitting {
+			continue
+		}
 		res.Uploads = append(res.Uploads, uploadXML{
-			Key:       m.Key,
-			UploadID:  m.UploadID,
-			Initiated: time.UnixMilli(m.Initiated).UTC().Format("2006-01-02T15:04:05.000Z"),
+			Key:       upload.Key,
+			UploadID:  upload.UploadID,
+			Initiated: time.UnixMilli(upload.Initiated).UTC().Format("2006-01-02T15:04:05.000Z"),
 		})
 	}
 	w.Header().Set("Content-Type", "application/xml")
@@ -288,7 +311,7 @@ func (rt *router) handleListMultipartUploads(w http.ResponseWriter, r *http.Requ
 	_, _ = io.WriteString(w, xml.Header)
 	_ = xml.NewEncoder(w).Encode(res)
 	if rt.accessLog {
-		rt.logAccess("ListMultipartUploads", bucket, "", verified.AccessKeyID, fmt.Sprintf("count=%d", len(manifests)))
+		rt.logAccess("ListMultipartUploads", bucket, "", verified.AccessKeyID, fmt.Sprintf("count=%d", len(res.Uploads)))
 	}
 }
 
@@ -303,18 +326,19 @@ func generateUploadID() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-// writePartTeeMD5 writes body bytes to partPath (atomically via
-// tmp+rename) while teeing through MD5. Returns (size, hex-md5,
-// nil) on success.
-func writePartTeeMD5(body io.Reader, partPath string) (int64, string, *sigV4VerifyError) {
+// writePartTempTeeMD5 writes body bytes to a unique temp file beside
+// partPath while teeing through MD5. The caller publishes the temp file
+// with os.Rename only after re-checking active upload phase.
+func writePartTempTeeMD5(body io.Reader, partPath string, expectedETag string) (string, int64, string, *sigV4VerifyError) {
 	if err := os.MkdirAll(filepath.Dir(partPath), 0o755); err != nil {
-		return 0, "", sigErr(errInternalError, "could not prepare parts dir: %s", err)
+		return "", 0, "", sigErr(errInternalError, "could not prepare parts dir: %s", err)
 	}
-	tmp := partPath + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	dir := filepath.Dir(partPath)
+	f, err := os.CreateTemp(dir, filepath.Base(partPath)+".*.tmp")
 	if err != nil {
-		return 0, "", sigErr(errInternalError, "could not open part file: %s", err)
+		return "", 0, "", sigErr(errInternalError, "could not open part file: %s", err)
 	}
+	tmp := f.Name()
 	hasher := md5.New()
 	tee := io.MultiWriter(f, hasher)
 	written, err := io.Copy(tee, body)
@@ -323,17 +347,25 @@ func writePartTeeMD5(body io.Reader, partPath string) (int64, string, *sigV4Veri
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		return 0, "", sigErr(errIncompleteBody, "part write: %s", err)
+		if isNoSpaceError(err) {
+			return "", 0, "", sigErr(errInsufficientStorage, "part write: storage is full")
+		}
+		return "", 0, "", sigErr(errIncompleteBody, "part write: %s", err)
+	}
+	partETag := hex.EncodeToString(hasher.Sum(nil))
+	if expectedETag != "" && !strings.EqualFold(expectedETag, partETag) {
+		_ = os.Remove(tmp)
+		return "", 0, "", sigErr(errBadDigest, "Content-MD5 does not match part body")
 	}
 	// fsync the data file so the rename'd part is durable.
 	if err := filesystem.SyncDir(filepath.Dir(tmp)); err == nil {
 		// ignore — best-effort dir-sync
 	}
-	if err := os.Rename(tmp, partPath); err != nil {
-		_ = os.Remove(tmp)
-		return 0, "", sigErr(errInternalError, "rename part: %s", err)
-	}
-	return written, hex.EncodeToString(hasher.Sum(nil)), nil
+	return tmp, written, partETag, nil
+}
+
+func isNoSpaceError(err error) bool {
+	return errors.Is(err, syscall.ENOSPC)
 }
 
 // collectUserMetadata extracts x-amz-meta-* headers from the

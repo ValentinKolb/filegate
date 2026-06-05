@@ -36,6 +36,13 @@ const (
 	// signal. Retries that find an entry return its stored result
 	// idempotently. Records are GC'd after a 24h retention window.
 	familyMultipartUpload byte = 0x07
+	// familyActiveMultipart is the best-effort state for active S3
+	// multipart uploads before Complete has been acknowledged. Keyed as:
+	//   0x08 + 'm' + uploadId_hex → JSON ActiveMultipartUpload
+	//   0x08 + 'p' + uploadId_hex + 0x00 + partNumber_u16 → JSON ActiveMultipartPart
+	//
+	// Part bytes stay on the filesystem; Pebble only tracks small state rows.
+	familyActiveMultipart byte = 0x08
 
 	// familyFlatKey is the bucket+relpath → fileID secondary index,
 	// added at format version 9. Keyed as
@@ -232,7 +239,6 @@ func childKey(parentID domain.FileID, isDir bool, name string) []byte {
 	return append(p, []byte(name)...)
 }
 
-
 // multipartUploadKey builds the Pebble key for a multipart-upload
 // record. uploadID is 16 bytes (we hex-encode for the manifest dir
 // name; the raw bytes go into the key).
@@ -240,6 +246,34 @@ func multipartUploadKey(uploadID [16]byte) []byte {
 	out := make([]byte, 1+16)
 	out[0] = familyMultipartUpload
 	copy(out[1:], uploadID[:])
+	return out
+}
+
+func activeMultipartUploadPrefix() []byte {
+	return []byte{familyActiveMultipart, 'm'}
+}
+
+func activeMultipartUploadKey(uploadID string) []byte {
+	prefix := activeMultipartUploadPrefix()
+	out := make([]byte, len(prefix)+len(uploadID))
+	copy(out, prefix)
+	copy(out[len(prefix):], uploadID)
+	return out
+}
+
+func activeMultipartPartPrefix(uploadID string) []byte {
+	out := make([]byte, 0, 1+1+len(uploadID)+1)
+	out = append(out, familyActiveMultipart, 'p')
+	out = append(out, []byte(uploadID)...)
+	out = append(out, 0)
+	return out
+}
+
+func activeMultipartPartKey(uploadID string, partNumber int) []byte {
+	prefix := activeMultipartPartPrefix(uploadID)
+	out := make([]byte, len(prefix)+2)
+	copy(out, prefix)
+	binary.BigEndian.PutUint16(out[len(prefix):], uint16(partNumber))
 	return out
 }
 
@@ -654,6 +688,106 @@ func (i *Index) LookupMultipartUploadRecord(uploadID [16]byte) (*domain.Multipar
 		return nil, fmt.Errorf("decode multipart record: %w", err)
 	}
 	return &record, retErr
+}
+
+func (i *Index) LookupActiveMultipartUpload(uploadID string) (*domain.ActiveMultipartUpload, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+	v, closer, err := i.db.Get(activeMultipartUploadKey(uploadID))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, domain.ErrNotFound
+		}
+		return nil, normalizeIndexErr(err)
+	}
+	defer closer.Close()
+	var upload domain.ActiveMultipartUpload
+	if err := json.Unmarshal(v, &upload); err != nil {
+		return nil, fmt.Errorf("decode active multipart upload: %w", err)
+	}
+	return &upload, retErr
+}
+
+func (i *Index) ListActiveMultipartUploads(bucket string) ([]domain.ActiveMultipartUpload, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+
+	prefix := activeMultipartUploadPrefix()
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := i.db.NewIter(iterOpts)
+	if err != nil {
+		return nil, normalizeIndexErr(err)
+	}
+	defer iter.Close()
+
+	var uploads []domain.ActiveMultipartUpload
+	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefix) {
+			break
+		}
+		var upload domain.ActiveMultipartUpload
+		if err := json.Unmarshal(iter.Value(), &upload); err != nil {
+			continue
+		}
+		if bucket == "" || upload.Bucket == bucket {
+			uploads = append(uploads, upload)
+		}
+	}
+	sort.Slice(uploads, func(i, j int) bool {
+		if uploads[i].Initiated == uploads[j].Initiated {
+			return uploads[i].UploadID < uploads[j].UploadID
+		}
+		return uploads[i].Initiated < uploads[j].Initiated
+	})
+	return uploads, retErr
+}
+
+func (i *Index) ListActiveMultipartParts(uploadID string) ([]domain.ActiveMultipartPart, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	var retErr error
+	defer i.recoverIntoError(&retErr)
+
+	prefix := activeMultipartPartPrefix(uploadID)
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := i.db.NewIter(iterOpts)
+	if err != nil {
+		return nil, normalizeIndexErr(err)
+	}
+	defer iter.Close()
+
+	var parts []domain.ActiveMultipartPart
+	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefix) {
+			break
+		}
+		var part domain.ActiveMultipartPart
+		if err := json.Unmarshal(iter.Value(), &part); err != nil {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
+	return parts, retErr
 }
 
 func (i *Index) LookupByFlatKey(mountName, relPath string) (domain.FileID, error) {
@@ -1369,6 +1503,84 @@ func (b *batch) DelMultipartUploadRecord(uploadID [16]byte) {
 		return
 	}
 	b.setErr(b.b.Delete(multipartUploadKey(uploadID), nil))
+}
+
+func (b *batch) PutActiveMultipartUpload(upload domain.ActiveMultipartUpload) {
+	if b.err != nil {
+		return
+	}
+	if upload.UploadID == "" {
+		b.setErr(domain.ErrInvalidArgument)
+		return
+	}
+	payload, err := json.Marshal(upload)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(activeMultipartUploadKey(upload.UploadID), payload, nil))
+}
+
+func (b *batch) DelActiveMultipartUpload(uploadID string) {
+	if b.err != nil {
+		return
+	}
+	b.setErr(b.b.Delete(activeMultipartUploadKey(uploadID), nil))
+}
+
+func (b *batch) PutActiveMultipartPart(part domain.ActiveMultipartPart) {
+	if b.err != nil {
+		return
+	}
+	if part.UploadID == "" || part.PartNumber < 1 || part.PartNumber > 10000 {
+		b.setErr(domain.ErrInvalidArgument)
+		return
+	}
+	payload, err := json.Marshal(part)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(activeMultipartPartKey(part.UploadID, part.PartNumber), payload, nil))
+}
+
+func (b *batch) DelActiveMultipartPart(uploadID string, partNumber int) {
+	if b.err != nil {
+		return
+	}
+	b.setErr(b.b.Delete(activeMultipartPartKey(uploadID, partNumber), nil))
+}
+
+func (b *batch) DelActiveMultipartParts(uploadID string) {
+	if b.err != nil {
+		return
+	}
+	iterable, ok := b.b.(pebbleBatchIterable)
+	if !ok {
+		b.setErr(fmt.Errorf("batch does not support iteration"))
+		return
+	}
+	prefix := activeMultipartPartPrefix(uploadID)
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := iterable.NewIter(iterOpts)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	defer iter.Close()
+	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefix) {
+			break
+		}
+		key := append([]byte(nil), iter.Key()...)
+		if err := b.b.Delete(key, nil); err != nil {
+			b.setErr(err)
+			return
+		}
+	}
 }
 
 func (b *batch) PutFlatKey(mountName, relPath string, id domain.FileID) {

@@ -220,12 +220,13 @@ func newDaemonServeCmd() *cobra.Command {
 					})
 				}
 				s3Handler, hErr := s3adapter.NewHandler(svc, s3adapter.Options{
-					Region:           cfg.S3.Region,
-					AccessKey:        cfg.S3.AccessKey,
-					SecretKey:        cfg.S3.SecretKey,
-					Keys:             keys,
-					AccessLogEnabled: cfg.Server.AccessLogEnabled,
-					Metrics:          metricsReg,
+					Region:              cfg.S3.Region,
+					AccessKey:           cfg.S3.AccessKey,
+					SecretKey:           cfg.S3.SecretKey,
+					Keys:                keys,
+					AccessLogEnabled:    cfg.Server.AccessLogEnabled,
+					Metrics:             metricsReg,
+					MaxConcurrentWrites: cfg.S3.MaxConcurrentWrites,
 				})
 				if hErr != nil {
 					cancel()

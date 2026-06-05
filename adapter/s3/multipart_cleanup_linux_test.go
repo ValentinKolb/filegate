@@ -105,12 +105,9 @@ func TestDecideRetentionPolicy(t *testing.T) {
 	}
 }
 
-// TestSweepRetiresDoneManifest: a phase=done manifest past
-// DoneRetention is removed AND its durable Pebble record is
-// deleted. Critical: a stale 0x07 record without a manifest is
-// NOT recoverable (recovery looks at manifests first), so we
-// must delete both atomically-ish.
-func TestSweepRetiresDoneManifest(t *testing.T) {
+// TestSweepRetiresDoneActiveUpload: a phase=done active upload past
+// DoneRetention is removed AND its durable Pebble record is deleted.
+func TestSweepRetiresDoneActiveUpload(t *testing.T) {
 	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
@@ -131,11 +128,10 @@ func TestSweepRetiresDoneManifest(t *testing.T) {
 	mountAbs := lookupMountAbs(t, handler, mount)
 	stageDir := stageDirFor(mountAbs, uploadID)
 
-	// Force CompletedAt back so the manifest looks expired.
-	m, _ := readManifest(stageDir)
-	m.CompletedAt = time.Now().Add(-48 * time.Hour).UnixMilli()
-	if err := writeManifest(stageDir, m); err != nil {
-		t.Fatalf("force expired: %v", err)
+	upload := lookupActiveUpload(t, svc, uploadID)
+	upload.CompletedAt = time.Now().Add(-48 * time.Hour).UnixMilli()
+	if err := svc.UpdateActiveMultipartUpload(*upload); err != nil {
+		t.Fatalf("force expired active upload: %v", err)
 	}
 
 	// Sanity: durable record exists pre-sweep.

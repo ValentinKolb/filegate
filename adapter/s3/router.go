@@ -1,11 +1,14 @@
 package s3
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/valentinkolb/filegate/domain"
 	"github.com/valentinkolb/filegate/infra/metrics"
@@ -37,6 +40,10 @@ type Options struct {
 	// rate-limit 503s from other 503s. nil-safe: a nil Registry's
 	// methods are no-ops.
 	Metrics *metrics.Registry
+	// MaxConcurrentWrites bounds concurrent S3 object/part writes.
+	// 0 means use the default. The limiter protects file descriptors
+	// and multipart staging space when clients upload large folders.
+	MaxConcurrentWrites int
 }
 
 // KeyEntry is the in-memory shape of one entry in the multi-tenant
@@ -137,17 +144,17 @@ func NewHandler(svc *domain.Service, opts Options) (http.Handler, error) {
 	}
 
 	r := &router{
-		svc:       svc,
-		auth:      auth,
-		keys:      store,
-		limiter:   newRateLimiter(opts.Keys),
-		accessLog: opts.AccessLogEnabled,
-		metrics:   opts.Metrics,
+		svc:        svc,
+		auth:       auth,
+		keys:       store,
+		limiter:    newRateLimiter(opts.Keys),
+		accessLog:  opts.AccessLogEnabled,
+		metrics:    opts.Metrics,
+		writeSlots: make(chan struct{}, resolveMaxConcurrentWrites(opts.MaxConcurrentWrites)),
 	}
-	// Sweep any multipart manifests left in phase=committing across
-	// crashes. Committing manifests whose durable record exists are
-	// promoted to phase=done so ListMultipartUploads stops surfacing
-	// them; the rest are left for client-driven retry of Complete.
+	// Sweep any active multipart uploads left in phase=committing across
+	// crashes. Rows whose durable record exists are promoted to phase=done;
+	// the rest are left for client-driven retry of Complete.
 	recoverPendingMultipartUploads(svc)
 	return http.HandlerFunc(r.serve), nil
 }
@@ -227,12 +234,89 @@ func buildKeyStore(opts Options, svc *domain.Service) (*keyStore, error) {
 }
 
 type router struct {
-	svc       *domain.Service
-	auth      authConfig
-	keys      *keyStore
-	limiter   *rateLimiter // nil when no key has a configured limit
-	accessLog bool
-	metrics   *metrics.Registry // nil-safe; receives the rate-limit reject counter
+	svc         *domain.Service
+	auth        authConfig
+	keys        *keyStore
+	limiter     *rateLimiter // nil when no key has a configured limit
+	accessLog   bool
+	metrics     *metrics.Registry // nil-safe; receives the rate-limit reject counter
+	writeSlots  chan struct{}
+	uploadLocks uploadLockSet
+	partLocks   uploadLockSet
+}
+
+func resolveMaxConcurrentWrites(v int) int {
+	if v > 0 {
+		return v
+	}
+	n := runtime.NumCPU() * 8
+	if n < 32 {
+		return 32
+	}
+	if n > 512 {
+		return 512
+	}
+	return n
+}
+
+func (r *router) acquireWriteSlot(ctx context.Context) error {
+	if r == nil || r.writeSlots == nil {
+		return nil
+	}
+	select {
+	case r.writeSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *router) releaseWriteSlot() {
+	if r == nil || r.writeSlots == nil {
+		return
+	}
+	select {
+	case <-r.writeSlots:
+	default:
+	}
+}
+
+type uploadLockSet struct {
+	mu    sync.Mutex
+	locks map[string]*uploadLock
+}
+
+type uploadLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (s *uploadLockSet) acquire(uploadID string) func() {
+	if strings.TrimSpace(uploadID) == "" {
+		return func() {}
+	}
+	s.mu.Lock()
+	if s.locks == nil {
+		s.locks = make(map[string]*uploadLock)
+	}
+	lock := s.locks[uploadID]
+	if lock == nil {
+		lock = &uploadLock{}
+		s.locks[uploadID] = lock
+	}
+	lock.refs++
+	s.mu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		s.mu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(s.locks, uploadID)
+		}
+		s.mu.Unlock()
+	}
 }
 
 // keyForRequest returns the verified key's record. The verifier has
@@ -412,11 +496,12 @@ func (r *router) handleBucketOp(w http.ResponseWriter, req *http.Request, verifi
 // handleBucketOp comment); the bucket-existence check follows.
 //
 // Multipart ops are dispatched here too via query-arg sub-resources:
-//   POST   ?uploads          → CreateMultipartUpload
-//   PUT    ?partNumber=N&uploadId=X → UploadPart
-//   POST   ?uploadId=X       → CompleteMultipartUpload
-//   DELETE ?uploadId=X       → AbortMultipartUpload
-//   GET    ?uploadId=X       → ListParts
+//
+//	POST   ?uploads          → CreateMultipartUpload
+//	PUT    ?partNumber=N&uploadId=X → UploadPart
+//	POST   ?uploadId=X       → CompleteMultipartUpload
+//	DELETE ?uploadId=X       → AbortMultipartUpload
+//	GET    ?uploadId=X       → ListParts
 func (r *router) handleObjectOp(w http.ResponseWriter, req *http.Request, verified *sigV4Result, bucket, key string) {
 	if !r.authorizeBucket(w, req, verified, bucket, key) {
 		return

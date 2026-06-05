@@ -9,12 +9,15 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/valentinkolb/filegate/domain"
 )
@@ -60,9 +63,9 @@ func uploadPart(t *testing.T, handler http.Handler, mount, key, uploadID string,
 }
 
 // TestCreateMultipartUploadRoundTrip: CreateMultipartUpload returns
-// uploadId; the on-disk staging dir + manifest are present after.
+// uploadId; the on-disk staging dir and Pebble active-state row are present.
 func TestCreateMultipartUploadRoundTrip(t *testing.T) {
-	_, handler, mount, cleanup := newTestServer(t)
+	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
 	uploadID := initMultipart(t, handler, mount, "obj.bin", map[string]string{
@@ -70,40 +73,37 @@ func TestCreateMultipartUploadRoundTrip(t *testing.T) {
 		"x-amz-meta-author": "alice",
 	})
 
-	// Verify on-disk shape: <mountAbs>/.fg-uploads/s3-<uploadID>/manifest.json
 	mountAbs := lookupMountAbs(t, handler, mount)
 	stageDir := stageDirFor(mountAbs, uploadID)
 	if _, err := os.Stat(stageDir); err != nil {
 		t.Fatalf("stage dir missing: %v", err)
 	}
-	manifest, err := readManifest(stageDir)
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
+	upload := lookupActiveUpload(t, svc, uploadID)
+	if upload.Bucket != mount || upload.Key != "obj.bin" {
+		t.Errorf("active upload bucket/key=%q/%q, want %q/obj.bin", upload.Bucket, upload.Key, mount)
 	}
-	if manifest.Bucket != mount || manifest.Key != "obj.bin" {
-		t.Errorf("manifest bucket/key=%q/%q, want %q/obj.bin", manifest.Bucket, manifest.Key, mount)
+	if upload.StageDir != stageDir {
+		t.Errorf("active upload StageDir=%q, want %q", upload.StageDir, stageDir)
 	}
-	if manifest.ContentType != "application/octet-stream" {
-		t.Errorf("manifest ContentType=%q", manifest.ContentType)
+	if upload.ContentType != "application/octet-stream" {
+		t.Errorf("active upload ContentType=%q", upload.ContentType)
 	}
-	if got := manifest.UserMetadata["author"]; got != "alice" {
+	if got := upload.UserMetadata["author"]; got != "alice" {
 		t.Errorf("UserMetadata[author]=%q, want alice", got)
 	}
-	if manifest.Phase != phaseInProgress {
-		t.Errorf("Phase=%q, want in_progress", manifest.Phase)
+	if upload.Phase != domain.MultipartUploadInProgress {
+		t.Errorf("Phase=%q, want in_progress", upload.Phase)
 	}
 }
 
 // TestUploadPartStoresMD5: each UploadPart writes its part body
-// + records the part-MD5 in the manifest. Duplicate UploadPart for
+// + records the part-MD5 in active Pebble state. Duplicate UploadPart for
 // same partNumber overwrites.
 func TestUploadPartStoresMD5(t *testing.T) {
-	_, handler, mount, cleanup := newTestServer(t)
+	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
 	uploadID := initMultipart(t, handler, mount, "k.bin", nil)
-	mountAbs := lookupMountAbs(t, handler, mount)
-	stageDir := stageDirFor(mountAbs, uploadID)
 
 	// Part 1
 	p1 := []byte("part-one-bytes")
@@ -117,16 +117,15 @@ func TestUploadPartStoresMD5(t *testing.T) {
 	p2 := []byte("part-two-bytes-different")
 	uploadPart(t, handler, mount, "k.bin", uploadID, 2, p2)
 
-	// Manifest should reflect both
-	m, _ := readManifest(stageDir)
-	if len(m.Parts) != 2 {
-		t.Fatalf("manifest parts=%d, want 2", len(m.Parts))
+	parts := lookupActiveParts(t, svc, uploadID)
+	if len(parts) != 2 {
+		t.Fatalf("active parts=%d, want 2", len(parts))
 	}
-	if got := m.Parts[1].ETag; got != hex.EncodeToString(p1MD5[:]) {
-		t.Errorf("manifest Parts[1].ETag=%q", got)
+	if got := parts[1].ETag; got != hex.EncodeToString(p1MD5[:]) {
+		t.Errorf("active Parts[1].ETag=%q", got)
 	}
-	if got := m.Parts[1].Size; got != int64(len(p1)) {
-		t.Errorf("manifest Parts[1].Size=%d, want %d", got, len(p1))
+	if got := parts[1].Size; got != int64(len(p1)) {
+		t.Errorf("active Parts[1].Size=%d, want %d", got, len(p1))
 	}
 
 	// Duplicate UploadPart for partNumber=1 with different bytes →
@@ -137,19 +136,220 @@ func TestUploadPartStoresMD5(t *testing.T) {
 	if gotNewETag != hex.EncodeToString(p1NewMD5[:]) {
 		t.Errorf("duplicate part1 ETag=%q", gotNewETag)
 	}
-	m, _ = readManifest(stageDir)
-	if got := m.Parts[1].ETag; got != hex.EncodeToString(p1NewMD5[:]) {
-		t.Errorf("manifest after duplicate Parts[1].ETag=%q, want updated", got)
+	parts = lookupActiveParts(t, svc, uploadID)
+	if got := parts[1].ETag; got != hex.EncodeToString(p1NewMD5[:]) {
+		t.Errorf("active state after duplicate Parts[1].ETag=%q, want updated", got)
 	}
 }
 
+func TestUploadPartWriteSlotSerializesConcurrentParts(t *testing.T) {
+	svc, _, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	handler, err := NewHandler(svc, Options{
+		Region:              testRegion,
+		AccessKey:           testAccessKey,
+		SecretKey:           testSecretKey,
+		MaxConcurrentWrites: 1,
+	})
+	if err != nil {
+		t.Fatalf("new limited handler: %v", err)
+	}
+
+	uploadA := initMultipart(t, handler, mount, "a.bin", nil)
+	uploadB := initMultipart(t, handler, mount, "b.bin", nil)
+
+	bodyA := newBlockingPartBody([]byte("first part"))
+	reqA := unsignedPayloadRequest(http.MethodPut, fmt.Sprintf("/%s/a.bin?partNumber=1&uploadId=%s", mount, uploadA), bodyA)
+	recA := httptest.NewRecorder()
+	doneA := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recA, reqA)
+		close(doneA)
+	}()
+	select {
+	case <-bodyA.waiting:
+	case <-doneA:
+		t.Fatalf("first UploadPart completed before blocking body reached EOF; status=%d body=%s", recA.Code, recA.Body.String())
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first UploadPart did not reach blocking body read")
+	}
+
+	reqB := unsignedPayloadRequest(http.MethodPut, fmt.Sprintf("/%s/b.bin?partNumber=1&uploadId=%s", mount, uploadB), bytes.NewReader([]byte("second part")))
+	recB := httptest.NewRecorder()
+	doneB := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recB, reqB)
+		close(doneB)
+	}()
+
+	select {
+	case <-doneB:
+		t.Fatalf("second UploadPart completed while first write slot was still held; status=%d body=%s", recB.Code, recB.Body.String())
+	case <-time.After(100 * time.Millisecond):
+		// Expected: second request is waiting for the single write slot.
+	}
+
+	bodyA.release()
+	select {
+	case <-doneA:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first UploadPart did not complete after release")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("second UploadPart did not complete after first slot released")
+	}
+	if recA.Code != http.StatusOK {
+		t.Fatalf("first UploadPart status=%d body=%s", recA.Code, recA.Body.String())
+	}
+	if recB.Code != http.StatusOK {
+		t.Fatalf("second UploadPart status=%d body=%s", recB.Code, recB.Body.String())
+	}
+}
+
+func TestUploadPartAllowsParallelSameUploadParts(t *testing.T) {
+	svc, _, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	handler, err := NewHandler(svc, Options{
+		Region:              testRegion,
+		AccessKey:           testAccessKey,
+		SecretKey:           testSecretKey,
+		MaxConcurrentWrites: 64,
+	})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+
+	uploadID := initMultipart(t, handler, mount, "same-upload.bin", nil)
+	bodyA := newBlockingPartBody([]byte("first part"))
+	reqA := unsignedPayloadRequest(http.MethodPut, fmt.Sprintf("/%s/same-upload.bin?partNumber=1&uploadId=%s", mount, uploadID), bodyA)
+	recA := httptest.NewRecorder()
+	doneA := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recA, reqA)
+		close(doneA)
+	}()
+	select {
+	case <-bodyA.waiting:
+	case <-doneA:
+		t.Fatalf("first UploadPart completed before blocking body reached EOF; status=%d body=%s", recA.Code, recA.Body.String())
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first UploadPart did not reach blocking body read")
+	}
+
+	bodyB := newBlockingPartBody([]byte("second part"))
+	reqB := unsignedPayloadRequest(http.MethodPut, fmt.Sprintf("/%s/same-upload.bin?partNumber=2&uploadId=%s", mount, uploadID), bodyB)
+	recB := httptest.NewRecorder()
+	doneB := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recB, reqB)
+		close(doneB)
+	}()
+
+	select {
+	case <-bodyB.waiting:
+		// Expected: different part numbers of the same upload can stream in parallel.
+	case <-doneB:
+		t.Fatalf("second UploadPart completed while first same-upload part was still active; status=%d body=%s", recB.Code, recB.Body.String())
+	case <-time.After(2 * time.Second):
+		t.Fatalf("second UploadPart did not start while first same-upload part was still active")
+	}
+
+	bodyA.release()
+	bodyB.release()
+	select {
+	case <-doneA:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("first UploadPart did not complete after release")
+	}
+	if recA.Code != http.StatusOK {
+		t.Fatalf("first UploadPart status=%d body=%s", recA.Code, recA.Body.String())
+	}
+
+	select {
+	case <-doneB:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("second UploadPart did not complete after release")
+	}
+	if recB.Code != http.StatusOK {
+		t.Fatalf("second UploadPart status=%d body=%s", recB.Code, recB.Body.String())
+	}
+
+	parts := lookupActiveParts(t, svc, uploadID)
+	if len(parts) != 2 {
+		t.Fatalf("active parts=%d, want 2", len(parts))
+	}
+	if _, ok := parts[1]; !ok {
+		t.Fatalf("active state missing part 1")
+	}
+	if _, ok := parts[2]; !ok {
+		t.Fatalf("active state missing part 2")
+	}
+}
+
+func TestNoSpaceErrorDetection(t *testing.T) {
+	if !isNoSpaceError(syscall.ENOSPC) {
+		t.Fatalf("syscall.ENOSPC was not detected")
+	}
+}
+
+func unsignedPayloadRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "example.com"
+	signRequest(req, testAccessKey, testSecretKey, testRegion, sigUnsignedBody, time.Now())
+	return req
+}
+
+type blockingPartBody struct {
+	data    []byte
+	sent    bool
+	blocked bool
+	waiting chan struct{}
+	unblock chan struct{}
+}
+
+func newBlockingPartBody(data []byte) *blockingPartBody {
+	return &blockingPartBody{
+		data:    data,
+		waiting: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+}
+
+func (b *blockingPartBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		return copy(p, b.data), nil
+	}
+	if !b.blocked {
+		b.blocked = true
+		close(b.waiting)
+		<-b.unblock
+	}
+	return 0, io.EOF
+}
+
+func (b *blockingPartBody) release() {
+	close(b.unblock)
+}
+
 // TestUploadPartContentMD5: client-supplied Content-MD5 must match
-// the body; mismatch returns BadDigest and doesn't leak a part file.
+// the body; mismatch returns BadDigest and preserves any previous
+// valid part for the same partNumber.
 func TestUploadPartContentMD5(t *testing.T) {
-	_, handler, mount, cleanup := newTestServer(t)
+	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
 	uploadID := initMultipart(t, handler, mount, "k.bin", nil)
+	mountAbs := lookupMountAbs(t, handler, mount)
+	partPath := partPathFor(stageDirFor(mountAbs, uploadID), 1)
+
+	valid := []byte("valid existing part")
+	validETag := uploadPart(t, handler, mount, "k.bin", uploadID, 1, valid)
+
 	body := []byte("real body")
 	wrongMD5 := md5.Sum([]byte("DIFFERENT"))
 	wrongB64 := base64.StdEncoding.EncodeToString(wrongMD5[:])
@@ -165,11 +365,19 @@ func TestUploadPartContentMD5(t *testing.T) {
 		t.Fatalf("wrong Content-MD5 UploadPart status=%d, want 400 (BadDigest)", rec.Code)
 	}
 
-	// Manifest should still have 0 parts.
-	mountAbs := lookupMountAbs(t, handler, mount)
-	m, _ := readManifest(stageDirFor(mountAbs, uploadID))
-	if len(m.Parts) != 0 {
-		t.Errorf("after bad-digest UploadPart manifest has %d parts", len(m.Parts))
+	parts := lookupActiveParts(t, svc, uploadID)
+	if len(parts) != 1 {
+		t.Fatalf("after bad-digest duplicate active state has %d parts, want 1", len(parts))
+	}
+	if got := parts[1].ETag; got != validETag {
+		t.Errorf("after bad-digest duplicate part ETag=%q, want original %q", got, validETag)
+	}
+	onDisk, err := os.ReadFile(partPath)
+	if err != nil {
+		t.Fatalf("read part after bad digest: %v", err)
+	}
+	if !bytes.Equal(onDisk, valid) {
+		t.Errorf("bad-digest duplicate changed existing part bytes")
 	}
 }
 
@@ -469,7 +677,7 @@ func TestCompleteMultipartUploadInvalidPart(t *testing.T) {
 	uploadPart(t, handler, mount, "k.bin", uploadID, 1, makePartBody(1, 5*1024*1024))
 
 	rec := completeMultipart(t, handler, mount, "k.bin", uploadID, []completeRequestPart{
-		{PartNumber: 1, ETag: "deadbeefdeadbeefdeadbeefdeadbeef"},  // wrong ETag
+		{PartNumber: 1, ETag: "deadbeefdeadbeefdeadbeefdeadbeef"}, // wrong ETag
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("wrong-etag Complete status=%d, want 400", rec.Code)
@@ -569,12 +777,12 @@ func TestCompleteMultipartUploadUnknownUploadID(t *testing.T) {
 }
 
 // TestCompleteMultipartUploadCleansStagingOnSuccess: after a
-// successful Complete, parts/ and complete.tmp are gone — only
-// the manifest survives for the idempotent-retry short-circuit.
+// successful Complete, parts/ and complete.tmp are gone while active
+// state moves to done and durable-record replay handles idempotent retry.
 // Pre-fix the parts directory leaked permanently, doubling the
 // effective storage of every multipart upload.
 func TestCompleteMultipartUploadCleansStagingOnSuccess(t *testing.T) {
-	_, handler, mount, cleanup := newTestServer(t)
+	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
 	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
@@ -603,17 +811,15 @@ func TestCompleteMultipartUploadCleansStagingOnSuccess(t *testing.T) {
 	if _, err := os.Stat(stageDir + "/" + multipartCompleteTmp); !os.IsNotExist(err) {
 		t.Errorf("complete.tmp should be removed after Complete, got err=%v", err)
 	}
-	// Manifest must still exist (idempotent retry needs it).
-	got, err := readManifest(stageDir)
-	if err != nil {
-		t.Fatalf("manifest should remain after Complete: %v", err)
+	got := lookupActiveUpload(t, svc, uploadID)
+	if got.Phase != domain.MultipartUploadDone {
+		t.Errorf("active upload Phase=%q, want done", got.Phase)
 	}
-	if got.Phase != phaseDone {
-		t.Errorf("manifest Phase=%q, want done", got.Phase)
+	if got.CompositeETag == "" {
+		t.Errorf("active upload CompositeETag should be set")
 	}
 
-	// Idempotent retry still works (the phaseDone short-circuit reads
-	// the surviving manifest, not the deleted parts).
+	// Idempotent retry still works from the durable record, not parts or manifest state.
 	rec2 := completeMultipart(t, handler, mount, "obj.bin", uploadID, []completeRequestPart{
 		{PartNumber: 1, ETag: e1},
 		{PartNumber: 2, ETag: e2},
@@ -623,25 +829,22 @@ func TestCompleteMultipartUploadCleansStagingOnSuccess(t *testing.T) {
 	}
 }
 
-// TestUploadPartRejectedDuringCommit: once Complete starts (manifest
-// flipped to phase=committing), concurrent UploadPart for the same
+// TestUploadPartRejectedDuringCommit: once Complete starts (active state
+// flips to phase=committing), concurrent UploadPart for the same
 // uploadId must be rejected. Pre-fix UploadPart could overwrite a
 // part-file between Complete's validate and concat steps, breaking
 // the composite-ETag invariant.
 func TestUploadPartRejectedDuringCommit(t *testing.T) {
-	_, handler, mount, cleanup := newTestServer(t)
+	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
 	uploadID := initMultipart(t, handler, mount, "obj.bin", nil)
 	uploadPart(t, handler, mount, "obj.bin", uploadID, 1, makePartBody(1, 5*1024*1024))
 
-	// Force the manifest into committing — exactly the state Complete
-	// installs before validating.
-	mountAbs := lookupMountAbs(t, handler, mount)
-	m, _ := readManifest(stageDirFor(mountAbs, uploadID))
-	m.Phase = phaseCommitting
-	if err := writeManifest(stageDirFor(mountAbs, uploadID), m); err != nil {
-		t.Fatalf("force committing manifest: %v", err)
+	upload := lookupActiveUpload(t, svc, uploadID)
+	upload.Phase = domain.MultipartUploadCommitting
+	if err := svc.UpdateActiveMultipartUpload(*upload); err != nil {
+		t.Fatalf("force committing active upload: %v", err)
 	}
 
 	body := []byte("racey")
@@ -906,7 +1109,7 @@ func TestCompleteOverExistingFullAssertion(t *testing.T) {
 // 2 KiB JSON-encoded budget are rejected at CreateMultipartUpload
 // time. Without this, a client could smuggle arbitrarily large
 // metadata blobs through the multipart path — inconsistent with
-// PutObject and a resource-cost foothold on the manifest.
+// PutObject and a resource-cost foothold on active multipart state.
 func TestCreateMultipartUploadEnforcesUserMetadataBudget(t *testing.T) {
 	_, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
@@ -1026,24 +1229,22 @@ func TestRecoveryViaNewHandlerProductionPath(t *testing.T) {
 		t.Fatalf("seed Complete status=%d", rec.Code)
 	}
 
-	// Force the manifest back to phase=committing — simulating
+	// Force the active state back to phase=committing — simulating
 	// the crash window where the durable record was committed but
-	// the manifest write didn't land. Also clear the parts/ dir
+	// the done-state write didn't land. Also clear the parts/ dir
 	// to simulate the cleanup having happened.
-	mountAbs := lookupMountAbs(t, handler, mount)
-	stageDir := stageDirFor(mountAbs, uploadID)
-	m, _ := readManifest(stageDir)
-	m.Phase = phaseCommitting
-	m.WholeBodyMD5 = ""
-	m.CompletedFileID = ""
-	m.CompletedAt = 0
-	if err := writeManifest(stageDir, m); err != nil {
-		t.Fatalf("force committing: %v", err)
+	upload := lookupActiveUpload(t, svc, uploadID)
+	upload.Phase = domain.MultipartUploadCommitting
+	upload.WholeBodyMD5 = ""
+	upload.CompletedFileID = ""
+	upload.CompletedAt = 0
+	if err := svc.UpdateActiveMultipartUpload(*upload); err != nil {
+		t.Fatalf("force committing active upload: %v", err)
 	}
 
 	// Construct a SECOND handler via NewHandler — this is the
 	// production restart code path. It must run the recovery
-	// sweep and reconcile the committing manifest to done.
+	// sweep and reconcile the committing active upload to done.
 	handler2, err := NewHandler(svc, Options{
 		Region:    testRegion,
 		AccessKey: testAccessKey,
@@ -1070,51 +1271,41 @@ func TestRecoveryViaNewHandlerProductionPath(t *testing.T) {
 		}
 	}
 
-	// Manifest on disk must now be phase=done.
-	m2, err := readManifest(stageDir)
-	if err != nil {
-		t.Fatalf("readManifest after recovery: %v", err)
-	}
-	if m2.Phase != phaseDone {
-		t.Errorf("manifest Phase=%q after NewHandler recovery, want done", m2.Phase)
+	recovered := lookupActiveUpload(t, svc, uploadID)
+	if recovered.Phase != domain.MultipartUploadDone {
+		t.Errorf("active upload Phase=%q after NewHandler recovery, want done", recovered.Phase)
 	}
 }
 
-// TestRecoverCommittingManifestNoRecord: a manifest in phase=committing
+// TestRecoverCommittingActiveUploadNoRecord: an active upload in phase=committing
 // with no durable record is left untouched (the client will retry
 // Complete to redrive the install).
-func TestRecoverCommittingManifestNoRecord(t *testing.T) {
+func TestRecoverCommittingActiveUploadNoRecord(t *testing.T) {
 	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
 	uploadID := initMultipart(t, handler, mount, "stuck.bin", nil)
 	uploadPart(t, handler, mount, "stuck.bin", uploadID, 1, makePartBody(1, 5*1024*1024))
 
-	mountAbs := lookupMountAbs(t, handler, mount)
-	stageDir := stageDirFor(mountAbs, uploadID)
-	m, _ := readManifest(stageDir)
-	m.Phase = phaseCommitting
-	m.CompositeETag = "fake-etag-1"
-	if err := writeManifest(stageDir, m); err != nil {
-		t.Fatalf("force committing manifest: %v", err)
+	upload := lookupActiveUpload(t, svc, uploadID)
+	upload.Phase = domain.MultipartUploadCommitting
+	upload.CompositeETag = "fake-etag-1"
+	if err := svc.UpdateActiveMultipartUpload(*upload); err != nil {
+		t.Fatalf("force committing active upload: %v", err)
 	}
 
 	recoverPendingMultipartUploads(svc)
 
-	// Manifest should still be in committing — no durable record exists.
-	got, err := readManifest(stageDir)
-	if err != nil {
-		t.Fatalf("readManifest: %v", err)
-	}
-	if got.Phase != phaseCommitting {
+	got := lookupActiveUpload(t, svc, uploadID)
+	if got.Phase != domain.MultipartUploadCommitting {
 		t.Errorf("Phase=%q after recovery, want committing (no record means client retry redrives)", got.Phase)
 	}
 }
 
-// TestRecoverCommittingManifestWithRecord: a manifest in phase=committing
+// TestRecoverCommittingActiveUploadWithRecord: an active upload in phase=committing
 // whose durable record DOES exist is promoted to phase=done so listing
 // stops showing it as in-progress.
-func TestRecoverCommittingManifestWithRecord(t *testing.T) {
+func TestRecoverCommittingActiveUploadWithRecord(t *testing.T) {
 	svc, handler, mount, cleanup := newTestServer(t)
 	defer cleanup()
 
@@ -1133,24 +1324,19 @@ func TestRecoverCommittingManifestWithRecord(t *testing.T) {
 	}
 
 	// Simulate a crash that only updated phase to committing (not done).
-	mountAbs := lookupMountAbs(t, handler, mount)
-	stageDir := stageDirFor(mountAbs, uploadID)
-	m, _ := readManifest(stageDir)
-	m.Phase = phaseCommitting
-	m.WholeBodyMD5 = ""
-	m.CompletedFileID = ""
-	m.CompletedAt = 0
-	if err := writeManifest(stageDir, m); err != nil {
-		t.Fatalf("force committing manifest: %v", err)
+	upload := lookupActiveUpload(t, svc, uploadID)
+	upload.Phase = domain.MultipartUploadCommitting
+	upload.WholeBodyMD5 = ""
+	upload.CompletedFileID = ""
+	upload.CompletedAt = 0
+	if err := svc.UpdateActiveMultipartUpload(*upload); err != nil {
+		t.Fatalf("force committing active upload: %v", err)
 	}
 
 	recoverPendingMultipartUploads(svc)
 
-	got, err := readManifest(stageDir)
-	if err != nil {
-		t.Fatalf("readManifest: %v", err)
-	}
-	if got.Phase != phaseDone {
+	got := lookupActiveUpload(t, svc, uploadID)
+	if got.Phase != domain.MultipartUploadDone {
 		t.Errorf("Phase=%q after recovery, want done", got.Phase)
 	}
 	if got.CompletedFileID == "" {
@@ -1228,6 +1414,28 @@ func lookupMountAbs(t *testing.T, _ http.Handler, mount string) string {
 	}
 	t.Fatalf("mount %q not found", mount)
 	return ""
+}
+
+func lookupActiveUpload(t *testing.T, svc *domain.Service, uploadID string) *domain.ActiveMultipartUpload {
+	t.Helper()
+	upload, err := svc.LookupActiveMultipartUpload(uploadID)
+	if err != nil {
+		t.Fatalf("LookupActiveMultipartUpload(%s): %v", uploadID, err)
+	}
+	return upload
+}
+
+func lookupActiveParts(t *testing.T, svc *domain.Service, uploadID string) map[int]domain.ActiveMultipartPart {
+	t.Helper()
+	parts, err := svc.ListActiveMultipartParts(uploadID)
+	if err != nil {
+		t.Fatalf("ListActiveMultipartParts(%s): %v", uploadID, err)
+	}
+	out := make(map[int]domain.ActiveMultipartPart, len(parts))
+	for _, part := range parts {
+		out[part.PartNumber] = part
+	}
+	return out
 }
 
 // testSvcGlobal: set by newTestServer so multipart tests can look
