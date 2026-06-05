@@ -214,9 +214,12 @@ Before upgrade:
 
 Upgrade:
 
-- install new package or container image
-- restart service
+- stop `filegate` before installing a `.deb`/`.rpm` upgrade
+- install the new package or container image
+- start service
 - verify `/health`, `/v1/stats`, and key read/write flows
+
+Package upgrades fail before replacing files when `filegate.service` is still active. The package script prints the stop instruction and leaves the existing install in place.
 
 Rollback:
 
