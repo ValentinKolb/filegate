@@ -98,6 +98,12 @@ Special host handling:
 ```bash
 --server-listen
 --server-public-url
+--server-cors-allowed-origins
+--server-cors-allowed-methods
+--server-cors-allowed-headers
+--server-cors-exposed-headers
+--server-cors-max-age
+--server-cors-allow-credentials
 --server-write-timeout
 --server-access-log-enabled
 --server-shutdown-timeout

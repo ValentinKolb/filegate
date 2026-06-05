@@ -236,8 +236,16 @@ func appendMapNode(node *yaml.Node, key string, value *yaml.Node) {
 func configDisplayMap(cfg domain.Config, showSecrets bool) map[string]any {
 	return map[string]any{
 		"server": map[string]any{
-			"listen":             cfg.Server.Listen,
-			"public_url":         cfg.Server.PublicURL,
+			"listen":     cfg.Server.Listen,
+			"public_url": cfg.Server.PublicURL,
+			"cors": map[string]any{
+				"allowed_origins":   cfg.Server.CORS.AllowedOrigins,
+				"allowed_methods":   cfg.Server.CORS.AllowedMethods,
+				"allowed_headers":   cfg.Server.CORS.AllowedHeaders,
+				"exposed_headers":   cfg.Server.CORS.ExposedHeaders,
+				"max_age":           cfg.Server.CORS.MaxAge.String(),
+				"allow_credentials": cfg.Server.CORS.AllowCredentials,
+			},
 			"write_timeout":      cfg.Server.WriteTimeout.String(),
 			"access_log_enabled": cfg.Server.AccessLogEnabled,
 			"shutdown_timeout":   cfg.Server.ShutdownTimeout.String(),

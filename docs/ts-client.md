@@ -163,6 +163,10 @@ The app server keeps the Filegate bearer token, creates a short-lived upload
 URL, and returns it to the browser. Configure `server.public_url` on Filegate
 when the public URL differs from the internal listener URL.
 
+For cross-origin browser uploads, configure CORS at your reverse proxy. If
+Filegate must handle it directly, set `server.cors.allowed_origins`; the
+default is disabled.
+
 Server-side minting:
 
 ```ts

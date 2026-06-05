@@ -17,6 +17,8 @@ func TestConfigSetWritesYAMLBackupAndLoads(t *testing.T) {
 		"config", "--config", cfgPath, "set",
 		"--server-listen", ":9091",
 		"--server-public-url", "https://files.example.test",
+		"--server-cors-allowed-origins", "https://app.example.test",
+		"--server-cors-exposed-headers", "X-Node-Id",
 		"--s3-enabled",
 		"--s3-access-key", "FGLEGACYACCESS",
 		"--s3-secret-key", "legacy-secret",
@@ -38,6 +40,12 @@ func TestConfigSetWritesYAMLBackupAndLoads(t *testing.T) {
 	}
 	if cfg.Server.PublicURL != "https://files.example.test" {
 		t.Fatalf("server.public_url=%q, want https://files.example.test", cfg.Server.PublicURL)
+	}
+	if len(cfg.Server.CORS.AllowedOrigins) != 1 || cfg.Server.CORS.AllowedOrigins[0] != "https://app.example.test" {
+		t.Fatalf("server.cors.allowed_origins=%v", cfg.Server.CORS.AllowedOrigins)
+	}
+	if len(cfg.Server.CORS.ExposedHeaders) != 1 || cfg.Server.CORS.ExposedHeaders[0] != "X-Node-Id" {
+		t.Fatalf("server.cors.exposed_headers=%v", cfg.Server.CORS.ExposedHeaders)
 	}
 	if !cfg.S3.Enabled || cfg.S3.AccessKey != "FGLEGACYACCESS" || cfg.S3.SecretKey != "legacy-secret" {
 		t.Fatalf("s3 legacy fields not written: %+v", cfg.S3)

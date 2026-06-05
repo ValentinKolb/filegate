@@ -18,6 +18,12 @@ func loadConfig(configFile string) (domain.Config, error) {
 
 	v.SetDefault("server.listen", ":8080")
 	v.SetDefault("server.public_url", "")
+	v.SetDefault("server.cors.allowed_origins", []string{})
+	v.SetDefault("server.cors.allowed_methods", []string{})
+	v.SetDefault("server.cors.allowed_headers", []string{})
+	v.SetDefault("server.cors.exposed_headers", []string{})
+	v.SetDefault("server.cors.max_age", "0s")
+	v.SetDefault("server.cors.allow_credentials", false)
 	v.SetDefault("server.write_timeout", "5m")
 	v.SetDefault("server.access_log_enabled", true)
 	v.SetDefault("server.shutdown_timeout", "60s")
@@ -143,10 +149,29 @@ func loadConfig(configFile string) (domain.Config, error) {
 	if strings.TrimSpace(cfg.Auth.BearerToken) == "" && !cfg.S3.Enabled {
 		return cfg, fmt.Errorf("auth.bearer_token is required (unless s3.enabled=true for an S3-only deployment)")
 	}
+	if err := validatePublicURL(cfg.Server.PublicURL); err != nil {
+		return cfg, err
+	}
 
 	cfg.Detection.PollInterval = v.GetDuration("detection.poll_interval")
 	cfg.Server.WriteTimeout = v.GetDuration("server.write_timeout")
 	cfg.Server.ShutdownTimeout = v.GetDuration("server.shutdown_timeout")
+	cfg.Server.CORS.MaxAge = v.GetDuration("server.cors.max_age")
+	if len(cfg.Server.CORS.AllowedOrigins) == 0 {
+		cfg.Server.CORS.AllowedOrigins = splitList(v.GetString("server.cors.allowed_origins"))
+	}
+	if len(cfg.Server.CORS.AllowedMethods) == 0 {
+		cfg.Server.CORS.AllowedMethods = splitList(v.GetString("server.cors.allowed_methods"))
+	}
+	if len(cfg.Server.CORS.AllowedHeaders) == 0 {
+		cfg.Server.CORS.AllowedHeaders = splitList(v.GetString("server.cors.allowed_headers"))
+	}
+	if len(cfg.Server.CORS.ExposedHeaders) == 0 {
+		cfg.Server.CORS.ExposedHeaders = splitList(v.GetString("server.cors.exposed_headers"))
+	}
+	if err := validateCORSConfig(cfg.Server.CORS); err != nil {
+		return cfg, err
+	}
 	cfg.Detection.Backend = strings.ToLower(strings.TrimSpace(cfg.Detection.Backend))
 	if cfg.Detection.Backend == "" {
 		cfg.Detection.Backend = "auto"

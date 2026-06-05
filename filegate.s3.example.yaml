@@ -10,6 +10,16 @@ server:
   # Public REST base URL used when minting direct browser upload URLs.
   # Example: "https://files.example.com". Leave empty when unused.
   public_url: ""
+  cors:
+    # Empty allowed_origins disables CORS. Prefer configuring CORS at
+    # the reverse proxy; use this only when Filegate must answer
+    # browser cross-origin requests directly.
+    allowed_origins: []
+    allowed_methods: []
+    allowed_headers: []
+    exposed_headers: []
+    max_age: "0s"
+    allow_credentials: false
   write_timeout: "5m"
   shutdown_timeout: "60s"
   access_log_enabled: true

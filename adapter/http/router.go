@@ -35,6 +35,7 @@ type RouterOptions struct {
 	BearerToken              string
 	AccessLogEnabled         bool
 	PublicURL                string
+	CORS                     domain.CORSConfig
 	IndexPath                string
 	JobWorkers               int
 	JobQueueSize             int
@@ -613,6 +614,9 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		writeJSON(w, http.StatusOK, apiv1.IndexResolveManyResponse{Items: items, Total: len(items)})
 	})
 	chain := []middlewareFunc{recoverMiddleware, requestIDMiddleware, realIPMiddleware, secureHeadersMiddleware}
+	if cors := corsMiddleware(opts.CORS); cors != nil {
+		chain = append(chain, cors)
+	}
 	if opts.AccessLogEnabled {
 		chain = append(chain, accessLogMiddleware)
 	}
@@ -1309,6 +1313,103 @@ func secureHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func corsMiddleware(cfg domain.CORSConfig) middlewareFunc {
+	allowedOrigins := cleanList(cfg.AllowedOrigins)
+	if len(allowedOrigins) == 0 {
+		return nil
+	}
+	originSet := make(map[string]struct{}, len(allowedOrigins))
+	allowWildcard := false
+	for _, origin := range allowedOrigins {
+		if origin == "*" {
+			allowWildcard = true
+			continue
+		}
+		originSet[origin] = struct{}{}
+	}
+	allowedMethods := cleanList(cfg.AllowedMethods)
+	if len(allowedMethods) == 0 {
+		allowedMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+	}
+	allowedHeaders := cleanList(cfg.AllowedHeaders)
+	if len(allowedHeaders) == 0 {
+		allowedHeaders = []string{"Authorization", "Content-Type", "X-Chunk-Checksum"}
+	}
+	exposedHeaders := cleanList(cfg.ExposedHeaders)
+	maxAge := ""
+	if cfg.MaxAge > 0 {
+		maxAge = strconv.FormatInt(int64(cfg.MaxAge/time.Second), 10)
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := strings.TrimSpace(r.Header.Get("Origin"))
+			if origin == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			allowed := false
+			responseOrigin := origin
+			if allowWildcard {
+				allowed = true
+				if !cfg.AllowCredentials {
+					responseOrigin = "*"
+				}
+			} else if _, ok := originSet[origin]; ok {
+				allowed = true
+			}
+			if !allowed {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", responseOrigin)
+			h.Set("Vary", appendVary(h.Get("Vary"), "Origin"))
+			if cfg.AllowCredentials {
+				h.Set("Access-Control-Allow-Credentials", "true")
+			}
+			if len(exposedHeaders) > 0 {
+				h.Set("Access-Control-Expose-Headers", strings.Join(exposedHeaders, ", "))
+			}
+
+			if r.Method == http.MethodOptions {
+				h.Set("Access-Control-Allow-Methods", strings.Join(allowedMethods, ", "))
+				h.Set("Access-Control-Allow-Headers", strings.Join(allowedHeaders, ", "))
+				if maxAge != "" {
+					h.Set("Access-Control-Max-Age", maxAge)
+				}
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func cleanList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func appendVary(existing, value string) string {
+	if strings.TrimSpace(existing) == "" {
+		return value
+	}
+	for _, part := range strings.Split(existing, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), value) {
+			return existing
+		}
+	}
+	return existing + ", " + value
 }
 
 func parseID(w http.ResponseWriter, v string) (domain.FileID, bool) {

@@ -130,6 +130,7 @@ type S3KeyConfig struct {
 type ServerConfig struct {
 	Listen           string        `mapstructure:"listen"`
 	PublicURL        string        `mapstructure:"public_url"`
+	CORS             CORSConfig    `mapstructure:"cors"`
 	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
 	AccessLogEnabled bool          `mapstructure:"access_log_enabled"`
 	// ShutdownTimeout bounds how long the daemon waits for
@@ -142,6 +143,17 @@ type ServerConfig struct {
 	// closed via http.Server.Close — clients see RST, the
 	// crash-recovery sweep handles any half-committed state.
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+}
+
+// CORSConfig controls optional browser cross-origin access for the REST
+// listener. Empty AllowedOrigins disables CORS entirely.
+type CORSConfig struct {
+	AllowedOrigins   []string      `mapstructure:"allowed_origins"`
+	AllowedMethods   []string      `mapstructure:"allowed_methods"`
+	AllowedHeaders   []string      `mapstructure:"allowed_headers"`
+	ExposedHeaders   []string      `mapstructure:"exposed_headers"`
+	MaxAge           time.Duration `mapstructure:"max_age"`
+	AllowCredentials bool          `mapstructure:"allow_credentials"`
 }
 
 // AuthConfig contains authentication settings.

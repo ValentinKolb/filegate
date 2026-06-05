@@ -153,6 +153,7 @@ func newDaemonServeCmd() *cobra.Command {
 				BearerToken:              cfg.Auth.BearerToken,
 				AccessLogEnabled:         cfg.Server.AccessLogEnabled,
 				PublicURL:                cfg.Server.PublicURL,
+				CORS:                     cfg.Server.CORS,
 				IndexPath:                cfg.Storage.IndexPath,
 				JobWorkers:               cfg.Jobs.Workers,
 				JobQueueSize:             cfg.Jobs.QueueSize,

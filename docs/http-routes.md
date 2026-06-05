@@ -10,6 +10,29 @@ Base requirements:
   carries `"existingId"` and `"existingPath"` so clients can render a
   meaningful prompt without an extra resolve call.
 
+## CORS
+
+CORS is disabled by default: empty `server.cors.allowed_origins` produces no
+`Access-Control-*` headers and no preflight handling. Prefer configuring CORS
+at Traefik/Caddy/nginx. If Filegate must answer browser cross-origin requests
+directly, configure explicit origins:
+
+```yaml
+server:
+  cors:
+    allowed_origins:
+      - "https://app.example.com"
+    exposed_headers:
+      - "X-Node-Id"
+      - "X-Created-Id"
+    max_age: "10m"
+```
+
+`allowed_methods` and `allowed_headers` are optional. When omitted, Filegate
+uses REST-safe defaults for common methods plus `Authorization`,
+`Content-Type`, and `X-Chunk-Checksum`. `allow_credentials: true` is rejected
+with wildcard origin `*`.
+
 ## Conflict Handling
 
 Endpoints that may hit a name collision accept an `onConflict` argument

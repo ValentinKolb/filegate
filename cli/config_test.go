@@ -119,6 +119,52 @@ func TestLoadConfigRejectsChunkedUploadLimitBelowChunkSize(t *testing.T) {
 	}
 }
 
+func TestLoadConfigCORSDefaultsDisabled(t *testing.T) {
+	base := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "auth:\n  bearer_token: test-token\nstorage:\n  base_paths:\n    - " + base + "\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.Server.CORS.AllowedOrigins) != 0 {
+		t.Fatalf("allowed origins=%v, want empty", cfg.Server.CORS.AllowedOrigins)
+	}
+	if cfg.Server.CORS.AllowCredentials {
+		t.Fatalf("allow credentials default should be false")
+	}
+}
+
+func TestLoadConfigRejectsWildcardCORSCredentials(t *testing.T) {
+	base := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "" +
+		"auth:\n" +
+		"  bearer_token: test-token\n" +
+		"storage:\n" +
+		"  base_paths:\n" +
+		"    - " + base + "\n" +
+		"server:\n" +
+		"  cors:\n" +
+		"    allowed_origins: [\"*\"]\n" +
+		"    allow_credentials: true\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := loadConfig(cfgPath)
+	if err == nil {
+		t.Fatalf("expected config validation error")
+	}
+	if want := "server.cors.allow_credentials cannot be true when allowed_origins contains *"; err.Error() != want {
+		t.Fatalf("error=%q, want %q", err.Error(), want)
+	}
+}
+
 // TestLoadConfigS3CleanupEnvOverrides pins that the
 // FILEGATE_S3_CLEANUP_* env vars actually reach the resolved
 // config. Without explicit SetDefault calls in loadConfig, viper's

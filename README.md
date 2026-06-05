@@ -75,6 +75,8 @@ mkdir -p /tmp/filegate/data /tmp/filegate/index
 server:
   listen: ":8080"
   public_url: "http://127.0.0.1:8080"
+  cors:
+    allowed_origins: []
 
 auth:
   bearer_token: "dev-token"
@@ -178,6 +180,15 @@ curl -fsS -X POST \
 ```
 
 Set `server.public_url` (`--server-public-url`, `FILEGATE_SERVER_PUBLIC_URL`) to the external REST URL behind Traefik/Caddy/nginx. If it is empty, Filegate builds URLs from the incoming request host.
+
+CORS is disabled by default. Prefer configuring CORS at your reverse proxy; if Filegate must answer browser cross-origin requests directly, allow specific origins:
+
+```bash
+sudo fg config set --config /etc/filegate/conf.yaml \
+  --server-cors-allowed-origins 'https://app.example.com' \
+  --server-cors-exposed-headers X-Node-Id \
+  --server-cors-exposed-headers X-Created-Id
+```
 
 ## S3 listener
 

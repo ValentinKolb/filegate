@@ -44,7 +44,7 @@ while `/health` and optional `/metrics` remain on `server.listen`.
 Strongly recommended explicit settings:
 
 - `storage.index_path`
-- `server.listen`, `server.public_url`, `server.shutdown_timeout`
+- `server.listen`, `server.public_url`, `server.cors.*`, `server.shutdown_timeout`
 - `upload.max_*`
 - `jobs.*`
 - `detection.backend` and `detection.poll_interval`

@@ -37,6 +37,12 @@ func allConfigFlagSpecs() []configFlagSpec {
 	return []configFlagSpec{
 		{Name: "server-listen", Path: "server.listen", Kind: configFlagString, Usage: "REST listener address"},
 		{Name: "server-public-url", Path: "server.public_url", Kind: configFlagString, Usage: "public REST base URL used when minting direct upload URLs"},
+		{Name: "server-cors-allowed-origins", Path: "server.cors.allowed_origins", Kind: configFlagStringArray, Usage: "CORS allowed origin; repeat for multiple origins; empty disables CORS"},
+		{Name: "server-cors-allowed-methods", Path: "server.cors.allowed_methods", Kind: configFlagStringArray, Usage: "CORS allowed method; repeat for multiple methods; empty uses REST defaults"},
+		{Name: "server-cors-allowed-headers", Path: "server.cors.allowed_headers", Kind: configFlagStringArray, Usage: "CORS allowed request header; repeat for multiple headers; empty uses REST defaults"},
+		{Name: "server-cors-exposed-headers", Path: "server.cors.exposed_headers", Kind: configFlagStringArray, Usage: "CORS response header exposed to browsers; repeat for multiple headers"},
+		{Name: "server-cors-max-age", Path: "server.cors.max_age", Kind: configFlagDuration, Usage: "CORS preflight cache duration"},
+		{Name: "server-cors-allow-credentials", Path: "server.cors.allow_credentials", Kind: configFlagBool, Usage: "allow credentials on CORS responses; cannot be used with wildcard origin"},
 		{Name: "server-write-timeout", Path: "server.write_timeout", Kind: configFlagDuration, Usage: "HTTP response write timeout"},
 		{Name: "server-access-log-enabled", Path: "server.access_log_enabled", Kind: configFlagBool, Usage: "enable REST and S3 access logs"},
 		{Name: "server-shutdown-timeout", Path: "server.shutdown_timeout", Kind: configFlagDuration, Usage: "graceful shutdown timeout"},
@@ -137,6 +143,18 @@ func applyChangedConfigFlag(flags *pflag.FlagSet, spec configFlagSpec, cfg *doma
 		cfg.Server.Listen = getFlagString(flags, spec.Name)
 	case "server.public_url":
 		cfg.Server.PublicURL = strings.TrimRight(getFlagString(flags, spec.Name), "/")
+	case "server.cors.allowed_origins":
+		cfg.Server.CORS.AllowedOrigins = cleanStringList(getFlagStringArray(flags, spec.Name))
+	case "server.cors.allowed_methods":
+		cfg.Server.CORS.AllowedMethods = cleanStringList(getFlagStringArray(flags, spec.Name))
+	case "server.cors.allowed_headers":
+		cfg.Server.CORS.AllowedHeaders = cleanStringList(getFlagStringArray(flags, spec.Name))
+	case "server.cors.exposed_headers":
+		cfg.Server.CORS.ExposedHeaders = cleanStringList(getFlagStringArray(flags, spec.Name))
+	case "server.cors.max_age":
+		cfg.Server.CORS.MaxAge = getFlagDuration(flags, spec.Name)
+	case "server.cors.allow_credentials":
+		cfg.Server.CORS.AllowCredentials = getFlagBool(flags, spec.Name)
 	case "server.write_timeout":
 		cfg.Server.WriteTimeout = getFlagDuration(flags, spec.Name)
 	case "server.access_log_enabled":
@@ -419,6 +437,9 @@ func validateResolvedConfig(cfg domain.Config) error {
 	if err := validatePublicURL(cfg.Server.PublicURL); err != nil {
 		return err
 	}
+	if err := validateCORSConfig(cfg.Server.CORS); err != nil {
+		return err
+	}
 	backend := strings.ToLower(strings.TrimSpace(cfg.Detection.Backend))
 	if backend == "" {
 		backend = "auto"
@@ -459,6 +480,43 @@ func validatePublicURL(raw string) error {
 		return fmt.Errorf("server.public_url must use http or https")
 	}
 	return nil
+}
+
+func validateCORSConfig(cfg domain.CORSConfig) error {
+	origins := cleanStringList(cfg.AllowedOrigins)
+	if len(origins) == 0 {
+		return nil
+	}
+	if cfg.MaxAge < 0 {
+		return fmt.Errorf("server.cors.max_age must be >= 0")
+	}
+	for _, origin := range origins {
+		if origin == "*" {
+			if cfg.AllowCredentials {
+				return fmt.Errorf("server.cors.allow_credentials cannot be true when allowed_origins contains *")
+			}
+			continue
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("server.cors.allowed_origins must contain origins like https://app.example.com")
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("server.cors.allowed_origins must use http or https")
+		}
+	}
+	return nil
+}
+
+func cleanStringList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func validateS3Config(cfg domain.Config) error {
