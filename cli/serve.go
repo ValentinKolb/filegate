@@ -82,6 +82,9 @@ func newDaemonServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := applyChangedConfigFlags(cmd.Flags(), &cfg); err != nil {
+				return err
+			}
 
 			// Probe every mount before opening the index. Catches
 			// the operator who mounted ext4 without user_xattr,
@@ -301,6 +304,7 @@ func newDaemonServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&configFile, "config", "", "path to config file")
+	registerConfigFlags(cmd.Flags())
 	return cmd
 }
 

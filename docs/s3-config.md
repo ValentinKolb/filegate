@@ -73,7 +73,38 @@ This makes the migration path painless: keep the legacy fields, add `keys` entri
 
 ### Rotating keys
 
-Filegate currently loads the key store **once at startup**. Rotating a key requires editing the config and restarting the daemon. The next graceful-shutdown release (M4+) will support reloading on `SIGHUP`; until then, rotate one key at a time and orchestrate the restart with your service manager.
+Filegate loads the key store **once at startup**. Config changes are offline edits: update the YAML, then restart the daemon with your service manager.
+
+Generate a new credential pair:
+
+```bash
+filegate config s3 key generate
+```
+
+Add the new key to the YAML:
+
+```bash
+filegate config s3 key add --config /etc/filegate/conf.yaml \
+  --bucket alice-photos \
+  --access-key FGALICENEW \
+  --secret-key '<new-secret>'
+```
+
+Omit `--access-key` and/or `--secret-key` to let the CLI generate the missing values. Use `--all-buckets` instead of `--bucket` for an admin key.
+
+After clients have switched, stage revocation by disabling the old key:
+
+```bash
+filegate config s3 key disable --config /etc/filegate/conf.yaml FGALICEOLD
+```
+
+The disabled key still authenticates but has an empty bucket list, so every bucket operation returns `403 AccessDenied`. Remove it after the cutover window:
+
+```bash
+filegate config s3 key remove --config /etc/filegate/conf.yaml FGALICEOLD
+```
+
+Every mutating `filegate config` command validates the resulting YAML, creates a timestamped backup by default, and prints a restart reminder. It does not hot-reload a running filegate process.
 
 ---
 

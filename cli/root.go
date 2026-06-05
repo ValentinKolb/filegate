@@ -22,6 +22,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	cmd.AddCommand(newDaemonServeCmd())
+	cmd.AddCommand(newDaemonConfigCmd())
 	cmd.AddCommand(newDaemonIndexCmd())
 	cmd.AddCommand(newHealthCmd())
 	cmd.AddCommand(newStatusCmd())
