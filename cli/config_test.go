@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/valentinkolb/filegate/domain"
 )
 
 func TestLoadConfigJobDefaults(t *testing.T) {
@@ -81,6 +83,31 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 	}
 	if cfg.Upload.MinFreeBytes != 123456 {
 		t.Fatalf("upload.min_free_bytes=%d, want 123456", cfg.Upload.MinFreeBytes)
+	}
+}
+
+func TestLoadConfigRejectsChunkedUploadLimitBelowChunkSize(t *testing.T) {
+	base := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "" +
+		"auth:\n" +
+		"  bearer_token: test-token\n" +
+		"storage:\n" +
+		"  base_paths:\n" +
+		"    - " + base + "\n" +
+		"upload:\n" +
+		"  max_chunk_bytes: 10485760\n" +
+		"  max_chunked_upload_bytes: 1048576\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := loadConfig(cfgPath)
+	if err == nil {
+		t.Fatalf("expected config validation error")
+	}
+	if want := "upload.max_chunked_upload_bytes must be >= upload.max_chunk_bytes"; err.Error() != want {
+		t.Fatalf("error=%q, want %q", err.Error(), want)
 	}
 }
 
@@ -188,7 +215,7 @@ func TestLoadConfigExplicitMissingFileReturnsError(t *testing.T) {
 	}
 }
 
-func TestLoadConfigServerWriteTimeoutDefaultAndOverride(t *testing.T) {
+func TestLoadConfigServerTimeoutDefaultsAndOverrides(t *testing.T) {
 	base := t.TempDir()
 
 	defaultCfgPath := filepath.Join(t.TempDir(), "config-default.yaml")
@@ -203,11 +230,15 @@ func TestLoadConfigServerWriteTimeoutDefaultAndOverride(t *testing.T) {
 	if defaultCfg.Server.WriteTimeout != 5*time.Minute {
 		t.Fatalf("default write_timeout=%s, want 5m", defaultCfg.Server.WriteTimeout)
 	}
+	if defaultCfg.Server.ShutdownTimeout != 60*time.Second {
+		t.Fatalf("default shutdown_timeout=%s, want 60s", defaultCfg.Server.ShutdownTimeout)
+	}
 
 	overrideCfgPath := filepath.Join(t.TempDir(), "config-override.yaml")
 	overrideContent := "" +
 		"server:\n" +
 		"  write_timeout: 90s\n" +
+		"  shutdown_timeout: 45s\n" +
 		"auth:\n" +
 		"  bearer_token: test-token\n" +
 		"storage:\n" +
@@ -222,6 +253,70 @@ func TestLoadConfigServerWriteTimeoutDefaultAndOverride(t *testing.T) {
 	}
 	if overrideCfg.Server.WriteTimeout != 90*time.Second {
 		t.Fatalf("override write_timeout=%s, want 90s", overrideCfg.Server.WriteTimeout)
+	}
+	if overrideCfg.Server.ShutdownTimeout != 45*time.Second {
+		t.Fatalf("override shutdown_timeout=%s, want 45s", overrideCfg.Server.ShutdownTimeout)
+	}
+
+	t.Setenv("FILEGATE_STORAGE_BASE_PATHS", base)
+	t.Setenv("FILEGATE_AUTH_BEARER_TOKEN", "test-token")
+	t.Setenv("FILEGATE_SERVER_WRITE_TIMEOUT", "75s")
+	t.Setenv("FILEGATE_SERVER_SHUTDOWN_TIMEOUT", "35s")
+	envCfg, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("load env config: %v", err)
+	}
+	if envCfg.Server.WriteTimeout != 75*time.Second {
+		t.Fatalf("env write_timeout=%s, want 75s", envCfg.Server.WriteTimeout)
+	}
+	if envCfg.Server.ShutdownTimeout != 35*time.Second {
+		t.Fatalf("env shutdown_timeout=%s, want 35s", envCfg.Server.ShutdownTimeout)
+	}
+}
+
+func TestLoadConfigPackagedExamplesParse(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want func(t *testing.T, cfg domain.Config)
+	}{
+		{
+			name: "package config",
+			path: filepath.Join("..", "packaging", "config", "conf.yaml"),
+			want: func(t *testing.T, cfg domain.Config) {
+				if cfg.Server.ShutdownTimeout != 60*time.Second {
+					t.Fatalf("shutdown_timeout=%s, want 60s", cfg.Server.ShutdownTimeout)
+				}
+				if cfg.Upload.MaxChunkedUploadBytes < cfg.Upload.MaxChunkBytes {
+					t.Fatalf("max_chunked_upload_bytes=%d below max_chunk_bytes=%d",
+						cfg.Upload.MaxChunkedUploadBytes, cfg.Upload.MaxChunkBytes)
+				}
+			},
+		},
+		{
+			name: "s3 example config",
+			path: filepath.Join("..", "filegate.s3.example.yaml"),
+			want: func(t *testing.T, cfg domain.Config) {
+				if !cfg.S3.Enabled {
+					t.Fatalf("s3.enabled=false, want true")
+				}
+				if cfg.S3.Listen != ":9100" {
+					t.Fatalf("s3.listen=%q, want :9100", cfg.S3.Listen)
+				}
+				if cfg.Server.ShutdownTimeout != 60*time.Second {
+					t.Fatalf("shutdown_timeout=%s, want 60s", cfg.Server.ShutdownTimeout)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfig(tc.path)
+			if err != nil {
+				t.Fatalf("load %s: %v", tc.path, err)
+			}
+			tc.want(t, cfg)
+		})
 	}
 }
 

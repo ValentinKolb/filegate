@@ -8,12 +8,13 @@
 server:
   listen: ":8080"
   write_timeout: "5m"
+  shutdown_timeout: "60s"
   access_log_enabled: true
 
 # Bearer token for the REST adapter. Independent from S3
-# credentials. Set to "" to disable the REST listener entirely
-# (only the S3 listener will respond) — but keep at least one
-# auth surface live or the daemon is useless.
+# credentials. Set to "" only for an S3-only deployment: the REST
+# listener still binds server.listen for /health and optional
+# /metrics, but every /v1 route is locked down with 401.
 auth:
   bearer_token: "your-rest-bearer-token-please-rotate-me"
 
@@ -35,8 +36,8 @@ upload:
   expiry: "24h"
   cleanup_interval: "6h"
   max_chunk_bytes: 52428800        # 50 MiB
-  max_upload_bytes: 0              # 0 = unlimited
-  max_chunked_upload_bytes: 0      # 0 = unlimited
+  max_upload_bytes: 524288000      # 500 MiB REST one-shot upload limit
+  max_chunked_upload_bytes: 53687091200 # 50 GiB REST chunked upload limit
   min_free_bytes: 67108864         # 64 MiB
 
 versioning:

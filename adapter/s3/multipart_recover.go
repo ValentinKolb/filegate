@@ -78,6 +78,8 @@ func reconcileCommittingManifest(svc *domain.Service, stageDir string, manifest 
 		// No durable record — the original Complete didn't reach
 		// the Pebble batch. Leave phase=committing so a client
 		// retry redrives the flow.
+		fmt.Printf("[filegate-s3] recover: committing upload %s bucket=%s key=%s has no durable record; leaving for CompleteMultipartUpload retry (stage=%s)\n",
+			uploadIDHex, manifest.Bucket, manifest.Key, stageDir)
 		return
 	}
 	// Durable record present — the upload is committed. Backfill

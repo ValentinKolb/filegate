@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime"
@@ -278,6 +279,11 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 			if err := preflightDirectoryTar(abs); err != nil {
 				if errors.Is(err, os.ErrPermission) {
 					writeErr(w, http.StatusForbidden, "directory content is not readable")
+					return
+				}
+				var budgetErr directoryTarBudgetError
+				if errors.As(err, &budgetErr) {
+					writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
 					return
 				}
 				writeErr(w, http.StatusInternalServerError, "failed to prepare directory download")
@@ -1018,7 +1024,33 @@ func writeDirectoryTar(w io.Writer, dirPath, rootName string) error {
 	})
 }
 
+type directoryTarBudget struct {
+	MaxEntries int
+	MaxBytes   int64
+	MaxDepth   int
+}
+
+type directoryTarBudgetError struct {
+	message string
+}
+
+func (e directoryTarBudgetError) Error() string {
+	return e.message
+}
+
+var defaultDirectoryTarBudget = directoryTarBudget{
+	MaxEntries: 100_000,
+	MaxBytes:   10 << 30,
+	MaxDepth:   128,
+}
+
 func preflightDirectoryTar(dirPath string) error {
+	return preflightDirectoryTarWithBudget(dirPath, defaultDirectoryTarBudget)
+}
+
+func preflightDirectoryTarWithBudget(dirPath string, budget directoryTarBudget) error {
+	var entries int
+	var bytes int64
 	return filepath.WalkDir(dirPath, func(current string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1026,14 +1058,38 @@ func preflightDirectoryTar(dirPath string) error {
 		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
-		if d.IsDir() {
-			return nil
-		}
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return nil
+		}
+
+		rel, err := filepath.Rel(dirPath, current)
+		if err != nil {
+			return err
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(filepath.ToSlash(rel), "/") + 1
+		}
+		if budget.MaxDepth > 0 && depth > budget.MaxDepth {
+			return directoryTarBudgetError{message: fmt.Sprintf("directory tar exceeds max depth %d", budget.MaxDepth)}
+		}
+
+		entries++
+		if budget.MaxEntries > 0 && entries > budget.MaxEntries {
+			return directoryTarBudgetError{message: fmt.Sprintf("directory tar exceeds max entries %d", budget.MaxEntries)}
+		}
+
+		if info.Mode().IsRegular() {
+			bytes += info.Size()
+			if budget.MaxBytes > 0 && bytes > budget.MaxBytes {
+				return directoryTarBudgetError{message: fmt.Sprintf("directory tar exceeds max content bytes %d", budget.MaxBytes)}
+			}
+		}
+		if info.IsDir() {
 			return nil
 		}
 		f, err := os.Open(current)

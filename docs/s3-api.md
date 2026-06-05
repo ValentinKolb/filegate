@@ -115,7 +115,9 @@ Filegate enforces a **2 KiB** ceiling on the total user-metadata blob (matches A
 
 ### Multipart cleanup
 
-Successful multipart Complete deletes the staging `parts/` and `complete.tmp` immediately. The small manifest stays for the idempotent-retry window so a replayed Complete short-circuits without touching Pebble. A future cleanup loop will sweep `phase=done` manifests + the durable Pebble record after a retention period; that's not yet implemented (M4+1).
+Successful multipart Complete deletes the staging `parts/` and `complete.tmp` immediately. The small manifest stays for the idempotent-retry window so a replayed Complete can short-circuit. The multipart cleanup loop retires `phase=done` manifests and their durable Pebble records after the configured done-retention window, retires aborted manifests after aborted-retention, and force-aborts stale `in_progress` uploads after the stuck-upload max age. `phase=committing` manifests are not cleanup-eligible; startup recovery reconciles them against the durable record.
+
+If startup recovery finds a `phase=committing` manifest without a durable record, it logs the upload ID, bucket, key, and staging path, then leaves the manifest in place. This means the original Complete did not reach the Pebble commit. The safe recovery path is to retry `CompleteMultipartUpload` with the original parts list; if the client is gone and the upload is intentionally abandoned, an operator may remove the logged staging directory after confirming the object was not created.
 
 ### `If-None-Match` on PutObject / CopyObject
 
@@ -131,7 +133,7 @@ The S3 listener speaks plain HTTP. Production deployments **must** put a reverse
 
 | Limit                                 | Value          | Notes |
 |---------------------------------------|----------------|-------|
-| Object size (single PUT)              | unlimited      | bounded by `upload.max_upload_bytes` config (default 0 = unlimited). |
+| Object size (single PUT)              | unbounded by S3 config | Limited by filesystem capacity and server write timeout; REST `upload.max_upload_bytes` does not apply to S3 PutObject. |
 | Multipart parts per upload            | 10,000         | AWS spec hard limit. |
 | Multipart part size (non-final)       | ≥ 5 MiB        | Final part may be smaller. |
 | CopyObject single-call source size    | 5 GiB          | Above → `EntityTooLarge`; UploadPartCopy not yet implemented. |

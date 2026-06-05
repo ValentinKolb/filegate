@@ -53,16 +53,22 @@ See implementation in [`infra/pebble/index.go`](https://github.com/ValentinKolb/
 
 `infra/fgbin` encodes compact binary records.
 
-Entity v1 core fields:
+Entity v2 core fields:
 
 - `id`, `parentId`, `isDir`, `size`, `mtimeNs`
-- `uid`, `gid`, `mode`
+- `uid`, `gid`, `mode`, `device`, `inode`, `nlink`
 - `name`, `mimeType`
 - extension list (`fieldId`, `len`, `value`)
 
 Current extension usage:
 
 - `fieldId=1` for EXIF payload (JSON blob)
+- `fieldId=2` for the single-part/cross-protocol MD5 ETag
+- `fieldId=3` for the S3 composite multipart ETag
+- `fieldId=4` for explicit S3 `Content-Type`
+- `fieldId=5` for S3 `Content-Encoding`
+- `fieldId=6` for S3 `Content-Disposition`
+- `fieldId=7` for serialized S3 user metadata
 
 `DecodeEntity` enforces version/type/canonical extension ordering to avoid ambiguous decoding.
 
@@ -78,7 +84,7 @@ Current extension usage:
 
 - Metadata path/id reads are index-first
 - Path and reverse path caches in domain service
-- Bounded worker queues for expensive jobs (thumbnail/EXIF)
+- Bounded worker queues for expensive jobs (thumbnail generation)
 - Pooled copy buffers for stream endpoints
 - Chunked upload staging in mount-local `.fg-uploads`
 

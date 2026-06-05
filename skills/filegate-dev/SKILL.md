@@ -79,11 +79,11 @@ These come from past incidents in this codebase, not abstract style preferences:
     invalidates cache, publishes one **bulk** `EventDeleted{ID,
     Path=root}`. Callers like `Delete`/`RemoveAbsPath` rely on this and
     must NOT publish a redundant `EventDeleted` themselves.
-  - `EventCreated` and `EventMoved` exist in `domain/event.go` but are
-    not currently emitted anywhere. Adding fine-grained
-    create-vs-update discrimination is tracked in `todo.md`; until then
-    the `EventUpdated` from sync helpers is the signal subscribers
-    receive for both create and modify.
+  - Public mutators emit semantic events where they can distinguish the
+    operation: new entities emit `EventCreated`, content/metadata changes
+    emit `EventUpdated`, renames and re-parents emit `EventMoved`, and
+    deletes emit `EventDeleted`. Keep those emissions single-shot; the
+    Linux event tests pin the no-duplicate contract.
   Forgetting cache invalidation silently desyncs the cache from the
   index; using the helpers gets both right by construction.
 - **Bounded async work is mandatory; the implementation can vary.** No

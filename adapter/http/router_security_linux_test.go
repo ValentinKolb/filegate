@@ -261,6 +261,110 @@ func TestDirectoryTarSkipsSymlinkEntries(t *testing.T) {
 	}
 }
 
+func TestDirectoryTarPreflightEnforcesBudgets(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("1234"), 0o644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "deep", "child"), 0o755); err != nil {
+		t.Fatalf("mkdir deep child: %v", err)
+	}
+
+	if err := preflightDirectoryTarWithBudget(root, directoryTarBudget{
+		MaxEntries: 10,
+		MaxBytes:   10,
+		MaxDepth:   3,
+	}); err != nil {
+		t.Fatalf("small tree rejected: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		budget directoryTarBudget
+	}{
+		{
+			name: "entries",
+			budget: directoryTarBudget{
+				MaxEntries: 1,
+				MaxBytes:   10,
+				MaxDepth:   3,
+			},
+		},
+		{
+			name: "bytes",
+			budget: directoryTarBudget{
+				MaxEntries: 10,
+				MaxBytes:   3,
+				MaxDepth:   3,
+			},
+		},
+		{
+			name: "depth",
+			budget: directoryTarBudget{
+				MaxEntries: 10,
+				MaxBytes:   10,
+				MaxDepth:   1,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := preflightDirectoryTarWithBudget(root, tc.budget)
+			if err == nil {
+				t.Fatalf("expected budget error")
+			}
+			var budgetErr directoryTarBudgetError
+			if !errors.As(err, &budgetErr) {
+				t.Fatalf("err=%T %v, want directoryTarBudgetError", err, err)
+			}
+		})
+	}
+}
+
+func TestDirectoryTarRouteRejectsOverBudget(t *testing.T) {
+	oldBudget := defaultDirectoryTarBudget
+	defaultDirectoryTarBudget = directoryTarBudget{
+		MaxEntries: 10,
+		MaxBytes:   3,
+		MaxDepth:   3,
+	}
+	t.Cleanup(func() {
+		defaultDirectoryTarBudget = oldBudget
+	})
+
+	r, svc, cleanup := newTestRouter(t)
+	defer cleanup()
+
+	mount := svc.ListRoot()[0]
+	baseAbs, err := svc.ResolveAbsPath(mount.ID)
+	if err != nil {
+		t.Fatalf("resolve mount path: %v", err)
+	}
+	dirPath := filepath.Join(baseAbs, "too-big")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("mkdir too-big: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "a.txt"), []byte("1234"), 0o644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+	if err := svc.Rescan(); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	dirID, err := svc.ResolvePath(mount.Name + "/too-big")
+	if err != nil {
+		t.Fatalf("resolve dir id: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, authedRequest(http.MethodGet, "/v1/nodes/"+dirID.String()+"/content"))
+	if w.Result().StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want=%d body=%s", w.Result().StatusCode, http.StatusRequestEntityTooLarge, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "directory tar exceeds max content bytes") {
+		t.Fatalf("body missing budget reason: %s", w.Body.String())
+	}
+}
+
 func TestDownloadHeaderSanitizesFilename(t *testing.T) {
 	r, svc, cleanup := newTestRouter(t)
 	defer cleanup()

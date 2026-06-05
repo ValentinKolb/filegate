@@ -22,6 +22,7 @@ client.transfers  ← move / copy
 client.search     ← glob search
 client.index      ← rescan, resolve
 client.stats      ← daemon stats
+client.versions   ← per-file version history
 ```
 
 One-shot uploads live under `client.paths.put` — not under `client.uploads`.

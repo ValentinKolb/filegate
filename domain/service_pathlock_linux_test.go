@@ -4,6 +4,7 @@ package domain_test
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,11 +39,11 @@ func TestPathLockSerializesConcurrentWritesAndDeletes(t *testing.T) {
 	const writers = 4
 	const ops = 50
 	var (
-		wg          sync.WaitGroup
-		writeOK     atomic.Int64
-		writeStale  atomic.Int64
-		deletes     atomic.Int64
-		stop        atomic.Bool
+		wg         sync.WaitGroup
+		writeOK    atomic.Int64
+		writeStale atomic.Int64
+		deletes    atomic.Int64
+		stop       atomic.Bool
 	)
 
 	for w := 0; w < writers; w++ {
@@ -143,6 +144,74 @@ func TestPathLockSubtreeDeleteBlocksDescendantWrite(t *testing.T) {
 	}
 }
 
+// TestPathLockRESTVirtualCreateBlocksConcurrentS3Write pins the
+// cross-protocol namespace contract: REST virtual-path create holds
+// the same leaf path-lock as S3 PutObject. The blocked REST body
+// keeps the create critical section open; a parallel S3 write to the
+// same path must wait until REST finishes instead of committing first.
+func TestPathLockRESTVirtualCreateBlocksConcurrentS3Write(t *testing.T) {
+	svc, _, cleanup := newServiceWithIndex(t)
+	defer cleanup()
+
+	mountName := svc.ListRoot()[0].Name
+	target := "/" + mountName + "/locked-create.txt"
+	body := newBlockingReader("rest")
+
+	restDone := make(chan error, 1)
+	go func() {
+		_, _, err := svc.WriteContentByVirtualPath(target, body, domain.ConflictError)
+		restDone <- err
+	}()
+
+	select {
+	case <-body.started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("REST create did not reach body read")
+	}
+
+	s3Done := make(chan error, 1)
+	go func() {
+		_, _, err := svc.WriteObjectS3(target, strings.NewReader("s3"), domain.S3WriteOptions{})
+		s3Done <- err
+	}()
+
+	select {
+	case err := <-s3Done:
+		t.Fatalf("S3 write completed while REST create was still in-flight, err=%v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: S3 is waiting on the REST-held leaf path-lock.
+	}
+
+	body.release()
+
+	if err := <-restDone; err != nil {
+		t.Fatalf("REST create failed: %v", err)
+	}
+	if err := <-s3Done; err != nil {
+		t.Fatalf("S3 write after REST create failed: %v", err)
+	}
+
+	id, err := svc.ResolvePath(strings.TrimPrefix(target, "/"))
+	if err != nil {
+		t.Fatalf("resolve target: %v", err)
+	}
+	reader, _, isDir, err := svc.OpenContent(id)
+	if err != nil {
+		t.Fatalf("open content: %v", err)
+	}
+	if isDir {
+		t.Fatalf("target resolved as directory")
+	}
+	defer reader.Close()
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read final content: %v", err)
+	}
+	if string(got) != "s3" {
+		t.Fatalf("final content=%q, want s3 overwrite after REST create", string(got))
+	}
+}
+
 // TestPathLockReleasesAfterPanic verifies that even if a locked
 // operation panics (or returns an error), the locks are released so
 // subsequent ops on the same path can proceed. Without proper defer
@@ -187,4 +256,33 @@ type abortReader struct{}
 
 func (a *abortReader) Read(p []byte) (int, error) {
 	return 0, errors.New("aborted")
+}
+
+type blockingReader struct {
+	payload  []byte
+	started  chan struct{}
+	released chan struct{}
+	done     bool
+}
+
+func newBlockingReader(payload string) *blockingReader {
+	return &blockingReader{
+		payload:  []byte(payload),
+		started:  make(chan struct{}),
+		released: make(chan struct{}),
+	}
+}
+
+func (r *blockingReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	close(r.started)
+	<-r.released
+	r.done = true
+	return copy(p, r.payload), io.EOF
+}
+
+func (r *blockingReader) release() {
+	close(r.released)
 }

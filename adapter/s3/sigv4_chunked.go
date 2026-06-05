@@ -154,14 +154,13 @@ func (d *chunkedDecoder) loadNextChunk() error {
 		if _, err := io.ReadFull(d.src, body); err != nil {
 			return err
 		}
-	}
-	// Each chunk (including the final 0-length) is followed by CRLF.
-	trailer := make([]byte, 2)
-	if _, err := io.ReadFull(d.src, trailer); err != nil {
-		return err
-	}
-	if string(trailer) != "\r\n" {
-		return errChunkTrailerMismatch
+		trailer := make([]byte, 2)
+		if _, err := io.ReadFull(d.src, trailer); err != nil {
+			return err
+		}
+		if string(trailer) != "\r\n" {
+			return errChunkTrailerMismatch
+		}
 	}
 
 	chunkHash := sha256.Sum256(body)
@@ -180,6 +179,9 @@ func (d *chunkedDecoder) loadNextChunk() error {
 	d.prevSig = sigVal
 
 	if size == 0 {
+		if err := discardChunkTrailers(d.src); err != nil {
+			return err
+		}
 		// Final chunk consumed — any further Read returns io.EOF.
 		d.done = true
 		d.curBuf = nil
@@ -211,6 +213,115 @@ func parseChunkHeader(line string) (sizeHex, sigVal string, err error) {
 		return "", "", fmt.Errorf("%w: empty chunk-signature in %q", errMalformedChunkHeader, line)
 	}
 	return sizeHex, sigVal, nil
+}
+
+type unsignedChunkedDecoder struct {
+	src    *bufio.Reader
+	closer io.Closer
+
+	curBuf []byte
+	curPos int
+	done   bool
+	err    error
+}
+
+func newUnsignedChunkedDecoder(body io.ReadCloser) *unsignedChunkedDecoder {
+	return &unsignedChunkedDecoder{
+		src:    bufio.NewReader(body),
+		closer: body,
+	}
+}
+
+func (d *unsignedChunkedDecoder) Read(p []byte) (int, error) {
+	if d.err != nil {
+		return 0, d.err
+	}
+	for d.curPos >= len(d.curBuf) {
+		if d.done {
+			return 0, io.EOF
+		}
+		if err := d.loadNextChunk(); err != nil {
+			d.err = err
+			return 0, err
+		}
+	}
+	n := copy(p, d.curBuf[d.curPos:])
+	d.curPos += n
+	return n, nil
+}
+
+func (d *unsignedChunkedDecoder) Close() error { return d.closer.Close() }
+
+func (d *unsignedChunkedDecoder) loadNextChunk() error {
+	header, err := d.src.ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) && header == "" {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	if !strings.HasSuffix(header, "\r\n") {
+		return fmt.Errorf("%w: chunk header missing CRLF terminator", errMalformedChunkHeader)
+	}
+	header = strings.TrimSuffix(header, "\r\n")
+	sizeHex := header
+	if semi := strings.IndexByte(sizeHex, ';'); semi >= 0 {
+		sizeHex = sizeHex[:semi]
+	}
+	sizeHex = strings.TrimSpace(sizeHex)
+	if sizeHex == "" {
+		return fmt.Errorf("%w: empty chunk size", errMalformedChunkHeader)
+	}
+	size, err := strconv.ParseUint(sizeHex, 16, 64)
+	if err != nil {
+		return fmt.Errorf("%w: invalid chunk size %q", errMalformedChunkHeader, sizeHex)
+	}
+	if size > maxChunkBytes {
+		return fmt.Errorf("%w: chunk size %d exceeds cap %d", errChunkTooLarge, size, maxChunkBytes)
+	}
+	body := make([]byte, size)
+	if size > 0 {
+		if _, err := io.ReadFull(d.src, body); err != nil {
+			return err
+		}
+		trailer := make([]byte, 2)
+		if _, err := io.ReadFull(d.src, trailer); err != nil {
+			return err
+		}
+		if string(trailer) != "\r\n" {
+			return errChunkTrailerMismatch
+		}
+	}
+	if size == 0 {
+		if err := discardChunkTrailers(d.src); err != nil {
+			return err
+		}
+		d.done = true
+		d.curBuf = nil
+		d.curPos = 0
+		return nil
+	}
+	d.curBuf = body
+	d.curPos = 0
+	return nil
+}
+
+func discardChunkTrailers(src *bufio.Reader) error {
+	for {
+		line, err := src.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) && line == "" {
+				return io.ErrUnexpectedEOF
+			}
+			return err
+		}
+		if !strings.HasSuffix(line, "\r\n") {
+			return fmt.Errorf("%w: trailer header missing CRLF terminator", errMalformedChunkHeader)
+		}
+		if line == "\r\n" {
+			return nil
+		}
+	}
 }
 
 // readAllChunked is a convenience for tests / verification: drains

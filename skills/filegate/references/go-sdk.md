@@ -32,6 +32,7 @@ fg.Transfers  // TransfersClient
 fg.Search     // SearchClient
 fg.Index      // IndexClient
 fg.Stats      // StatsClient
+fg.Versions   // VersionsClient
 ```
 
 Pure helpers live in dedicated subpackages, reachable without constructing

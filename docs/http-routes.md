@@ -64,6 +64,10 @@ mkdir). For directory replacement use `POST /v1/transfers` with `overwrite`.
 - `GET /v1/nodes/{id}/content`
   - File: raw file stream
   - Directory: tar stream of subtree
+    - Preflight limit: max 100,000 tar entries, 10 GiB regular-file
+      content, depth 128
+    - Over-limit directory downloads return `413` before response
+      headers are sent
   - Query: `inline=true|false`
 - `GET /v1/nodes/{id}/thumbnail`
   - On-demand thumbnail for image-like sources

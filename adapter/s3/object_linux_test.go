@@ -413,6 +413,8 @@ func TestRejectInvalidObjectKey(t *testing.T) {
 		"a/../b",
 		".fg-versions/leak",
 		".fg-uploads/leak",
+		"nested/.fg-versions/leak",
+		"nested/.fg-uploads/leak",
 	}
 	for _, key := range cases {
 		req := httptest.NewRequest(http.MethodPut, "/"+mount+"/"+key, strings.NewReader("x"))
@@ -693,4 +695,3 @@ func TestConditionalGet(t *testing.T) {
 		t.Fatalf("If-None-Match status=%d, want 304", rec.Code)
 	}
 }
-

@@ -366,12 +366,9 @@ func validateObjectKey(key string) error {
 		if segment == "." || segment == ".." {
 			return errors.New("object key must not contain . or .. segments")
 		}
-	}
-	// Reserved internal-namespace check: top-level filegate dirs
-	// must not be accessible via S3.
-	first, _, _ := strings.Cut(key, "/")
-	if first == ".fg-versions" || first == ".fg-uploads" {
-		return errors.New("object key uses a filegate-internal reserved namespace")
+		if segment == ".fg-versions" || segment == ".fg-uploads" {
+			return errors.New("object key uses a filegate-internal reserved namespace")
+		}
 	}
 	return nil
 }
@@ -522,9 +519,9 @@ func mapDomainError(w http.ResponseWriter, r *http.Request, err error, bucket, k
 
 // etagMatch reports whether condition matches etag. Two modes:
 //
-//   * strong: a weak validator (W/...) NEVER matches. Used by
+//   - strong: a weak validator (W/...) NEVER matches. Used by
 //     If-Match (RFC 7232 §3.1).
-//   * weak: weak validators match if the opaque part is equal.
+//   - weak: weak validators match if the opaque part is equal.
 //     Used by If-None-Match (RFC 7232 §3.2). For S3 we don't
 //     emit weak ETags, so this is effectively the same as strong
 //     match — but we still strip the W/ prefix so a client that
@@ -576,18 +573,18 @@ func effectiveETag(meta *domain.FileMeta, view *domain.S3MetadataView) string {
 // applyConditionalRequest evaluates the four S3 conditional headers
 // in RFC 7232 §6 precedence order. Returns:
 //
-//   * (status, true) when the condition triggers a short-circuit
+//   - (status, true) when the condition triggers a short-circuit
 //     response — caller must write the status and stop further
 //     processing.
-//   * (0, false) when conditions pass and the request should
+//   - (0, false) when conditions pass and the request should
 //     continue normally.
 //
 // AWS S3 implements only If-Match / If-None-Match / If-Modified-Since
 // / If-Unmodified-Since (no If-Range). Order per RFC:
-//   1. If-Match           → 412 if no match
-//   2. If-Unmodified-Since → 412 if modified after
-//   3. If-None-Match       → 304 (GET/HEAD) or 412 (other)
-//   4. If-Modified-Since  → 304 (GET/HEAD only) if not modified
+//  1. If-Match           → 412 if no match
+//  2. If-Unmodified-Since → 412 if modified after
+//  3. If-None-Match       → 304 (GET/HEAD) or 412 (other)
+//  4. If-Modified-Since  → 304 (GET/HEAD only) if not modified
 func applyConditionalRequest(r *http.Request, etag string, mtime time.Time) (status int, shortCircuit bool) {
 	if cond := r.Header.Get("If-Match"); cond != "" {
 		if !etagMatch(cond, etag, strongMatch) {

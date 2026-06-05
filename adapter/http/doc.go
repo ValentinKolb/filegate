@@ -19,5 +19,5 @@
 //
 //   - domain: business logic and service interface consumed by handlers.
 //   - api/v1: shared request/response type definitions.
-//   - infra/jobs: bounded worker pool used for thumbnail and EXIF jobs.
+//   - infra/jobs: bounded worker pool used for thumbnail jobs.
 package httpadapter

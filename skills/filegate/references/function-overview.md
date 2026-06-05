@@ -18,12 +18,13 @@ This is the canonical "what can Filegate do?" reference. Read top to bottom the 
 12. [Search (glob)](#search-glob)
 13. [Thumbnails](#thumbnails)
 14. [EXIF metadata](#exif-metadata)
-15. [Index maintenance](#index-maintenance)
-16. [Stats and observability](#stats-and-observability)
-17. [Conflict handling](#conflict-handling)
-18. [Authentication](#authentication)
-19. [Free-space safety](#free-space-safety)
-20. [What Filegate does NOT do](#what-filegate-does-not-do)
+15. [Per-file versioning](#per-file-versioning)
+16. [Index maintenance](#index-maintenance)
+17. [Stats and observability](#stats-and-observability)
+18. [Conflict handling](#conflict-handling)
+19. [Authentication](#authentication)
+20. [Free-space safety](#free-space-safety)
+21. [What Filegate does NOT do](#what-filegate-does-not-do)
 
 ---
 
@@ -174,7 +175,11 @@ GET /v1/nodes/{id}/content?inline=false
   from the file extension at response time (usually matches `meta.mimeType`).
   `Content-Disposition` is `attachment` by default; pass `?inline=true` to
   render in-browser.
-- For a **directory node**: streams a `application/x-tar` archive of the subtree. Symlinks are skipped (security). `Content-Disposition` is `attachment; filename="<name>.tar"`.
+- For a **directory node**: streams a `application/x-tar` archive of the
+  subtree. Symlinks are skipped (security). `Content-Disposition` is
+  `attachment; filename="<name>.tar"`. Directory tar preflight rejects
+  over 100,000 tar entries, over 10 GiB regular-file content, or depth over
+  128 with `413`.
 
 The download path is streaming — large files don't materialize in memory.
 
@@ -284,6 +289,27 @@ EXIF is extracted synchronously when reading file metadata for image-like source
 
 EXIF data is also persisted in the index, so subsequent reads don't re-parse.
 
+## Per-file versioning
+
+```http
+GET  /v1/nodes/{fileID}/versions
+POST /v1/nodes/{fileID}/versions/snapshot
+POST /v1/nodes/{fileID}/versions/{versionID}/restore
+```
+
+HTTP-mediated writes can capture btrfs-backed per-file versions. Older
+versions are listable, downloadable, pinnable, restorable in place, or
+restorable as a fresh sibling file.
+
+- The feature is REST-only; S3 does not expose S3 object versions.
+- btrfs reflinks are required for efficient storage. Unsupported mounts
+  return 404 with the versioning-unsupported error shape.
+- Automatic captures happen on overwrite subject to the configured cooldown.
+  Manual snapshots ignore the cooldown and are pinned by default.
+
+Use the SDK `versions` client where available; see `docs/versioning.md` for
+retention and operator details.
+
 ## Index maintenance
 
 ```http
@@ -348,8 +374,8 @@ during write are mapped to 507 too.
 
 - **No multi-user authentication.** Single bearer token. Per-user logic goes in your backend.
 - **No transactions / multi-file atomicity.** Each operation is independent. There is no "upload these 5 files atomically".
-- **No history / versioning.** Overwrite means overwrite. Use Transfer with rename or do versioning in your own naming scheme.
-- **No file locking.** Concurrent writers to the same file race; Filegate doesn't arbitrate.
+- **No S3 object versioning.** REST has per-file versioning when configured, but the S3 surface does not expose object versions.
+- **No user-visible file locks.** Filegate serializes its own write paths, but it does not expose leases or locks that clients can hold across separate operations.
 - **No webhooks / event subscriptions.** The internal event bus is in-process only. If you want to react to filesystem events, you poll or you run inside the daemon.
 - **No symlink following across mounts.** Symlinks pointing outside their mount are not resolved (security).
 - **No native Windows / macOS support.** Linux only — relies on Linux xattr semantics for ID stability.

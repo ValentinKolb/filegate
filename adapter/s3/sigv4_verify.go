@@ -44,18 +44,20 @@ func sigErr(code errorCode, msgFmt string, args ...any) *sigV4VerifyError {
 // secret. M3 swaps this for a multi-tenant lookup — the verifier
 // itself only needs the secret-for-key callback, so it doesn't change.
 type authConfig struct {
-	Region        string
+	Region         string
 	SecretForKeyID func(keyID string) (string, bool)
 }
 
 // Constants AWS uses in the SigV4 wire format.
 const (
-	sigAlgorithm     = "AWS4-HMAC-SHA256"
-	sigService       = "s3"
-	sigChunkAlgo     = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
-	sigUnsignedBody  = "UNSIGNED-PAYLOAD"
-	sigEmptyBodyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // sha256("")
-	sigQueryAlgoKey  = "X-Amz-Algorithm"
+	sigAlgorithm        = "AWS4-HMAC-SHA256"
+	sigService          = "s3"
+	sigChunkAlgo        = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+	sigChunkAlgoTrailer = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
+	sigUnsignedBody     = "UNSIGNED-PAYLOAD"
+	sigUnsignedTrailer  = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+	sigEmptyBodyHash    = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // sha256("")
+	sigQueryAlgoKey     = "X-Amz-Algorithm"
 	// AWS allows up to 7 days (604800 seconds) for query-mode expires.
 	maxPresignExpires = 7 * 24 * 3600
 	// Clock skew tolerance for x-amz-date (header & query mode). AWS
@@ -70,15 +72,15 @@ const (
 // be signed, and AWS rejects it.
 //
 // Two modes are supported:
-//   * header-mode:  Authorization: AWS4-HMAC-SHA256 Credential=...
-//                                  SignedHeaders=...
-//                                  Signature=...
-//   * query-mode (presigned):       X-Amz-Algorithm=AWS4-HMAC-SHA256
-//                                  &X-Amz-Credential=...
-//                                  &X-Amz-Date=...
-//                                  &X-Amz-Expires=...
-//                                  &X-Amz-SignedHeaders=...
-//                                  &X-Amz-Signature=...
+//   - header-mode:  Authorization: AWS4-HMAC-SHA256 Credential=...
+//     SignedHeaders=...
+//     Signature=...
+//   - query-mode (presigned):       X-Amz-Algorithm=AWS4-HMAC-SHA256
+//     &X-Amz-Credential=...
+//     &X-Amz-Date=...
+//     &X-Amz-Expires=...
+//     &X-Amz-SignedHeaders=...
+//     &X-Amz-Signature=...
 //
 // Streaming-chunked payload (header-mode with
 // x-amz-content-sha256=STREAMING-AWS4-HMAC-SHA256-PAYLOAD) is
@@ -193,7 +195,7 @@ func verifyHeaderMode(r *http.Request, cfg authConfig, authBody string) (*sigV4R
 		return nil, sigErr(errAuthorizationHeaderError, "missing X-Amz-Content-Sha256 header")
 	}
 	if !isAcceptedPayloadHash(bodyHash) {
-		return nil, sigErr(errInvalidArgument, "X-Amz-Content-Sha256 must be UNSIGNED-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD, or a 64-char hex SHA-256")
+		return nil, sigErr(errInvalidArgument, "X-Amz-Content-Sha256 must be UNSIGNED-PAYLOAD, STREAMING-UNSIGNED-PAYLOAD-TRAILER, STREAMING-AWS4-HMAC-SHA256-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER, or a 64-char hex SHA-256")
 	}
 
 	// Verify the SIGNATURE first using the CLAIMED body hash. Only
@@ -231,12 +233,12 @@ func verifyHeaderMode(r *http.Request, cfg authConfig, authBody string) (*sigV4R
 }
 
 // isAcceptedPayloadHash returns true for the three valid forms of
-// X-Amz-Content-Sha256: the UNSIGNED-PAYLOAD sentinel, the streaming-
-// chunked sentinel, or a 64-char hex SHA-256 digest. Used as a
+// X-Amz-Content-Sha256: the UNSIGNED-PAYLOAD sentinel, AWS streaming
+// sentinels with or without trailer checksums, or a 64-char hex SHA-256 digest. Used as a
 // pre-check before signature verification so the canonical-request
 // embedding has a known shape.
 func isAcceptedPayloadHash(s string) bool {
-	if s == sigUnsignedBody || s == sigChunkAlgo {
+	if s == sigUnsignedBody || s == sigUnsignedTrailer || s == sigChunkAlgo || s == sigChunkAlgoTrailer {
 		return true
 	}
 	if len(s) != 64 {
@@ -351,7 +353,8 @@ func splitAuthHeader(body string) (credential, signedHeaders, signature string, 
 }
 
 // credentialFields is the parsed form of the Credential field:
-//   <access-key>/<date>/<region>/<service>/aws4_request
+//
+//	<access-key>/<date>/<region>/<service>/aws4_request
 type credentialFields struct {
 	AccessKey string
 	Date      string
@@ -424,11 +427,13 @@ func checkClockSkew(timestamp string) error {
 // signature, so an attacker can't trigger the body-bounded paths
 // without first authenticating). Three cases:
 //
-//   1. UNSIGNED-PAYLOAD — pass body through.
-//   2. STREAMING-AWS4-HMAC-SHA256-PAYLOAD — wrap r.Body in a
-//      chunked-decoder that verifies per-chunk signatures.
-//   3. Hex SHA-256 digest — bounded ReadAll + hash compare. The
-//      bound is maxBodyForHashedPut.
+//  1. UNSIGNED-PAYLOAD — pass body through.
+//  2. STREAMING-UNSIGNED-PAYLOAD-TRAILER — decode AWS chunk framing and discard
+//     trailer headers. The request signature already authenticated the sentinel.
+//  3. STREAMING-AWS4-HMAC-SHA256-PAYLOAD with or without trailer — wrap r.Body in a
+//     chunked-decoder that verifies per-chunk signatures.
+//  4. Hex SHA-256 digest — bounded ReadAll + hash compare. The
+//     bound is maxBodyForHashedPut.
 //
 // The hex-digest case buffers the full body in memory. Real S3
 // PutObject from rclone uses STREAMING-… for large bodies and the
@@ -437,7 +442,9 @@ func bindBody(r *http.Request, bodyHash string, signingKey []byte, signature, ti
 	switch bodyHash {
 	case sigUnsignedBody:
 		return r.Body, nil
-	case sigChunkAlgo:
+	case sigUnsignedTrailer:
+		return newUnsignedChunkedDecoder(r.Body), nil
+	case sigChunkAlgo, sigChunkAlgoTrailer:
 		dec := newChunkedDecoder(r.Body, signingKey, signature, timestamp, scope)
 		return dec, nil
 	default:

@@ -292,7 +292,7 @@ func validateCompleteParts(reqParts []completeRequestPart, manifest *multipartMa
 // into completeTmp (atomically via tmp+rename) while accumulating
 // the per-part MD5s into the composite digest:
 //
-//   composite = hex(MD5(md5_part1_bytes ‖ md5_part2_bytes ‖ ...)) + "-N"
+//	composite = hex(MD5(md5_part1_bytes ‖ md5_part2_bytes ‖ ...)) + "-N"
 //
 // The per-part MD5 bytes are the RAW 16-byte digests, NOT the hex
 // strings — this is what AWS specifies and what every S3 client
@@ -370,7 +370,7 @@ func writeCompleteResultFromManifest(w http.ResponseWriter, r *http.Request, buc
 // cleanupCompletedStaging removes the bulky staging artifacts of a
 // finished multipart upload (parts/ and complete.tmp) while leaving
 // the manifest in place. The manifest is small and serves the
-// idempotent-retry short-circuit; a future cleanup loop deletes
+// idempotent-retry short-circuit; the multipart cleanup loop deletes
 // done manifests + the durable Pebble record after the retention
 // window. Errors are logged but don't fail the request — the bytes
 // are already durable in Pebble.
@@ -401,4 +401,3 @@ func locationFor(r *http.Request, bucket, key string) string {
 	}
 	return fmt.Sprintf("%s://%s/%s/%s", scheme, host, bucket, key)
 }
-

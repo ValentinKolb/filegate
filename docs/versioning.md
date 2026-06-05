@@ -25,15 +25,17 @@ versioning:
   retention_buckets:
     - { keep_for: "1h",  max_count: -1 }    # keep all in last hour
     - { keep_for: "24h", max_count: 24 }    # ~hourly in last day
-    - { keep_for: "30d", max_count: 30 }    # ~daily in last month
-    - { keep_for: "1y",  max_count: 12 }    # ~monthly in last year
+    - { keep_for: "720h", max_count: 30 }   # ~daily in last 30d
+    - { keep_for: "8760h", max_count: 12 }  # ~monthly in last 1y
 ```
 
 `enabled: auto` only turns the feature on if every base path is btrfs.
 `enabled: on` skips the check; `enabled: off` is a hard kill switch.
 
-`retention_buckets` is intentionally empty by default: with no buckets
-configured, no live versions are pruned (operator opt-in for retention).
+`retention_buckets` defaults to the schedule shown above so an operator
+who enables versioning does not accidentally retain every captured
+version forever. Configure an explicit empty list only when you want no
+live-version pruning and have planned for the storage growth.
 
 ## Lifecycle
 

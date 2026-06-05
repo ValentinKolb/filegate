@@ -32,6 +32,19 @@ func copyObject(t *testing.T, handler http.Handler, srcBucket, srcKey, destBucke
 	return rec
 }
 
+func copyObjectWithPayloadHash(t *testing.T, handler http.Handler, srcBucket, srcKey, destBucket, destKey, payloadHash string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/"+destBucket+"/"+destKey, nil)
+	req.Host = "example.com"
+	req.Header.Set("x-amz-copy-source", "/"+srcBucket+"/"+srcKey)
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("x-amz-trailer", "x-amz-checksum-crc32")
+	signRequest(req, testAccessKey, testSecretKey, testRegion, payloadHash, time.Now())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
 // TestCopyObjectHappyPath: copy within the same mount; dest gets
 // a new entity, source is untouched, ETags match (single-MD5).
 func TestCopyObjectHappyPath(t *testing.T) {
@@ -83,6 +96,31 @@ func TestCopyObjectHappyPath(t *testing.T) {
 	handler.ServeHTTP(sRec, sReq)
 	if sRec.Code != http.StatusOK {
 		t.Errorf("source HEAD after copy status=%d, want 200", sRec.Code)
+	}
+}
+
+func TestCopyObjectAcceptsStreamingUnsignedPayloadTrailer(t *testing.T) {
+	_, handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	body := []byte("source bytes for copy with flexible checksum trailer")
+	putForTest(t, handler, mount, "src-trailer.txt", body)
+
+	rec := copyObjectWithPayloadHash(t, handler, mount, "src-trailer.txt", mount, "dst-trailer.txt", sigUnsignedTrailer)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("CopyObject with %s status=%d body=%s", sigUnsignedTrailer, rec.Code, rec.Body.String())
+	}
+
+	gReq := httptest.NewRequest(http.MethodGet, "/"+mount+"/dst-trailer.txt", nil)
+	gReq.Host = "example.com"
+	signRequestPayload(gReq, nil)
+	gRec := httptest.NewRecorder()
+	handler.ServeHTTP(gRec, gReq)
+	if gRec.Code != http.StatusOK {
+		t.Fatalf("GET dest status=%d body=%s", gRec.Code, gRec.Body.String())
+	}
+	if !bytes.Equal(gRec.Body.Bytes(), body) {
+		t.Fatalf("GET dest body=%q, want %q", gRec.Body.Bytes(), body)
 	}
 }
 

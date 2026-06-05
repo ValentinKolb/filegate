@@ -35,6 +35,23 @@ func (s *Service) createAndWriteContent(parentID FileID, fileName string, body i
 		return nil, ErrInvalidArgument
 	}
 
+	parentVP, err := s.VirtualPath(parentID)
+	if err != nil {
+		return nil, err
+	}
+	pmount, prel, vpOK := splitVirtualPath(parentVP)
+	if !vpOK {
+		return nil, ErrInvalidArgument
+	}
+	var leafRel string
+	if prel == "" {
+		leafRel = fileName
+	} else {
+		leafRel = prel + "/" + fileName
+	}
+	release := s.pathLocks.AcquirePoint(pathLockKey(pmount, leafRel))
+	defer release()
+
 	parentAbs, err := s.ResolveAbsPath(parentID)
 	if err != nil {
 		return nil, err

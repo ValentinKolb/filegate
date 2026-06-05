@@ -5,7 +5,7 @@ This document describes the intended stateless TS client pattern for Filegate.
 ## Goals
 
 - Stateless client construction
-- Scoped namespaces (`paths`, `nodes`, `uploads`, `transfers`, `search`, `index`, `stats`, `utils`)
+- Scoped namespaces (`paths`, `nodes`, `uploads`, `transfers`, `search`, `index`, `stats`, `versions`, `utils`)
 - Relay-first streaming APIs
 - Minimal runtime surprises across server and browser
 
@@ -71,18 +71,20 @@ await fg.paths.put("data/uploads/hello.txt", new TextEncoder().encode("hello\n")
 ### Conflict handling
 
 Every write defaults to `onConflict: "error"` — the server never silently
-overwrites. To opt into the old "last write wins" behavior, pass `"overwrite"`
-explicitly. To make the upload land under a different name when the target
-exists, pass `"rename"`:
+overwrites. To replace an existing file, pass `"overwrite"` explicitly. To
+make the upload land under a different name when the target exists, pass
+`"rename"`:
 
 ```ts
+import { FilegateError } from "@valentinkolb/filegate/client";
+
 // File upload
 try {
   await fg.paths.put("photos/sunset.jpg", bytes);
 } catch (e) {
-  if (e.status === 409) {
-    // e.body.existingId / e.body.existingPath tell the UI what's there.
-    const overwrite = await confirmFromUser(e.body.existingPath);
+  if (e instanceof FilegateError && e.status === 409 && e.errorResponse) {
+    // e.errorResponse.existingId / existingPath tell the UI what's there.
+    const overwrite = await confirmFromUser(e.errorResponse.existingPath);
     await fg.paths.put("photos/sunset.jpg", bytes, {
       onConflict: overwrite ? "overwrite" : "rename",
     });
@@ -147,6 +149,24 @@ Notes:
 - duplicate chunks are allowed when content matches
 - server auto-finalizes
 
+### Versions
+
+Per-file version history is REST-only and available when versioning is enabled
+on a supported mount.
+
+```ts
+const page = await fg.versions.list("<file-id>", { limit: 20 });
+const snapshot = await fg.versions.snapshot("<file-id>", "before migration");
+
+await fg.versions.pin("<file-id>", snapshot.versionId, "keep");
+const restored = await fg.versions.restore("<file-id>", snapshot.versionId, {
+  asNewFile: true,
+  name: "restored.bin",
+});
+
+console.log(restored.node.id, page.items.length);
+```
+
 ## Relay/Proxy Pattern
 
 ### Upload passthrough
@@ -184,7 +204,7 @@ This is critical for backend observability under load.
 
 - Always use explicit `new Filegate(...)`.
 - Do not rely on `process.env` defaults in browser bundles.
-- Prefer short-lived backend-minted tokens, never hardcoded long-lived secrets.
+- Filegate has no scoped browser tokens. Do not expose the Filegate bearer token in browser bundles; relay through your backend or an auth proxy you control.
 
 ## Contract Source of Truth
 

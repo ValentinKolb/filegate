@@ -1,6 +1,7 @@
 server:
   listen: ":8080"
   write_timeout: "5m"
+  shutdown_timeout: "60s"
   access_log_enabled: true
 
 auth:
@@ -24,9 +25,6 @@ jobs:
   queue_size: 8192
   thumbnail_workers: 0
   thumbnail_queue_size: 0
-  exif_workers: 0
-  exif_queue_size: 0
-  exif_fast_path_timeout: "5ms"
 
 upload:
   expiry: "24h"

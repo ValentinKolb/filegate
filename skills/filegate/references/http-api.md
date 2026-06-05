@@ -54,6 +54,10 @@ PATCH  /v1/nodes/{id}?recursiveOwnership=true|false
 DELETE /v1/nodes/{id}                             → remove subtree (no body)
 ```
 
+Directory tar downloads are preflight-bounded: max 100,000 tar entries,
+10 GiB regular-file content, and depth 128. Over-limit requests return
+`413` before headers are sent.
+
 ## Transfers (move / copy)
 
 ```
@@ -131,6 +135,24 @@ PUT /v1/uploads/chunked/{uploadId}/chunks/{index}
   }
 → may return 409 (authoritative conflict check at finalize)
 ```
+
+## Versions
+
+```
+GET    /v1/nodes/{id}/versions?cursor=&limit=       → page of versions, oldest first
+GET    /v1/nodes/{id}/versions/{versionId}/content  → version bytes
+POST   /v1/nodes/{id}/versions/snapshot
+       body: { "label": "..." }                     → new pinned version
+POST   /v1/nodes/{id}/versions/{versionId}/pin
+       body: { "label": "..." | null }              → pin/update label
+POST   /v1/nodes/{id}/versions/{versionId}/unpin    → unpin
+POST   /v1/nodes/{id}/versions/{versionId}/restore
+       body: { "asNewFile": true, "name": "..." }   → restore in place or as sibling
+DELETE /v1/nodes/{id}/versions/{versionId}          → purge that version
+```
+
+Versioning is REST-only and btrfs-backed. Unsupported mounts return 404
+with the versioning-unsupported error shape.
 
 ## Index maintenance
 

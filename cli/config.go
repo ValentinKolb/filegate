@@ -144,6 +144,7 @@ func loadConfig(configFile string) (domain.Config, error) {
 
 	cfg.Detection.PollInterval = v.GetDuration("detection.poll_interval")
 	cfg.Server.WriteTimeout = v.GetDuration("server.write_timeout")
+	cfg.Server.ShutdownTimeout = v.GetDuration("server.shutdown_timeout")
 	cfg.Detection.Backend = strings.ToLower(strings.TrimSpace(cfg.Detection.Backend))
 	if cfg.Detection.Backend == "" {
 		cfg.Detection.Backend = "auto"
@@ -160,6 +161,9 @@ func loadConfig(configFile string) (domain.Config, error) {
 	}
 	if cfg.Server.WriteTimeout <= 0 {
 		cfg.Server.WriteTimeout = 5 * time.Minute
+	}
+	if cfg.Server.ShutdownTimeout <= 0 {
+		cfg.Server.ShutdownTimeout = 60 * time.Second
 	}
 	if cfg.Upload.Expiry <= 0 {
 		cfg.Upload.Expiry = 24 * time.Hour
@@ -184,6 +188,9 @@ func loadConfig(configFile string) (domain.Config, error) {
 	}
 	if cfg.Upload.MaxChunkedUploadBytes <= 0 {
 		cfg.Upload.MaxChunkedUploadBytes = int64(50 * 1024 * 1024 * 1024)
+	}
+	if cfg.Upload.MaxChunkedUploadBytes < cfg.Upload.MaxChunkBytes {
+		return cfg, fmt.Errorf("upload.max_chunked_upload_bytes must be >= upload.max_chunk_bytes")
 	}
 	if cfg.Upload.MaxConcurrentChunkWrites <= 0 {
 		cfg.Upload.MaxConcurrentChunkWrites = defaultChunkWriteConcurrency()

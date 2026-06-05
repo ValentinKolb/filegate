@@ -12,6 +12,7 @@ You are integrating Filegate into an application. Filegate is a Linux-only HTTP 
 - **Chunked, resumable, duplicate-safe uploads** with deterministic upload IDs
 - **Tar-stream downloads** of whole subtrees
 - **On-demand thumbnails** with LRU caching for images
+- **Per-file versioning** for HTTP-mediated writes on btrfs mounts
 - **Glob-based search** scoped to virtual mounts
 - **Automatic external change detection** (btrfs find-new or polling)
 - **Bearer-token authentication** on every `/v1/*` endpoint

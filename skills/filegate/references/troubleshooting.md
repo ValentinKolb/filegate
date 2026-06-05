@@ -6,7 +6,9 @@ Symptoms → causes → fixes, ranked roughly by frequency.
 
 - **Missing `Authorization` header.** SDK construction without a token, or a fresh `fetch` call that bypasses the SDK.
 - **Wrong token format.** Must be exactly `Bearer <token>`, single space, no quotes.
-- **Daemon started without a configured token.** Check daemon config; `auth.bearer_token` is required (the daemon refuses to start without it).
+- **Daemon started without a REST token.** REST-only deployments require
+  `auth.bearer_token`. S3-only deployments may leave it empty; in that mode
+  `/v1/*` fails closed with 401 while S3 uses SigV4.
 
 ## 404 Not Found on a path that should exist
 
@@ -36,6 +38,9 @@ Full details: [`conflict-handling.md`](conflict-handling.md).
   MiB) or decoded pixels exceed `ThumbnailMaxPixels` (default 40
   megapixels). Generate the thumbnail outside Filegate or downscale the
   source first.
+- **Directory tar download exceeds preflight limits.** Directory downloads
+  are capped at 100,000 tar entries, 10 GiB regular-file content, and depth
+  128. Use S3/rclone or direct filesystem access for larger exports.
 
 For oversized **chunked-upload** parameters, the daemon returns 400 (not
 413) at `/start` with `"invalid size"` or `"invalid chunkSize"`. For
@@ -69,6 +74,18 @@ This is also returned eagerly from `POST /v1/uploads/chunked/start` — no chunk
 - **Different parameters in retry.** `uploadId = hex(sha256(parentId + ":" + filename + ":" + checksum)[0:8])`. Any change to those three → different upload session, fresh start. If you're computing the file checksum in the browser, make sure it's deterministic across reloads. (Most clients let the SDK return the `uploadId` from `/start` and don't compute it themselves.)
 - **Staging dir was cleaned up.** The default expiry is 24h. Sessions older than that are gone. Tune `upload.expiry` in daemon config if you need longer.
 
+## S3 multipart upload stuck in `committing`
+
+- Startup recovery logs `recover: committing upload ... has no durable record`
+  when a crash or forced shutdown happened after the manifest entered
+  `committing` but before the Pebble commit.
+- If the client still has the original parts list, retry
+  CompleteMultipartUpload for that upload ID. Filegate leaves the staging
+  directory intact so the retry can redrive the commit.
+- If the client is gone and the upload is abandoned, confirm the object was not
+  created, then remove the logged `.fg-uploads/s3-<uploadId>/` staging
+  directory.
+
 ## "I deleted a file but it still shows up in listings"
 
 - The change detector hasn't run yet, or ran but couldn't see the change (e.g., btrfs `find-new` race). Force a rescan: `POST /v1/index/rescan`.
@@ -86,7 +103,11 @@ This is also returned eagerly from `POST /v1/uploads/chunked/start` — no chunk
 
 ## Concurrent writes to the same file
 
-Filegate doesn't arbitrate concurrent writers — last write wins, and you may see partial states briefly. If your application has a concept of file ownership, enforce single-writer in your relay layer (e.g., a per-user-per-file lock).
+Filegate serializes its own write paths so committed mutations stay
+consistent, but it does not expose a client-visible lease/lock API. If your
+application has a concept of file ownership or edit sessions, enforce that in
+your relay layer (for example, a per-user-per-file lock) before making
+separate Filegate calls.
 
 ## Tests against Filegate are flaky
 

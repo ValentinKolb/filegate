@@ -19,9 +19,9 @@ import (
 // tests in this package — no external SDK dependency.
 //
 // payloadHash MUST be the value to embed in x-amz-content-sha256:
-//   * sigUnsignedBody for an unsigned body
-//   * sigChunkAlgo for streaming chunks (caller frames the body)
-//   * lowercase hex SHA-256 of the body otherwise
+//   - sigUnsignedBody for an unsigned body
+//   - sigChunkAlgo for streaming chunks (caller frames the body)
+//   - lowercase hex SHA-256 of the body otherwise
 func signRequest(req *http.Request, accessKey, secretKey, region string, payloadHash string, t time.Time) {
 	timestamp := t.UTC().Format("20060102T150405Z")
 	date := timestamp[:8]
@@ -198,6 +198,48 @@ func TestVerifyAcceptsUnsignedPayload(t *testing.T) {
 	}
 	if !bytes.Equal(got, body) {
 		t.Errorf("body = %q, want %q", got, body)
+	}
+}
+
+func TestVerifyAcceptsStreamingUnsignedPayloadTrailer(t *testing.T) {
+	body := []byte("hello world")
+	encoded := encodeUnsignedChunks([][]byte{[]byte("hello "), []byte("world")}, "x-amz-checksum-crc32:AAAAAA==")
+	req := httptest.NewRequest(http.MethodPut, "/bucket/key", bytes.NewReader(encoded))
+	req.Host = "example.com"
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("x-amz-trailer", "x-amz-checksum-crc32")
+	req.Header.Set("x-amz-decoded-content-length", fmt.Sprintf("%d", len(body)))
+	signRequest(req, "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", "us-east-1", sigUnsignedTrailer, time.Now())
+
+	res, sigErr := verifyRequest(req, newTestAuthConfig())
+	if sigErr != nil {
+		t.Fatalf("verifyRequest: %s", sigErr.Error())
+	}
+	got, err := io.ReadAll(res.BodyReader)
+	if err != nil {
+		t.Fatalf("body read: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("body = %q, want %q", got, body)
+	}
+}
+
+func TestAcceptedPayloadHashSentinels(t *testing.T) {
+	hexHash := strings.Repeat("a", 64)
+	for _, payloadHash := range []string{
+		sigUnsignedBody,
+		sigUnsignedTrailer,
+		sigChunkAlgo,
+		sigChunkAlgoTrailer,
+		hexHash,
+	} {
+		if !isAcceptedPayloadHash(payloadHash) {
+			t.Errorf("isAcceptedPayloadHash(%q) = false, want true", payloadHash)
+		}
+	}
+
+	if isAcceptedPayloadHash("STREAMING-UNSIGNED-PAYLOAD") {
+		t.Errorf("unsupported streaming sentinel was accepted")
 	}
 }
 
@@ -378,6 +420,53 @@ func TestChunkedDecoderRejectsBadSignature(t *testing.T) {
 	}
 }
 
+func TestUnsignedChunkedDecoderRoundTripWithTrailer(t *testing.T) {
+	body := []byte("hello world")
+	encoded := encodeUnsignedChunks([][]byte{[]byte("hello "), []byte("world")}, "x-amz-checksum-crc32:AAAAAA==")
+
+	dec := newUnsignedChunkedDecoder(io.NopCloser(bytes.NewReader(encoded)))
+	got, err := io.ReadAll(dec)
+	if err != nil {
+		t.Fatalf("decoder: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("decoded = %q, want %q", got, body)
+	}
+}
+
+func TestUnsignedChunkedDecoderRejectsBadChunkCRLF(t *testing.T) {
+	encoded := []byte("5\r\nhello\n0\r\n\r\n")
+
+	dec := newUnsignedChunkedDecoder(io.NopCloser(bytes.NewReader(encoded)))
+	_, err := io.ReadAll(dec)
+	if !errors.Is(err, errChunkTrailerMismatch) {
+		t.Fatalf("want errChunkTrailerMismatch, got %v", err)
+	}
+}
+
+func TestChunkedDecoderConsumesTrailerHeaders(t *testing.T) {
+	secret := "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+	region := "us-east-1"
+	timestamp := "20230101T000000Z"
+	date := "20230101"
+	scopeStr := scope(date, region, sigService)
+	signingKey := derivedSigningKey(secret, date, region, sigService)
+	seedSig := "deadbeef"
+
+	encoded, _ := encodeChunks(t, [][]byte{[]byte("hello")}, signingKey, seedSig, timestamp, scopeStr)
+	encoded = bytes.TrimSuffix(encoded, []byte("\r\n"))
+	encoded = append(encoded, []byte("x-amz-checksum-crc32:AAAAAA==\r\n\r\n")...)
+
+	dec := newChunkedDecoder(io.NopCloser(bytes.NewReader(encoded)), signingKey, seedSig, timestamp, scopeStr)
+	got, err := readAllChunked(dec)
+	if err != nil {
+		t.Fatalf("decoder: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("decoded = %q", got)
+	}
+}
+
 // urlEncode is a thin wrapper using net/url's QueryEscape so query
 // parameters in tests are valid. Not exported — tests-only.
 func urlEncode(s string) string {
@@ -398,6 +487,22 @@ func urlEncode(s string) string {
 		}
 	}
 	return string(out)
+}
+
+func encodeUnsignedChunks(chunks [][]byte, trailerLines ...string) []byte {
+	var buf bytes.Buffer
+	for _, body := range chunks {
+		fmt.Fprintf(&buf, "%x\r\n", len(body))
+		buf.Write(body)
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("0\r\n")
+	for _, line := range trailerLines {
+		buf.WriteString(line)
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("\r\n")
+	return buf.Bytes()
 }
 
 // encodeChunks frames the AWS streaming-chunked payload format from

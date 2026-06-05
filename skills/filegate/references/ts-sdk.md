@@ -80,6 +80,7 @@ fg.transfers    // TransfersClient — move / copy
 fg.search       // SearchClient   — glob
 fg.index        // IndexClient    — rescan, resolve
 fg.stats        // StatsClient    — daemon stats
+fg.versions     // VersionsClient — per-file version history
 fg.baseUrl      // string         — the configured base URL
 ```
 
