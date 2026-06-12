@@ -307,6 +307,14 @@ func (p *Poller) scanDirectory(absDir string) []Event {
 			mtime := info.ModTime().UnixMilli()
 			if _, exists := p.knownDirs[absPath]; !exists {
 				events = append(events, Event{Type: EventCreated, Base: base, AbsPath: absPath, IsDir: true, MtimeMS: mtime})
+				p.knownDirs[absPath] = mtime
+				// A directory that appears fully formed within one poll
+				// interval (mkdir -p, mv of a tree into the mount) is
+				// registered with its final mtime and never goes dirty —
+				// scanDirectory only looks one level deep, so its
+				// contents would stay undiscovered forever. Walk it now.
+				events = append(events, p.adoptSubtree(absPath, base)...)
+				continue
 			}
 			p.knownDirs[absPath] = mtime
 			continue
@@ -329,6 +337,45 @@ func (p *Poller) scanDirectory(absDir string) []Event {
 		}
 	}
 
+	return events
+}
+
+// adoptSubtree walks a newly-discovered directory, registers every
+// descendant in the tracking maps, and returns Created events for
+// them. Caller must hold p.mu (poll/scanDirectory do).
+func (p *Poller) adoptSubtree(dirPath, base string) []Event {
+	events := make([]Event, 0, 16)
+	_ = filepath.WalkDir(dirPath, func(current string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if current == dirPath {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		mtime := info.ModTime().UnixMilli()
+		if info.IsDir() {
+			if _, exists := p.knownDirs[current]; !exists {
+				events = append(events, Event{Type: EventCreated, Base: base, AbsPath: current, IsDir: true, MtimeMS: mtime})
+			}
+			p.knownDirs[current] = mtime
+			return nil
+		}
+		if _, exists := p.knownFiles[current]; !exists {
+			events = append(events, Event{Type: EventCreated, Base: base, AbsPath: current, IsDir: false, Size: info.Size(), MtimeMS: mtime})
+		}
+		p.knownFiles[current] = fileTrack{size: info.Size(), mtimeMS: mtime, checkEvery: 1}
+		return nil
+	})
 	return events
 }
 
