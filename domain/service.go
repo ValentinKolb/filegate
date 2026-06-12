@@ -394,6 +394,12 @@ func safeResolvedPath(candidatePath, basePath string) (string, error) {
 	return realPath, nil
 }
 
+// maxParentChainDepth bounds the parent-chain walks in ResolveAbsPath
+// and VirtualPath. A corrupted index with a parent cycle would
+// otherwise spin these loops forever; resolveRootID and the pebble-side
+// derivePath already guard against the same condition.
+const maxParentChainDepth = 4096
+
 func (s *Service) ResolveAbsPath(id FileID) (string, error) {
 	if id.IsZero() {
 		return "", ErrInvalidArgument
@@ -401,7 +407,10 @@ func (s *Service) ResolveAbsPath(id FileID) (string, error) {
 
 	segments := make([]string, 0, 8)
 	cur := id
-	for {
+	for depth := 0; ; depth++ {
+		if depth >= maxParentChainDepth {
+			return "", fmt.Errorf("parent chain too deep for %s (possible index cycle)", id)
+		}
 		e, err := s.idx.GetEntity(cur)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
@@ -442,7 +451,10 @@ func (s *Service) VirtualPath(id FileID) (string, error) {
 
 	segments := make([]string, 0, 8)
 	cur := id
-	for {
+	for depth := 0; ; depth++ {
+		if depth >= maxParentChainDepth {
+			return "", fmt.Errorf("parent chain too deep for %s (possible index cycle)", id)
+		}
 		e, err := s.idx.GetEntity(cur)
 		if err != nil {
 			return "", err
