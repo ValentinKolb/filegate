@@ -163,6 +163,13 @@ func (d *BTRFSDetector) poll(ctx context.Context) []Event {
 			continue
 		}
 		if current < prev {
+			// Generation went backwards: the subvolume was rolled back,
+			// replaced, or recreated. The delta base is meaningless now —
+			// resync from the new generation and rescan the mount instead
+			// of silently skipping every cycle forever.
+			log.Printf("[filegate] btrfs generation went backwards for %q (%d -> %d): scheduling rescan", basePath, prev, current)
+			d.lastGeneration[basePath] = current
+			batch = append(batch, Event{Type: EventUnknown, Base: basePath, AbsPath: basePath, IsDir: true})
 			continue
 		}
 

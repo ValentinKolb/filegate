@@ -128,6 +128,40 @@ func TestBTRFSDetectorPollRunsDeltaWhenGenerationUnchanged(t *testing.T) {
 	}
 }
 
+// TestBTRFSDetectorRecoversWhenGenerationGoesBackwards pins the
+// rollback/recreate case: a generation below the stored one used to be
+// skipped silently on every cycle, leaving the mount undetected forever.
+func TestBTRFSDetectorRecoversWhenGenerationGoesBackwards(t *testing.T) {
+	base := t.TempDir()
+
+	prev := runBTRFSCommand
+	t.Cleanup(func() { runBTRFSCommand = prev })
+	runBTRFSCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 3 && args[0] == "subvolume" && args[1] == "show" {
+			return []byte("Generation: 5\n"), nil
+		}
+		return nil, nil
+	}
+
+	d := NewBTRFSDetector([]string{base}, time.Second)
+	d.lastGeneration[base] = 10
+
+	batch := d.poll(context.Background())
+	foundUnknown := false
+	for _, ev := range batch {
+		if ev.Type == EventUnknown && ev.AbsPath == base {
+			foundUnknown = true
+			break
+		}
+	}
+	if !foundUnknown {
+		t.Fatalf("expected EventUnknown after generation rollback, batch=%v", batch)
+	}
+	if got := d.lastGeneration[base]; got != 5 {
+		t.Fatalf("last generation=%d, want=5", got)
+	}
+}
+
 func TestBTRFSDetectorAddsUnknownWhenOnlyMarkerAdvances(t *testing.T) {
 	base := t.TempDir()
 
