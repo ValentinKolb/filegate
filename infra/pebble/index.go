@@ -88,9 +88,15 @@ var indexFormatVersionKey = []byte{0x00, 'f', 'g', ':', 'i', 'd', 'x', ':', 'f',
 
 // Index is a thread-safe metadata store backed by a Pebble database.
 type Index struct {
-	mu       sync.RWMutex
-	db       *pebble.DB
-	closed   bool
+	mu     sync.RWMutex
+	db     *pebble.DB
+	closed bool
+
+	// fatalErr has its own mutex because markFatal is called from
+	// recoverIntoError while the calling goroutine still holds i.mu
+	// (read-locked), and from Pebble's logger goroutines. Taking i.mu
+	// here would self-deadlock.
+	fatalMu  sync.Mutex
 	fatalErr error
 }
 
@@ -146,21 +152,24 @@ func (l *nonFatalPebbleLogger) Fatalf(format string, args ...interface{}) {
 }
 
 func (i *Index) markFatal(err error) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	i.fatalMu.Lock()
+	defer i.fatalMu.Unlock()
 	if i.fatalErr == nil {
 		i.fatalErr = err
 	}
+}
+
+func (i *Index) loadFatal() error {
+	i.fatalMu.Lock()
+	defer i.fatalMu.Unlock()
+	return i.fatalErr
 }
 
 func (i *Index) currentStateLocked() error {
 	if i.closed {
 		return ErrIndexClosed
 	}
-	if i.fatalErr != nil {
-		return i.fatalErr
-	}
-	return nil
+	return i.loadFatal()
 }
 
 func normalizeIndexErr(err error) error {
@@ -598,14 +607,13 @@ func (i *Index) LookupChild(parentID domain.FileID, name string) (out *domain.Di
 	return nil, domain.ErrNotFound
 }
 
-func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) ([]domain.DirEntry, error) {
+func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) (entries []domain.DirEntry, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return nil, normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -637,7 +645,7 @@ func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) ([
 	}
 	defer iter.Close()
 
-	entries := make([]domain.DirEntry, 0, limit)
+	entries = make([]domain.DirEntry, 0, limit)
 	for ok := iter.SeekGE(start); ok && iter.Valid(); ok = iter.Next() {
 		k := iter.Key()
 		if !bytes.HasPrefix(k, prefix) {
@@ -660,21 +668,20 @@ func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) ([
 			break
 		}
 	}
-	return entries, retErr
+	return entries, nil
 }
 
 // LookupMultipartUploadRecord returns the durable upload record
 // for uploadID, or domain.ErrNotFound. Records are JSON-encoded
 // blobs — fixed schema, small enough that binary encoding wouldn't
 // pay for itself.
-func (i *Index) LookupMultipartUploadRecord(uploadID [16]byte) (*domain.MultipartUploadRecord, error) {
+func (i *Index) LookupMultipartUploadRecord(uploadID [16]byte) (out *domain.MultipartUploadRecord, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return nil, normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 	v, closer, err := i.db.Get(multipartUploadKey(uploadID))
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
@@ -687,17 +694,16 @@ func (i *Index) LookupMultipartUploadRecord(uploadID [16]byte) (*domain.Multipar
 	if err := json.Unmarshal(v, &record); err != nil {
 		return nil, fmt.Errorf("decode multipart record: %w", err)
 	}
-	return &record, retErr
+	return &record, nil
 }
 
-func (i *Index) LookupActiveMultipartUpload(uploadID string) (*domain.ActiveMultipartUpload, error) {
+func (i *Index) LookupActiveMultipartUpload(uploadID string) (out *domain.ActiveMultipartUpload, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return nil, normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 	v, closer, err := i.db.Get(activeMultipartUploadKey(uploadID))
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
@@ -710,17 +716,16 @@ func (i *Index) LookupActiveMultipartUpload(uploadID string) (*domain.ActiveMult
 	if err := json.Unmarshal(v, &upload); err != nil {
 		return nil, fmt.Errorf("decode active multipart upload: %w", err)
 	}
-	return &upload, retErr
+	return &upload, nil
 }
 
-func (i *Index) ListActiveMultipartUploads(bucket string) ([]domain.ActiveMultipartUpload, error) {
+func (i *Index) ListActiveMultipartUploads(bucket string) (uploads []domain.ActiveMultipartUpload, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return nil, normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 
 	prefix := activeMultipartUploadPrefix()
 	iterOpts := &pebble.IterOptions{LowerBound: prefix}
@@ -733,7 +738,6 @@ func (i *Index) ListActiveMultipartUploads(bucket string) ([]domain.ActiveMultip
 	}
 	defer iter.Close()
 
-	var uploads []domain.ActiveMultipartUpload
 	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
 		if !bytes.HasPrefix(iter.Key(), prefix) {
 			break
@@ -752,17 +756,16 @@ func (i *Index) ListActiveMultipartUploads(bucket string) ([]domain.ActiveMultip
 		}
 		return uploads[i].Initiated < uploads[j].Initiated
 	})
-	return uploads, retErr
+	return uploads, nil
 }
 
-func (i *Index) ListActiveMultipartParts(uploadID string) ([]domain.ActiveMultipartPart, error) {
+func (i *Index) ListActiveMultipartParts(uploadID string) (parts []domain.ActiveMultipartPart, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return nil, normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 
 	prefix := activeMultipartPartPrefix(uploadID)
 	iterOpts := &pebble.IterOptions{LowerBound: prefix}
@@ -775,7 +778,6 @@ func (i *Index) ListActiveMultipartParts(uploadID string) ([]domain.ActiveMultip
 	}
 	defer iter.Close()
 
-	var parts []domain.ActiveMultipartPart
 	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
 		if !bytes.HasPrefix(iter.Key(), prefix) {
 			break
@@ -787,17 +789,16 @@ func (i *Index) ListActiveMultipartParts(uploadID string) ([]domain.ActiveMultip
 		parts = append(parts, part)
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
-	return parts, retErr
+	return parts, nil
 }
 
-func (i *Index) LookupByFlatKey(mountName, relPath string) (domain.FileID, error) {
+func (i *Index) LookupByFlatKey(mountName, relPath string) (id domain.FileID, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return domain.FileID{}, normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 	v, closer, err := i.db.Get(flatKeyForPath(mountName, relPath))
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
@@ -809,9 +810,8 @@ func (i *Index) LookupByFlatKey(mountName, relPath string) (domain.FileID, error
 	if len(v) != 16 {
 		return domain.FileID{}, fmt.Errorf("flat-key value length=%d, want 16", len(v))
 	}
-	var id domain.FileID
 	copy(id[:], v)
-	return id, retErr
+	return id, nil
 }
 
 // IterateFlatKeys walks flat-key entries under mountName whose
@@ -819,14 +819,13 @@ func (i *Index) LookupByFlatKey(mountName, relPath string) (domain.FileID, error
 // greater bound on relPath (empty disables). limit caps fn invocations
 // (zero = unlimited). fn returns (continue, error) — return false to
 // stop iteration without an error.
-func (i *Index) IterateFlatKeys(mountName, prefix, after string, limit int, fn func(relPath string, id domain.FileID) (bool, error)) error {
+func (i *Index) IterateFlatKeys(mountName, prefix, after string, limit int, fn func(relPath string, id domain.FileID) (bool, error)) (err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 
 	mountPrefix := flatKeyMountPrefix(mountName)
 	scanPrefix := append(append([]byte(nil), mountPrefix...), []byte(prefix)...)
@@ -875,7 +874,7 @@ func (i *Index) IterateFlatKeys(mountName, prefix, after string, limit int, fn f
 			break
 		}
 	}
-	return retErr
+	return nil
 }
 
 func (i *Index) ListEntities() ([]domain.Entity, error) {
@@ -890,14 +889,13 @@ func (i *Index) ListEntities() ([]domain.Entity, error) {
 	return out, nil
 }
 
-func (i *Index) ForEachEntity(fn func(domain.Entity) error) error {
+func (i *Index) ForEachEntity(fn func(domain.Entity) error) (err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 	prefix := []byte{familyEntity}
 	iterOpts := &pebble.IterOptions{LowerBound: prefix}
 	if upper := prefixUpperBound(prefix); upper != nil {
@@ -927,7 +925,7 @@ func (i *Index) ForEachEntity(fn func(domain.Entity) error) error {
 			return err
 		}
 	}
-	return retErr
+	return nil
 }
 
 // GetVersion returns the metadata for a single version, or domain.ErrNotFound.
@@ -957,14 +955,13 @@ func (i *Index) GetVersion(fileID domain.FileID, versionID domain.VersionID) (ou
 // (oldest first). The `after` cursor is the VersionID returned at the end
 // of the previous page; pass the zero VersionID to start from the beginning.
 // limit ≤ 0 defaults to 100, limit > 1000 caps to 1000.
-func (i *Index) ListVersions(fileID domain.FileID, after domain.VersionID, limit int) ([]domain.VersionMeta, error) {
+func (i *Index) ListVersions(fileID domain.FileID, after domain.VersionID, limit int) (out []domain.VersionMeta, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return nil, normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 	if limit <= 0 {
 		limit = 100
 	}
@@ -991,7 +988,7 @@ func (i *Index) ListVersions(fileID domain.FileID, after domain.VersionID, limit
 	}
 	defer iter.Close()
 
-	out := make([]domain.VersionMeta, 0, limit)
+	out = make([]domain.VersionMeta, 0, limit)
 	for ok := iter.SeekGE(start); ok && iter.Valid() && len(out) < limit; ok = iter.Next() {
 		k := iter.Key()
 		if !bytes.HasPrefix(k, prefix) || len(k) != 1+16+16 {
@@ -1003,7 +1000,7 @@ func (i *Index) ListVersions(fileID domain.FileID, after domain.VersionID, limit
 		}
 		out = append(out, meta)
 	}
-	return out, retErr
+	return out, nil
 }
 
 // LatestVersionTimestamp returns the Timestamp of the newest version of
@@ -1047,14 +1044,13 @@ func (i *Index) LatestVersionTimestamp(fileID domain.FileID) (ts int64, err erro
 // versions in ascending Timestamp order. Memory is bounded to one
 // file's versions at a time, which makes the pass safe even on indexes
 // with millions of versions across many files.
-func (i *Index) ForEachFileVersions(fn func(fileID domain.FileID, versions []domain.VersionMeta) error) error {
+func (i *Index) ForEachFileVersions(fn func(fileID domain.FileID, versions []domain.VersionMeta) error) (err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 
 	prefix := []byte{familyVersion}
 	iterOpts := &pebble.IterOptions{LowerBound: prefix}
@@ -1103,7 +1099,7 @@ func (i *Index) ForEachFileVersions(fn func(fileID domain.FileID, versions []dom
 	if err := flush(); err != nil {
 		return err
 	}
-	return retErr
+	return nil
 }
 
 // MarkVersionsDeleted sets DeletedAt = deletedAt on every version of
@@ -1811,14 +1807,13 @@ func (b *batch) DelVersion(fileID domain.FileID, versionID domain.VersionID) {
 	b.setErr(b.b.Delete(versionKey(fileID, versionID), nil))
 }
 
-func (i *Index) Batch(fn func(domain.Batch) error) error {
+func (i *Index) Batch(fn func(domain.Batch) error) (err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
 		return normalizeIndexErr(stateErr)
 	}
-	var retErr error
-	defer i.recoverIntoError(&retErr)
+	defer i.recoverIntoError(&err)
 	// Indexed batch is required because PutEntity reads the previous
 	// entity to detect a same-id rename (so it can drop the stale child
 	// entry under the old parent in the same atomic write). NewBatch
@@ -1832,11 +1827,7 @@ func (i *Index) Batch(fn func(domain.Batch) error) error {
 	if wrap.err != nil {
 		return wrap.err
 	}
-	commitErr := normalizeIndexErr(b.Commit(pebble.Sync))
-	if commitErr != nil {
-		return commitErr
-	}
-	return retErr
+	return normalizeIndexErr(b.Commit(pebble.Sync))
 }
 
 func (i *Index) recoverIntoError(target *error) {

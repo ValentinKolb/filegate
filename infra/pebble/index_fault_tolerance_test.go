@@ -104,6 +104,37 @@ func TestIndexCloseRaceNoPanic(t *testing.T) {
 	}
 }
 
+// TestPanicInBatchIsRecoveredAsError pins two past failure modes of the
+// panic-recovery path: (1) recoverIntoError called markFatal, which took
+// i.mu for writing while the panicking goroutine still held the read
+// lock — a self-deadlock on every recovered panic; (2) several methods
+// recovered into a local variable instead of a named return slot, so the
+// caller saw a nil error with zero-value results.
+func TestPanicInBatchIsRecoveredAsError(t *testing.T) {
+	idx, err := Open(t.TempDir(), 8<<20)
+	if err != nil {
+		t.Fatalf("open index: %v", err)
+	}
+	defer idx.Close()
+
+	err = idx.Batch(func(b domain.Batch) error { panic("injected") })
+	if err == nil {
+		t.Fatal("batch with panicking fn returned nil error")
+	}
+	if !errors.Is(err, ErrIndexUnavailable) {
+		t.Fatalf("batch err=%v, want ErrIndexUnavailable", err)
+	}
+
+	// The recovered panic must mark the whole index unavailable.
+	id := domain.FileID(uuid.MustParse("019cb9ae-76c1-7807-ba50-cbb05a08ec6c"))
+	if _, err := idx.GetEntity(id); !errors.Is(err, ErrIndexUnavailable) {
+		t.Fatalf("get after panic err=%v, want ErrIndexUnavailable", err)
+	}
+	if _, err := idx.ListChildren(domain.FileID{}, "", 10); !errors.Is(err, ErrIndexUnavailable) {
+		t.Fatalf("list after panic err=%v, want ErrIndexUnavailable", err)
+	}
+}
+
 func TestIndexReturnsClosedForBatchAfterClose(t *testing.T) {
 	idx, err := Open(t.TempDir(), 8<<20)
 	if err != nil {
