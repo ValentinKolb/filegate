@@ -175,7 +175,14 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 	created := false
 	var preserveID *FileID
 	if existingID, lookupErr := s.ResolvePath(vp); lookupErr == nil {
-		// Overwrite — preserve existing fileID.
+		// Overwrite — preserve existing fileID. Hold the file-id lock
+		// through the install so versioning ops (Snapshot/Pin/Restore)
+		// on the same id can't interleave; mirrors WriteObjectS3's
+		// overwrite path. Acquired after the path-lock per the
+		// documented lock order.
+		fileMu := s.versionLocks.Acquire(existingID)
+		fileMu.Lock()
+		defer fileMu.Unlock()
 		existingMeta, gErr := s.GetFile(existingID)
 		if gErr != nil {
 			return MultipartCompleteResult{}, gErr
