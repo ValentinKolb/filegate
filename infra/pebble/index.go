@@ -586,6 +586,14 @@ func (i *Index) LookupChild(parentID domain.FileID, name string) (out *domain.Di
 		return nil, normalizeIndexErr(stateErr)
 	}
 	defer i.recoverIntoError(&err)
+	return i.lookupChildLocked(parentID, name)
+}
+
+// lookupChildLocked is LookupChild without lock acquisition or panic
+// recovery. Callers must hold i.mu (read or write). ListChildren needs
+// this because re-acquiring the read lock from a goroutine that already
+// holds it deadlocks once a writer is queued in between.
+func (i *Index) lookupChildLocked(parentID domain.FileID, name string) (*domain.DirEntry, error) {
 	for _, isDir := range []bool{true, false} {
 		v, closer, err := i.db.Get(childKey(parentID, isDir, name))
 		if err != nil {
@@ -625,7 +633,7 @@ func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) (e
 	start := prefix
 	cursorType := byte(0)
 	if after != "" {
-		entry, err := i.LookupChild(parentID, after)
+		entry, err := i.lookupChildLocked(parentID, after)
 		if err != nil && !errors.Is(err, domain.ErrNotFound) {
 			return nil, err
 		}
