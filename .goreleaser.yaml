@@ -59,6 +59,13 @@ nfpms:
       - src: packaging/config/conf.yaml
         dst: /etc/filegate/conf.yaml
         type: config|noreplace
+        # The config carries the REST bearer token and S3 secrets —
+        # keep it out of world-readable reach while letting the
+        # service user (group filegate, created in preinstall) read it.
+        file_info:
+          mode: 0640
+          owner: root
+          group: filegate
       - src: packaging/systemd/filegate.service
         dst: /lib/systemd/system/filegate.service
       - dst: /var/lib/filegate

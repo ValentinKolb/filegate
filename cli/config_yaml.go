@@ -70,7 +70,11 @@ func writeConfigDocumentAtomic(path string, backup bool, doc *yaml.Node) (config
 		return configWriteResult{}, err
 	}
 
-	mode := os.FileMode(0o644)
+	// New config files default to owner-only: they carry the REST
+	// bearer token and S3 secrets. Existing files keep their mode
+	// (the package ships /etc/filegate/conf.yaml as root:filegate
+	// 0640 so the service user can read it).
+	mode := os.FileMode(0o600)
 	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	} else if !os.IsNotExist(err) {
