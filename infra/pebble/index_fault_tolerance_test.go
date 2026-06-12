@@ -130,7 +130,7 @@ func TestPanicInBatchIsRecoveredAsError(t *testing.T) {
 	if _, err := idx.GetEntity(id); !errors.Is(err, ErrIndexUnavailable) {
 		t.Fatalf("get after panic err=%v, want ErrIndexUnavailable", err)
 	}
-	if _, err := idx.ListChildren(domain.FileID{}, "", 10); !errors.Is(err, ErrIndexUnavailable) {
+	if _, err := idx.ListChildren(domain.FileID{}, domain.ChildCursor{}, 10); !errors.Is(err, ErrIndexUnavailable) {
 		t.Fatalf("list after panic err=%v, want ErrIndexUnavailable", err)
 	}
 }

@@ -215,9 +215,42 @@ type TransferRequest struct {
 }
 
 // ListedNodes is a paginated response for directory listing operations.
+// NextCursor is an opaque token (see ChildCursor); clients pass it back
+// verbatim to fetch the next page.
 type ListedNodes struct {
 	Items      []FileMeta `json:"items"`
 	NextCursor string     `json:"nextCursor,omitempty"`
+}
+
+// ChildCursor is the typed pagination cursor for Index.ListChildren.
+// The zero value (empty Name) means "start at the beginning". IsDir
+// disambiguates the cursor's sort zone — directories order before files
+// in listings, so a bare name cannot identify a resume position once
+// the entry it referred to is gone.
+type ChildCursor struct {
+	Name  string
+	IsDir bool
+}
+
+// EncodeChildCursor renders a directory entry as the opaque wire token
+// for ListedNodes.NextCursor: "d/<name>" for directories, "f/<name>"
+// for files. The "/" separator makes the form unambiguous — entry
+// names can never contain a slash.
+func EncodeChildCursor(e DirEntry) string {
+	if e.IsDir {
+		return "d/" + e.Name
+	}
+	return "f/" + e.Name
+}
+
+// ParseChildCursor decodes a wire token produced by EncodeChildCursor.
+// Returns ok=false for any other shape (notably legacy bare-name
+// cursors, which callers resolve via a child lookup instead).
+func ParseChildCursor(token string) (ChildCursor, bool) {
+	if len(token) < 3 || token[1] != '/' || (token[0] != 'd' && token[0] != 'f') {
+		return ChildCursor{}, false
+	}
+	return ChildCursor{Name: token[2:], IsDir: token[0] == 'd'}, true
 }
 
 // MountEntry describes a configured mount point with its name, ID, and filesystem path.

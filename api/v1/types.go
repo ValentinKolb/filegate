@@ -33,6 +33,10 @@ type OwnershipView struct {
 }
 
 // Node represents a file or directory with its metadata and optional children.
+//
+// NextCursor is an opaque pagination token: pass it back verbatim as the
+// `cursor` query parameter to fetch the next page of children. Clients
+// must not construct or interpret it.
 type Node struct {
 	ID         string            `json:"id"`
 	Type       string            `json:"type"`

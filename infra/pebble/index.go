@@ -588,14 +588,6 @@ func (i *Index) LookupChild(parentID domain.FileID, name string) (out *domain.Di
 		return nil, normalizeIndexErr(stateErr)
 	}
 	defer i.recoverIntoError(&err)
-	return i.lookupChildLocked(parentID, name)
-}
-
-// lookupChildLocked is LookupChild without lock acquisition or panic
-// recovery. Callers must hold i.mu (read or write). ListChildren needs
-// this because re-acquiring the read lock from a goroutine that already
-// holds it deadlocks once a writer is queued in between.
-func (i *Index) lookupChildLocked(parentID domain.FileID, name string) (*domain.DirEntry, error) {
 	for _, isDir := range []bool{true, false} {
 		v, closer, err := i.db.Get(childKey(parentID, isDir, name))
 		if err != nil {
@@ -617,7 +609,7 @@ func (i *Index) lookupChildLocked(parentID domain.FileID, name string) (*domain.
 	return nil, domain.ErrNotFound
 }
 
-func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) (entries []domain.DirEntry, err error) {
+func (i *Index) ListChildren(parentID domain.FileID, after domain.ChildCursor, limit int) (entries []domain.DirEntry, err error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	if stateErr := i.currentStateLocked(); stateErr != nil {
@@ -633,16 +625,14 @@ func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) (e
 
 	prefix := childPrefix(parentID)
 	start := prefix
-	cursorType := byte(0)
-	if after != "" {
-		entry, err := i.lookupChildLocked(parentID, after)
-		if err != nil && !errors.Is(err, domain.ErrNotFound) {
-			return nil, err
-		}
-		if err == nil {
-			cursorType = childTypeByte(entry.IsDir)
-			start = childKey(parentID, entry.IsDir, after)
-		}
+	if after.Name != "" {
+		// Strict-greater seek past the cursor's exact key position.
+		// Names cannot contain 0x00, so key+0x00 sorts between the
+		// cursor and every later sibling. The cursor entry does not
+		// need to exist anymore — no lookup, no special casing for
+		// entries deleted between pages.
+		startKey := childKey(parentID, after.IsDir, after.Name)
+		start = append(append([]byte(nil), startKey...), 0x00)
 	}
 
 	iterOpts := &pebble.IterOptions{LowerBound: prefix}
@@ -664,11 +654,7 @@ func (i *Index) ListChildren(parentID domain.FileID, after string, limit int) (e
 		if len(k) <= len(prefix)+2 {
 			continue
 		}
-		kind := k[len(prefix)]
 		name := string(k[len(prefix)+2:])
-		if after != "" && kind == cursorType && name <= after {
-			continue
-		}
 		entry, err := decodeChild(name, iter.Value())
 		if err != nil {
 			continue

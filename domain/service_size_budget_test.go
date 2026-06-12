@@ -91,11 +91,11 @@ func (f *fakeIndex) LookupChild(parentID FileID, name string) (*DirEntry, error)
 	return nil, ErrNotFound
 }
 
-func (f *fakeIndex) ListChildren(parentID FileID, after string, limit int) ([]DirEntry, error) {
+func (f *fakeIndex) ListChildren(parentID FileID, after ChildCursor, limit int) ([]DirEntry, error) {
 	all := f.children[parentID]
 	out := make([]DirEntry, 0, len(all))
 	for _, c := range all {
-		if after != "" && c.Name <= after {
+		if after.Name != "" && c.Name <= after.Name {
 			continue
 		}
 		out = append(out, c)

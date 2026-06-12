@@ -13,7 +13,11 @@ export interface OwnershipView {
   mode: string;
 }
 
-/** A file or directory node. */
+/** A file or directory node.
+ *
+ * `nextCursor` is an opaque pagination token: pass it back verbatim as
+ * the `cursor` option to fetch the next page of children. Do not
+ * construct or interpret it. */
 export interface Node {
   id: string;
   type: "file" | "directory";

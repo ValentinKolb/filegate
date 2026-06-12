@@ -729,13 +729,26 @@ func (s *Service) ListNodeChildren(parentID FileID, cursor string, pageSize int,
 	if meta.Type != "directory" {
 		return nil, ErrInvalidArgument
 	}
+	var after ChildCursor
 	if cursor != "" {
-		if _, err := s.idx.LookupChild(parentID, cursor); err != nil {
-			return nil, ErrInvalidArgument
+		parsed, ok := ParseChildCursor(cursor)
+		if !ok {
+			// Legacy bare-name cursor: resolve its sort zone via a
+			// lookup, exactly like the pre-typed-cursor behavior —
+			// including ErrInvalidArgument when the name is unknown.
+			// Typed tokens never hit this path, so pagination with a
+			// server-issued NextCursor survives concurrent deletion
+			// of the cursor entry.
+			entry, err := s.idx.LookupChild(parentID, cursor)
+			if err != nil {
+				return nil, ErrInvalidArgument
+			}
+			parsed = ChildCursor{Name: entry.Name, IsDir: entry.IsDir}
 		}
+		after = parsed
 	}
 
-	entries, err := s.idx.ListChildren(parentID, cursor, pageSize+1)
+	entries, err := s.idx.ListChildren(parentID, after, pageSize+1)
 	if err != nil {
 		return nil, err
 	}
@@ -773,7 +786,7 @@ func (s *Service) ListNodeChildren(parentID FileID, cursor string, pageSize int,
 
 	listed := &ListedNodes{Items: items}
 	if hasMore && len(entries) > 0 {
-		listed.NextCursor = entries[len(entries)-1].Name
+		listed.NextCursor = EncodeChildCursor(entries[len(entries)-1])
 	}
 	return listed, nil
 }
@@ -2785,7 +2798,7 @@ func (s *Service) RemoveAbsPath(absPath string) error {
 }
 
 func (s *Service) listAllChildren(parentID FileID) ([]DirEntry, error) {
-	cursor := ""
+	var cursor ChildCursor
 	out := make([]DirEntry, 0, 32)
 	for {
 		chunk, err := s.idx.ListChildren(parentID, cursor, 1000)
@@ -2799,7 +2812,8 @@ func (s *Service) listAllChildren(parentID FileID) ([]DirEntry, error) {
 		if len(chunk) < 1000 {
 			break
 		}
-		cursor = chunk[len(chunk)-1].Name
+		last := chunk[len(chunk)-1]
+		cursor = ChildCursor{Name: last.Name, IsDir: last.IsDir}
 	}
 	return out, nil
 }

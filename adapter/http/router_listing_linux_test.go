@@ -48,8 +48,8 @@ func TestNodeChildrenAreDirsFirstWithStableCursor(t *testing.T) {
 	if page1.Children[0].Name != "adir" || page1.Children[1].Name != "zdir" {
 		t.Fatalf("page1 order=%q,%q want adir,zdir", page1.Children[0].Name, page1.Children[1].Name)
 	}
-	if page1.NextCursor != "zdir" {
-		t.Fatalf("page1 nextCursor=%q, want zdir", page1.NextCursor)
+	if page1.NextCursor != "d/zdir" {
+		t.Fatalf("page1 nextCursor=%q, want d/zdir", page1.NextCursor)
 	}
 
 	req2 := authedRequest(http.MethodGet, "/v1/nodes/"+root.ID.String()+"?pageSize=10&cursor="+page1.NextCursor)
@@ -75,5 +75,95 @@ func TestNodeChildrenAreDirsFirstWithStableCursor(t *testing.T) {
 	}
 	if page2.NextCursor != "" {
 		t.Fatalf("page2 nextCursor=%q, want empty", page2.NextCursor)
+	}
+}
+
+type listingPage struct {
+	Children []struct {
+		Name string `json:"name"`
+	} `json:"children"`
+	NextCursor string `json:"nextCursor"`
+}
+
+func listChildrenPage(t *testing.T, r http.Handler, nodeID, query string) (listingPage, int) {
+	t.Helper()
+	req := authedRequest(http.MethodGet, "/v1/nodes/"+nodeID+query)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var page listingPage
+	if w.Result().StatusCode == http.StatusOK {
+		if err := json.NewDecoder(w.Result().Body).Decode(&page); err != nil {
+			t.Fatalf("decode page: %v", err)
+		}
+	}
+	return page, w.Result().StatusCode
+}
+
+// TestNodeChildrenCursorSurvivesDeletedEntry pins the typed-cursor
+// behavior on the REST surface: deleting the cursor entry between two
+// pages must NOT fail the next page (the name-only cursor used to be
+// re-validated via lookup and produced a 400 mid-pagination).
+func TestNodeChildrenCursorSurvivesDeletedEntry(t *testing.T) {
+	r, svc, cleanup := newTestRouter(t)
+	defer cleanup()
+
+	root := svc.ListRoot()[0]
+	for _, name := range []string{"a.txt", "m.txt", "z.txt"} {
+		if _, err := svc.CreateChild(root.ID, name, false, nil); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+
+	page1, status := listChildrenPage(t, r, root.ID.String(), "?pageSize=2")
+	if status != http.StatusOK {
+		t.Fatalf("page1 status=%d", status)
+	}
+	if page1.NextCursor != "f/m.txt" {
+		t.Fatalf("page1 nextCursor=%q, want f/m.txt", page1.NextCursor)
+	}
+
+	// Delete the cursor entry between the two page fetches.
+	cursorID, err := svc.ResolvePath(svc.ListRoot()[0].Name + "/m.txt")
+	if err != nil {
+		t.Fatalf("resolve cursor entry: %v", err)
+	}
+	if err := svc.Delete(cursorID); err != nil {
+		t.Fatalf("delete cursor entry: %v", err)
+	}
+
+	page2, status := listChildrenPage(t, r, root.ID.String(), "?pageSize=10&cursor="+page1.NextCursor)
+	if status != http.StatusOK {
+		t.Fatalf("page2 with deleted cursor status=%d, want 200", status)
+	}
+	if len(page2.Children) != 1 || page2.Children[0].Name != "z.txt" {
+		t.Fatalf("page2 children=%v, want [z.txt]", page2.Children)
+	}
+}
+
+// TestNodeChildrenLegacyBareNameCursorStillWorks pins backward
+// compatibility: a pre-typed-cursor client passing the last entry's
+// bare name keeps paginating (resolved via lookup, as before), and an
+// unknown bare name still answers 400.
+func TestNodeChildrenLegacyBareNameCursorStillWorks(t *testing.T) {
+	r, svc, cleanup := newTestRouter(t)
+	defer cleanup()
+
+	root := svc.ListRoot()[0]
+	for _, name := range []string{"a.txt", "m.txt", "z.txt"} {
+		if _, err := svc.CreateChild(root.ID, name, false, nil); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+
+	page, status := listChildrenPage(t, r, root.ID.String(), "?pageSize=10&cursor=m.txt")
+	if status != http.StatusOK {
+		t.Fatalf("legacy cursor status=%d, want 200", status)
+	}
+	if len(page.Children) != 1 || page.Children[0].Name != "z.txt" {
+		t.Fatalf("legacy cursor children=%v, want [z.txt]", page.Children)
+	}
+
+	if _, status := listChildrenPage(t, r, root.ID.String(), "?pageSize=10&cursor=no-such-name"); status != http.StatusBadRequest {
+		t.Fatalf("unknown legacy cursor status=%d, want 400", status)
 	}
 }

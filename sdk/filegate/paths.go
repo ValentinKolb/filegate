@@ -15,6 +15,9 @@ type PathsClient struct {
 }
 
 // GetNodeOptions controls optional directory listing behavior on metadata reads.
+//
+// Cursor is the opaque token from the previous page's Node.NextCursor —
+// pass it back verbatim; do not construct or interpret it.
 type GetNodeOptions struct {
 	PageSize              int
 	Cursor                string

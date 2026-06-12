@@ -9,7 +9,13 @@ import (
 type Index interface {
 	GetEntity(id FileID) (*Entity, error)
 	LookupChild(parentID FileID, name string) (*DirEntry, error)
-	ListChildren(parentID FileID, after string, limit int) ([]DirEntry, error)
+	// ListChildren returns up to limit children of parentID in listing
+	// order (directories first, then files, each alphabetical). after
+	// is a strict-greater resume position; its zero value starts at
+	// the beginning. The cursor entry itself does not need to exist —
+	// the implementation seeks past its key position, so pagination
+	// survives concurrent deletion of the cursor entry.
+	ListChildren(parentID FileID, after ChildCursor, limit int) ([]DirEntry, error)
 	ListEntities() ([]Entity, error)
 	ForEachEntity(func(Entity) error) error
 	GetVersion(fileID FileID, versionID VersionID) (*VersionMeta, error)

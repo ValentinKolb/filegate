@@ -66,7 +66,10 @@ mkdir). For directory replacement use `POST /v1/transfers` with `overwrite`.
   - If node is a directory, response can include paged children
   - Query:
     - `pageSize` (default `100`)
-    - `cursor`
+    - `cursor` — opaque token from the previous page's `nextCursor`,
+      passed back verbatim. Pagination survives concurrent deletion of
+      the cursor entry. Legacy clients passing a bare child name keep
+      working, but a deleted name then answers `400`.
     - `computeRecursiveSizes=true|false`
 - `PUT /v1/paths/{path...}`
   - One-shot upload at path
