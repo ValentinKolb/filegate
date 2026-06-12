@@ -2619,26 +2619,29 @@ func (s *Service) syncSingleAfterLocalWrite(absPath string, md5Hex string) error
 	if err != nil {
 		return err
 	}
-	return s.idx.Batch(func(b Batch) error {
-		entity, err := s.idx.GetEntity(id)
-		if err != nil {
-			return err
-		}
-		if entity == nil {
+	// Read OUTSIDE the batch: Index.Batch holds the index's read lock
+	// for the whole closure, and GetEntity re-acquires it — a recursive
+	// RLock that deadlocks once a writer (Close) is queued in between.
+	entity, err := s.idx.GetEntity(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
 			// File was deleted between syncSingle and the follow-up
 			// read. Harmless — nothing to update.
 			return nil
 		}
-		entity.ETagMD5 = md5Hex
-		// REST/non-S3 overwrite semantics: clear all S3-only fields.
-		// See plan §7 rule 4. If a future S3 write wants to set them,
-		// it will use a different domain entry-point that preserves
-		// or sets explicitly.
-		entity.MultipartETag = ""
-		entity.ContentType = ""
-		entity.ContentEncoding = ""
-		entity.ContentDisposition = ""
-		entity.S3UserMetadata = nil
+		return err
+	}
+	entity.ETagMD5 = md5Hex
+	// REST/non-S3 overwrite semantics: clear all S3-only fields.
+	// See plan §7 rule 4. If a future S3 write wants to set them,
+	// it will use a different domain entry-point that preserves
+	// or sets explicitly.
+	entity.MultipartETag = ""
+	entity.ContentType = ""
+	entity.ContentEncoding = ""
+	entity.ContentDisposition = ""
+	entity.S3UserMetadata = nil
+	return s.idx.Batch(func(b Batch) error {
 		b.PutEntity(*entity)
 		return nil
 	})

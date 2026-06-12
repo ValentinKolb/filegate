@@ -375,24 +375,27 @@ func (s *Service) syncSingleAfterS3Write(absPath string, md5Hex string, opts S3W
 	if err != nil {
 		return err
 	}
-	return s.idx.Batch(func(b Batch) error {
-		entity, err := s.idx.GetEntity(id)
-		if err != nil {
-			return err
-		}
-		if entity == nil {
+	// Read OUTSIDE the batch — see syncSingleAfterLocalWrite: GetEntity
+	// inside the Batch closure re-acquires the index read lock and
+	// deadlocks once a writer is queued.
+	entity, err := s.idx.GetEntity(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
-		entity.ETagMD5 = md5Hex
-		entity.MultipartETag = ""
-		entity.ContentType = opts.ContentType
-		entity.ContentEncoding = opts.ContentEncoding
-		entity.ContentDisposition = opts.ContentDisposition
-		if len(opts.UserMetadata) > 0 {
-			entity.S3UserMetadata = append([]byte(nil), opts.UserMetadata...)
-		} else {
-			entity.S3UserMetadata = nil
-		}
+		return err
+	}
+	entity.ETagMD5 = md5Hex
+	entity.MultipartETag = ""
+	entity.ContentType = opts.ContentType
+	entity.ContentEncoding = opts.ContentEncoding
+	entity.ContentDisposition = opts.ContentDisposition
+	if len(opts.UserMetadata) > 0 {
+		entity.S3UserMetadata = append([]byte(nil), opts.UserMetadata...)
+	} else {
+		entity.S3UserMetadata = nil
+	}
+	return s.idx.Batch(func(b Batch) error {
 		b.PutEntity(*entity)
 		return nil
 	})
