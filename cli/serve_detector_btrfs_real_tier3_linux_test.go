@@ -90,7 +90,7 @@ func TestBTRFSRealCrossSubvolumeMove(t *testing.T) {
 	go consumeDetectorEvents(ctx, svc, runner.Events(), nil)
 
 	src := filepath.Join(subvolA, "moving.txt")
-	seedAndAwait(t, svc, src, rootA + "/moving.txt", []byte("xsubvol"))
+	seedAndAwait(t, svc, src, rootA+"/moving.txt", []byte("xsubvol"))
 
 	dst := filepath.Join(subvolB, "moved.txt")
 	if err := os.Rename(src, dst); err != nil {
@@ -126,7 +126,7 @@ func TestBTRFSRealSnapshotInsideWatchedTree(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	original := filepath.Join(subvol, "snap-source.txt")
-	seedAndAwait(t, svc, original, rootName + "/snap-source.txt", []byte("source-payload"))
+	seedAndAwait(t, svc, original, rootName+"/snap-source.txt", []byte("source-payload"))
 	originalID, err := svc.ResolvePath(rootName + "/snap-source.txt")
 	if err != nil {
 		t.Fatalf("resolve original: %v", err)
@@ -220,7 +220,7 @@ func TestBTRFSRealFallocateExtension(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "fallocate.bin")
-	seedAndAwait(t, svc, target, rootName + "/fallocate.bin", []byte("seed"))
+	seedAndAwait(t, svc, target, rootName+"/fallocate.bin", []byte("seed"))
 
 	const finalSize int64 = 8 << 20
 	f, err := os.OpenFile(target, os.O_RDWR, 0o644)
@@ -256,7 +256,7 @@ func TestBTRFSRealFIFOIsSkipped(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	regular := filepath.Join(subvol, "alongside-fifo.txt")
-	seedAndAwait(t, svc, regular, rootName + "/alongside-fifo.txt", []byte("normal"))
+	seedAndAwait(t, svc, regular, rootName+"/alongside-fifo.txt", []byte("normal"))
 
 	fifoPath := filepath.Join(subvol, "the-fifo")
 	if err := syscall.Mkfifo(fifoPath, 0o644); err != nil {
@@ -293,7 +293,7 @@ func TestBTRFSRealUnixSocketIsSkipped(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	regular := filepath.Join(subvol, "alongside-socket.txt")
-	seedAndAwait(t, svc, regular, rootName + "/alongside-socket.txt", []byte("normal"))
+	seedAndAwait(t, svc, regular, rootName+"/alongside-socket.txt", []byte("normal"))
 
 	sockPath := filepath.Join(subvol, "the-socket")
 	listener, err := net.Listen("unix", sockPath)
@@ -349,9 +349,10 @@ func TestBTRFSRealEmptyFile(t *testing.T) {
 // type=BTRFS_FT_REG_FILE in btrfs-progs; directory inodes are never
 // emitted. So an empty directory is INVISIBLE to the detector. It only
 // surfaces when:
-//   (a) A file is created inside it (which gets reported, and the
-//       consumer's syncSingle traverses up and indexes the parent), or
-//   (b) An explicit Rescan walks the filesystem.
+//
+//	(a) A file is created inside it (which gets reported, and the
+//	    consumer's syncSingle traverses up and indexes the parent), or
+//	(b) An explicit Rescan walks the filesystem.
 //
 // The test pins (b) — Rescan seeds the empty dir — and acts as a
 // regression guard if the rescan walk ever stops handling empty dirs.
@@ -420,7 +421,7 @@ func TestBTRFSRealLongFilenameNearLimit(t *testing.T) {
 
 	longName := strings.Repeat("x", 250) + ".txt"
 	target := filepath.Join(subvol, longName)
-	seedAndAwait(t, svc, target, rootName + "/" + longName, []byte("long"))
+	seedAndAwait(t, svc, target, rootName+"/"+longName, []byte("long"))
 }
 
 // TestBTRFSRealNewlineInFilename creates a file with an embedded newline
@@ -434,7 +435,7 @@ func TestBTRFSRealNewlineInFilename(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	regular := filepath.Join(subvol, "alongside-newline.txt")
-	seedAndAwait(t, svc, regular, rootName + "/alongside-newline.txt", []byte("normal"))
+	seedAndAwait(t, svc, regular, rootName+"/alongside-newline.txt", []byte("normal"))
 
 	weird := "weird\nname.txt"
 	target := filepath.Join(subvol, weird)
@@ -482,7 +483,7 @@ func TestBTRFSRealLargeDirectoryFanout(t *testing.T) {
 	}
 	// Sentinel to walk past loopback init race before the burst.
 	sentinel := filepath.Join(dir, "_sentinel.txt")
-	seedAndAwait(t, svc, sentinel, rootName + "/fanout/_sentinel.txt", []byte("s"))
+	seedAndAwait(t, svc, sentinel, rootName+"/fanout/_sentinel.txt", []byte("s"))
 
 	for i := 0; i < n; i++ {
 		p := filepath.Join(dir, fmt.Sprintf("f-%05d.txt", i))
@@ -543,7 +544,7 @@ func TestBTRFSRealConcurrentWritersToDifferentFiles(t *testing.T) {
 
 	// Walk past init race with a sentinel.
 	sentinel := filepath.Join(subvol, "_conc_sentinel.txt")
-	seedAndAwait(t, svc, sentinel, rootName + "/_conc_sentinel.txt", []byte("s"))
+	seedAndAwait(t, svc, sentinel, rootName+"/_conc_sentinel.txt", []byte("s"))
 
 	const goroutines = 16
 	const perGoroutine = 25
@@ -581,7 +582,7 @@ func TestBTRFSRealConcurrentRenameRace(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	a := filepath.Join(subvol, "race-a.txt")
-	seedAndAwait(t, svc, a, rootName + "/race-a.txt", []byte("payload"))
+	seedAndAwait(t, svc, a, rootName+"/race-a.txt", []byte("payload"))
 
 	b := filepath.Join(subvol, "race-b.txt")
 	c := filepath.Join(subvol, "race-c.txt")
@@ -628,7 +629,7 @@ func TestBTRFSRealWriteWhileReading(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "read-while-write.txt")
-	seedAndAwait(t, svc, target, rootName + "/read-while-write.txt", []byte("first-version"))
+	seedAndAwait(t, svc, target, rootName+"/read-while-write.txt", []byte("first-version"))
 
 	reader, err := os.Open(target)
 	if err != nil {

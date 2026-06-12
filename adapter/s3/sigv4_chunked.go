@@ -322,4 +322,3 @@ func discardChunkTrailers(src *bufio.Reader) error {
 		}
 	}
 }
-

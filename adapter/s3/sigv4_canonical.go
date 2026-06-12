@@ -311,10 +311,10 @@ func uriEncode(s string, encodeSlash bool) string {
 // stringToSign returns the "string to sign" component of SigV4. The
 // AWS algorithm is:
 //
-//   "AWS4-HMAC-SHA256\n" +
-//   <ISO8601-time>\n +
-//   <date>/<region>/<service>/aws4_request\n +
-//   hex(sha256(canonicalRequest))
+//	"AWS4-HMAC-SHA256\n" +
+//	<ISO8601-time>\n +
+//	<date>/<region>/<service>/aws4_request\n +
+//	hex(sha256(canonicalRequest))
 func stringToSign(timestamp, scope, canonicalReq string) string {
 	h := sha256.Sum256([]byte(canonicalReq))
 	return strings.Join([]string{
@@ -333,10 +333,10 @@ func scope(date, region, service string) string {
 
 // derivedSigningKey computes the AWS-shaped signing key:
 //
-//   kDate    = HMAC-SHA256("AWS4" + secret, date)
-//   kRegion  = HMAC-SHA256(kDate, region)
-//   kService = HMAC-SHA256(kRegion, service)
-//   kSign    = HMAC-SHA256(kService, "aws4_request")
+//	kDate    = HMAC-SHA256("AWS4" + secret, date)
+//	kRegion  = HMAC-SHA256(kDate, region)
+//	kService = HMAC-SHA256(kRegion, service)
+//	kSign    = HMAC-SHA256(kService, "aws4_request")
 //
 // The result is fed into HMAC-SHA256 with the string-to-sign to
 // produce the final signature.

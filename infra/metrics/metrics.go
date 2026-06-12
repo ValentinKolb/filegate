@@ -61,19 +61,19 @@ type Registry struct {
 	reg *prometheus.Registry
 
 	// HTTP RED.
-	httpRequests   *prometheus.CounterVec   // {adapter,op,status_class}
-	httpDuration   *prometheus.HistogramVec // {adapter,op}
-	httpInFlight   *prometheus.GaugeVec     // {adapter}
-	httpReqBytes   *prometheus.HistogramVec // {adapter,op}
-	httpRespBytes  *prometheus.HistogramVec // {adapter,op}
+	httpRequests  *prometheus.CounterVec   // {adapter,op,status_class}
+	httpDuration  *prometheus.HistogramVec // {adapter,op}
+	httpInFlight  *prometheus.GaugeVec     // {adapter}
+	httpReqBytes  *prometheus.HistogramVec // {adapter,op}
+	httpRespBytes *prometheus.HistogramVec // {adapter,op}
 
 	// Background-loop + rate-limit counters.
-	cleanupRetired *prometheus.CounterVec // {reason}
-	cleanupErrors  prometheus.Counter
-	pruneDeleted   prometheus.Counter
-	pruneKept      prometheus.Counter
-	pruneErrors    prometheus.Counter
-	detectorEvents *prometheus.CounterVec // {type}
+	cleanupRetired    *prometheus.CounterVec // {reason}
+	cleanupErrors     prometheus.Counter
+	pruneDeleted      prometheus.Counter
+	pruneKept         prometheus.Counter
+	pruneErrors       prometheus.Counter
+	detectorEvents    *prometheus.CounterVec // {type}
 	ratelimitRejected prometheus.Counter
 
 	// Hot-path phase histogram.

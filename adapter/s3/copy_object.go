@@ -227,7 +227,7 @@ func parseCopySourceTime(v string) (time.Time, error) {
 	// AWS prefers RFC1123/HTTP-date; accept both that and RFC3339
 	// for tolerance.
 	for _, layout := range []string{
-		http.TimeFormat,            // RFC1123 GMT
+		http.TimeFormat, // RFC1123 GMT
 		time.RFC3339,
 		time.RFC3339Nano,
 		"2006-01-02T15:04:05.000Z", // ISO8601 millisecond

@@ -65,7 +65,7 @@ func TestBTRFSRealAtomicReplaceViaTempRename(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "atomic.txt")
-	seedAndAwait(t, svc, target, rootName + "/atomic.txt", []byte("original-content"))
+	seedAndAwait(t, svc, target, rootName+"/atomic.txt", []byte("original-content"))
 
 	// Atomic-replace: write tmp, then rename over target.
 	tmp := filepath.Join(subvol, "atomic.txt.tmp")
@@ -196,7 +196,7 @@ func TestBTRFSRealMoveOutOfMount(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	src := filepath.Join(subvol, "leaving.txt")
-	seedAndAwait(t, svc, src, rootName + "/leaving.txt", []byte("bye"))
+	seedAndAwait(t, svc, src, rootName+"/leaving.txt", []byte("bye"))
 
 	// Use t.TempDir() — guaranteed to be on a different filesystem than the
 	// btrfs loopback mount (it's the container's overlay/tmpfs).
@@ -304,7 +304,7 @@ func TestBTRFSRealExternalXattrRemoval(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "xattr-strip.txt")
-	seedAndAwait(t, svc, target, rootName + "/xattr-strip.txt", []byte("payload"))
+	seedAndAwait(t, svc, target, rootName+"/xattr-strip.txt", []byte("payload"))
 
 	originalID, err := svc.ResolvePath(rootName + "/xattr-strip.txt")
 	if err != nil {
@@ -340,7 +340,7 @@ func TestBTRFSRealCorruptedXattrValue(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "xattr-garbage.txt")
-	seedAndAwait(t, svc, target, rootName + "/xattr-garbage.txt", []byte("data"))
+	seedAndAwait(t, svc, target, rootName+"/xattr-garbage.txt", []byte("data"))
 
 	originalID, err := svc.ResolvePath(rootName + "/xattr-garbage.txt")
 	if err != nil {
@@ -375,7 +375,7 @@ func TestBTRFSRealDuplicateIDViaCpA(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	src := filepath.Join(subvol, "original.txt")
-	seedAndAwait(t, svc, src, rootName + "/original.txt", []byte("orig"))
+	seedAndAwait(t, svc, src, rootName+"/original.txt", []byte("orig"))
 	originalID, err := svc.ResolvePath(rootName + "/original.txt")
 	if err != nil {
 		t.Fatalf("resolve original: %v", err)
@@ -426,7 +426,7 @@ func TestBTRFSRealSymlinkCreateDeleteRename(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "real-target.txt")
-	seedAndAwait(t, svc, target, rootName + "/real-target.txt", []byte("real"))
+	seedAndAwait(t, svc, target, rootName+"/real-target.txt", []byte("real"))
 
 	link := filepath.Join(subvol, "the-link")
 	if err := os.Symlink(target, link); err != nil {
@@ -480,7 +480,7 @@ func TestBTRFSRealUnlinkOneOfHardLinks(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	primary := filepath.Join(subvol, "hl-keep.txt")
-	seedAndAwait(t, svc, primary, rootName + "/hl-keep.txt", []byte("shared"))
+	seedAndAwait(t, svc, primary, rootName+"/hl-keep.txt", []byte("shared"))
 
 	alias := filepath.Join(subvol, "hl-drop.txt")
 	if err := os.Link(primary, alias); err != nil {
@@ -536,7 +536,7 @@ func TestBTRFSRealReflinkCopy(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	src := filepath.Join(subvol, "reflink-src.txt")
-	seedAndAwait(t, svc, src, rootName + "/reflink-src.txt", []byte("shared-extents"))
+	seedAndAwait(t, svc, src, rootName+"/reflink-src.txt", []byte("shared-extents"))
 
 	dst := filepath.Join(subvol, "reflink-clone.txt")
 	out, err := exec.Command("cp", "--reflink=always", src, dst).CombinedOutput()
@@ -612,7 +612,7 @@ func TestBTRFSRealTouchMtimeOnly(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "touch.txt")
-	seedAndAwait(t, svc, target, rootName + "/touch.txt", []byte("static"))
+	seedAndAwait(t, svc, target, rootName+"/touch.txt", []byte("static"))
 
 	id, err := svc.ResolvePath(rootName + "/touch.txt")
 	if err != nil {
@@ -687,7 +687,7 @@ func TestBTRFSRealRenameOneHardLinkAlias(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	primary := filepath.Join(subvol, "hl-stable.txt")
-	seedAndAwait(t, svc, primary, rootName + "/hl-stable.txt", []byte("shared"))
+	seedAndAwait(t, svc, primary, rootName+"/hl-stable.txt", []byte("shared"))
 
 	alias := filepath.Join(subvol, "hl-rename-me.txt")
 	if err := os.Link(primary, alias); err != nil {
@@ -774,7 +774,7 @@ func TestBTRFSRealOpenWriteUnlinkWithFDOpen(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "fd-pinned.txt")
-	seedAndAwait(t, svc, target, rootName + "/fd-pinned.txt", []byte("alive"))
+	seedAndAwait(t, svc, target, rootName+"/fd-pinned.txt", []byte("alive"))
 
 	// Open a long-lived fd; cancel via context so the deferred close runs
 	// even if the test panics.

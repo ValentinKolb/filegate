@@ -35,13 +35,14 @@ const (
 // duplicates are rejected (ErrNonCanonicalExt). See EncodeEntity.
 //
 // Reserved IDs:
-//   1 — EXIF (existing)
-//   2 — RFC1864 MD5 of file body, lowercase hex; cross-protocol ETag
-//   3 — composite multipart ETag (S3); "<MD5-of-concatenated-part-MD5s>-<N>"
-//   4 — explicit Content-Type when set by S3 PUT (overrides filename-derived)
-//   5 — Content-Encoding HTTP header round-trip (S3)
-//   6 — Content-Disposition HTTP header round-trip (S3)
-//   7 — opaque blob: serialized x-amz-meta-* user metadata (S3)
+//
+//	1 — EXIF (existing)
+//	2 — RFC1864 MD5 of file body, lowercase hex; cross-protocol ETag
+//	3 — composite multipart ETag (S3); "<MD5-of-concatenated-part-MD5s>-<N>"
+//	4 — explicit Content-Type when set by S3 PUT (overrides filename-derived)
+//	5 — Content-Encoding HTTP header round-trip (S3)
+//	6 — Content-Disposition HTTP header round-trip (S3)
+//	7 — opaque blob: serialized x-amz-meta-* user metadata (S3)
 const (
 	FieldEXIF               uint16 = 1
 	FieldETagMD5            uint16 = 2
@@ -68,20 +69,20 @@ type Extension struct {
 
 // Entity is the binary record representation of a file or directory.
 type Entity struct {
-	ID         [16]byte
-	ParentID   [16]byte
-	IsDir      bool
-	Size       int64
-	MtimeNs    int64
-	UID        uint32
-	GID        uint32
-	Mode       uint32
+	ID       [16]byte
+	ParentID [16]byte
+	IsDir    bool
+	Size     int64
+	MtimeNs  int64
+	UID      uint32
+	GID      uint32
+	Mode     uint32
 	// Device and Inode together identify a file at the filesystem level
 	// independent of its path. Used for inode-based reconciliation of
 	// external moves; zero values mean "unknown" (e.g. detector backend
 	// did not provide stat info for this entity).
-	Device     uint64
-	Inode      uint64
+	Device uint64
+	Inode  uint64
 	// Nlink is the hard-link count from stat. Reconciliation must skip when
 	// Nlink > 1 because the inode is legitimately referenced by multiple
 	// paths.

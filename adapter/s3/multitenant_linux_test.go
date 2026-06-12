@@ -5,9 +5,9 @@ package s3
 import (
 	"bytes"
 	"crypto/sha256"
-	"io"
 	"encoding/hex"
 	"encoding/xml"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"

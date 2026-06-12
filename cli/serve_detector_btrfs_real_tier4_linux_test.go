@@ -491,7 +491,7 @@ func TestBTRFSRealConcurrentWritersSameFile(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "race.txt")
-	seedAndAwait(t, svc, target, rootName + "/race.txt", []byte("init"))
+	seedAndAwait(t, svc, target, rootName+"/race.txt", []byte("init"))
 
 	const goroutines = 6
 	const iterations = 30
@@ -544,7 +544,7 @@ func TestBTRFSRealRecreateDirSameName(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	seedAndAwait(t, svc, leaf, rootName + "/rebirth/old-leaf.txt", []byte("old"))
+	seedAndAwait(t, svc, leaf, rootName+"/rebirth/old-leaf.txt", []byte("old"))
 	oldDirID, err := svc.ResolvePath(rootName + "/rebirth")
 	if err != nil {
 		t.Fatalf("resolve old dir: %v", err)
@@ -584,7 +584,7 @@ func TestBTRFSRealAtomicReplaceOTmpfileLinkat(t *testing.T) {
 
 	// Create a sibling file first to seed the detector watermark.
 	sentinel := filepath.Join(subvol, "tmpfile-sentinel.txt")
-	seedAndAwait(t, svc, sentinel, rootName + "/tmpfile-sentinel.txt", []byte("s"))
+	seedAndAwait(t, svc, sentinel, rootName+"/tmpfile-sentinel.txt", []byte("s"))
 
 	// open(O_TMPFILE | O_RDWR, mode) on the parent dir.
 	dirfd, err := unix.Open(subvol, unix.O_TMPFILE|unix.O_RDWR, 0o644)
@@ -744,7 +744,7 @@ func TestBTRFSRealChown(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	target := filepath.Join(subvol, "owned.txt")
-	seedAndAwait(t, svc, target, rootName + "/owned.txt", []byte("ownership"))
+	seedAndAwait(t, svc, target, rootName+"/owned.txt", []byte("ownership"))
 
 	if err := os.Chown(target, 1234, 5678); err != nil {
 		t.Skipf("chown not allowed (need privileged container): %v", err)
@@ -775,7 +775,7 @@ func TestBTRFSRealChattrImmutable(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	immutable := filepath.Join(subvol, "frozen.txt")
-	seedAndAwait(t, svc, immutable, rootName + "/frozen.txt", []byte("frozen"))
+	seedAndAwait(t, svc, immutable, rootName+"/frozen.txt", []byte("frozen"))
 
 	if out, err := exec.Command("chattr", "+i", immutable).CombinedOutput(); err != nil {
 		t.Skipf("chattr +i not allowed (needs CAP_LINUX_IMMUTABLE): %v (%s)", err, strings.TrimSpace(string(out)))
@@ -896,7 +896,7 @@ func TestBTRFSRealBtrfsSendReceive(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	original := filepath.Join(subvol, "to-be-backed-up.txt")
-	seedAndAwait(t, svc, original, rootName + "/to-be-backed-up.txt", []byte("original"))
+	seedAndAwait(t, svc, original, rootName+"/to-be-backed-up.txt", []byte("original"))
 	originalID, _ := svc.ResolvePath(rootName + "/to-be-backed-up.txt")
 
 	// Snapshot read-only (required by send).
@@ -960,7 +960,7 @@ func TestBTRFSRealReflinkThenModify(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	src := filepath.Join(subvol, "ref-src.txt")
-	seedAndAwait(t, svc, src, rootName + "/ref-src.txt", []byte("shared-extents"))
+	seedAndAwait(t, svc, src, rootName+"/ref-src.txt", []byte("shared-extents"))
 
 	dst := filepath.Join(subvol, "ref-dst.txt")
 	if out, err := exec.Command("cp", "--reflink=always", src, dst).CombinedOutput(); err != nil {
@@ -1064,7 +1064,7 @@ func TestBTRFSRealCharBlockDeviceNodes(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	regular := filepath.Join(subvol, "alongside-devs.txt")
-	seedAndAwait(t, svc, regular, rootName + "/alongside-devs.txt", []byte("normal"))
+	seedAndAwait(t, svc, regular, rootName+"/alongside-devs.txt", []byte("normal"))
 
 	// mknod a char device matching the standard /dev/null (1, 3) and a
 	// block device matching /dev/loop0 (7, 0). Numbers are inert; we
@@ -1126,4 +1126,3 @@ func base64FromUUIDHex(t *testing.T, hyphenated string) string {
 	}
 	return base64.StdEncoding.EncodeToString(raw)
 }
-

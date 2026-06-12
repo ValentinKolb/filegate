@@ -28,7 +28,7 @@ func makeVersion(t *testing.T, ts int64, opts ...func(*VersionMeta)) VersionMeta
 	return v
 }
 
-func pinned() func(*VersionMeta)  { return func(v *VersionMeta) { v.Pinned = true } }
+func pinned() func(*VersionMeta) { return func(v *VersionMeta) { v.Pinned = true } }
 func orphan(deletedAt int64) func(*VersionMeta) {
 	return func(v *VersionMeta) { v.DeletedAt = deletedAt }
 }
@@ -75,10 +75,10 @@ func TestBucketsLayerNonOverlapping(t *testing.T) {
 	now := time.Now().UnixMilli()
 	hourMs := int64(60 * 60 * 1000)
 	versions := []VersionMeta{
-		makeVersion(t, now-30*60*1000),     // 30 minutes ago — bucket 1h
-		makeVersion(t, now-3*hourMs),       // 3h ago — bucket 24h
-		makeVersion(t, now-12*hourMs),      // 12h ago — bucket 24h
-		makeVersion(t, now-2*24*hourMs),    // 2d ago — bucket 30d
+		makeVersion(t, now-30*60*1000),  // 30 minutes ago — bucket 1h
+		makeVersion(t, now-3*hourMs),    // 3h ago — bucket 24h
+		makeVersion(t, now-12*hourMs),   // 12h ago — bucket 24h
+		makeVersion(t, now-2*24*hourMs), // 2d ago — bucket 30d
 	}
 	cfg := VersioningConfig{
 		RetentionBuckets: []RetentionBucketConfig{

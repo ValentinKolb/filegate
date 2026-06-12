@@ -38,14 +38,14 @@ type CopyObjectArgs struct {
 	// Source preconditions (x-amz-copy-source-if-*). Empty values
 	// disable the corresponding check. Times are zero-valued when
 	// the header is absent.
-	SourceIfMatch         string
-	SourceIfNoneMatch     string
-	SourceIfModifiedSince time.Time
+	SourceIfMatch           string
+	SourceIfNoneMatch       string
+	SourceIfModifiedSince   time.Time
 	SourceIfUnmodifiedSince time.Time
 
 	// Destination preconditions (If-Match, If-None-Match: *).
-	DestIfMatch         string
-	DestIfNoneMatchAny  bool
+	DestIfMatch        string
+	DestIfNoneMatchAny bool
 
 	// MetadataDirective: "COPY" (default) or "REPLACE".
 	MetadataDirective string

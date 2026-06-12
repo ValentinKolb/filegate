@@ -90,12 +90,15 @@ func TestCanonicalHeadersAndSigned(t *testing.T) {
 // TestDerivedSigningKeyMatchesAWSExample verifies the signing-key
 // derivation against the example AWS publishes in the SigV4 docs.
 // The values are:
-//   secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
-//   date   = "20150830"
-//   region = "us-east-1"
-//   service = "iam"
+//
+//	secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+//	date   = "20150830"
+//	region = "us-east-1"
+//	service = "iam"
+//
 // Expected derived key (hex):
-//   c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9
+//
+//	c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9
 //
 // Source: https://docs.aws.amazon.com/general/latest/gr/sigv4-calculate-signature.html
 func TestDerivedSigningKeyMatchesAWSExample(t *testing.T) {

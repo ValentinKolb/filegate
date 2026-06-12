@@ -344,4 +344,3 @@ func decodeContinuationToken(token string) (string, error) {
 // adapter only sees what the service exposes.
 //
 // Lives in service_s3_write.go alongside GetS3Metadata for cohesion.
-

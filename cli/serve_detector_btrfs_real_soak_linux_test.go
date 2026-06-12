@@ -403,7 +403,7 @@ loop:
 	// Convergence: dir-sync + detector should have caught up. Generous
 	// deadline because a long-running churn produces a big tail of
 	// pending dir-syncs.
-	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName+"/churn"}, 30*time.Second)
+	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName + "/churn"}, 30*time.Second)
 	checkGoroutines()
 	checkMem()
 }
@@ -470,7 +470,7 @@ func TestBTRFSRealSoakConcurrentChaos(t *testing.T) {
 		t.Errorf("unexpected operation errors: %d", n)
 	}
 
-	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName+"/chaos"}, 30*time.Second)
+	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName + "/chaos"}, 30*time.Second)
 	checkGoroutines()
 	checkMem()
 }
@@ -773,7 +773,7 @@ func TestBTRFSRealSoakHighConcurrencyTinyPool(t *testing.T) {
 		t.Errorf("unexpected operation errors: %d", n)
 	}
 
-	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName+"/tinypool"}, 60*time.Second)
+	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName + "/tinypool"}, 60*time.Second)
 	checkGoroutines()
 	checkMem()
 }
@@ -859,7 +859,7 @@ loop:
 	if err := svc.Rescan(); err != nil {
 		t.Fatalf("final rescan: %v", err)
 	}
-	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName+"/hl-churn"}, 30*time.Second)
+	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName + "/hl-churn"}, 30*time.Second)
 	checkGoroutines()
 	checkMem()
 }
@@ -1145,7 +1145,7 @@ func TestBTRFSRealSoakAdversarialRenameStorm(t *testing.T) {
 	if err := svc.Rescan(); err != nil {
 		t.Fatalf("final rescan: %v", err)
 	}
-	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName+"/rename-storm"}, 30*time.Second)
+	assertConvergence(t, svc, convergenceCheck{absPath: dir, virtualPath: rootName + "/rename-storm"}, 30*time.Second)
 	checkGoroutines()
 	checkMem()
 }
@@ -1167,9 +1167,9 @@ func TestBTRFSRealSoakCombinedChaosMonkey(t *testing.T) {
 	svc, rootName, _ := startRealBTRFSDetector(t, subvol)
 
 	const (
-		dirs       = 20
+		dirs        = 20
 		slotsPerDir = 200
-		goroutines = 32
+		goroutines  = 32
 	)
 	dirAbsPaths := make([]string, dirs)
 	dirVPs := make([]string, dirs)

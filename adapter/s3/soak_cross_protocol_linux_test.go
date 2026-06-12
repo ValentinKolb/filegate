@@ -52,9 +52,9 @@ func TestCrossProtocolSoak(t *testing.T) {
 	}
 
 	const (
-		bucket    = "data"
-		keyspace  = 12 // shared key set; collisions are deliberate
-		objectSz  = 4 * 1024
+		bucket   = "data"
+		keyspace = 12 // shared key set; collisions are deliberate
+		objectSz = 4 * 1024
 	)
 	workerCount := 8
 	opsPerWorker := 50
