@@ -110,6 +110,50 @@ func TestCloseDrainsAsyncHandlersBeforeReturning(t *testing.T) {
 	}
 }
 
+// TestCloseRacingPublishNeverRunsHandlersAfterClose pins the race where
+// Publish checked the closed flag and called wg.Add outside any
+// synchronization with Close: a Publish in that window could spawn a
+// handler after Close had already returned (and trip WaitGroup
+// add-vs-wait misuse).
+func TestCloseRacingPublishNeverRunsHandlersAfterClose(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		bus := New()
+		var closeReturned atomic.Bool
+		var violations atomic.Int32
+		bus.Subscribe(domain.EventUpdated, func(_ domain.Event) {
+			if closeReturned.Load() {
+				violations.Add(1)
+			}
+		})
+
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		for w := 0; w < 4; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					bus.Publish(domain.Event{Type: domain.EventUpdated})
+				}
+			}()
+		}
+
+		bus.Close()
+		closeReturned.Store(true)
+		close(stop)
+		wg.Wait()
+
+		if n := violations.Load(); n > 0 {
+			t.Fatalf("handler ran %d times after Close returned", n)
+		}
+	}
+}
+
 func TestPublishAfterCloseIsNoop(t *testing.T) {
 	bus := New()
 	var called atomic.Int32

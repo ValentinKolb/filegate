@@ -3,23 +3,21 @@ package eventbus
 import (
 	"log"
 	"sync"
-	"sync/atomic"
 
 	"github.com/valentinkolb/filegate/domain"
 )
 
 // InMemory is an in-memory event bus with bounded asynchronous handler dispatch.
 type InMemory struct {
-	mu   sync.RWMutex
-	subs map[domain.EventType][]func(domain.Event)
+	mu     sync.RWMutex
+	subs   map[domain.EventType][]func(domain.Event)
+	closed bool
 
 	parallelism chan struct{}
 
-	// activeHandlers tracks in-flight async handler goroutines. Close
-	// observes it via wg.Wait to drain cleanly.
+	// wg tracks in-flight handlers (async and inline). Close observes it
+	// via wg.Wait to drain cleanly.
 	wg sync.WaitGroup
-
-	closed atomic.Bool
 }
 
 // New creates an InMemory event bus ready for use.
@@ -34,18 +32,24 @@ func New() *InMemory {
 // called Publish becomes a no-op and is safe to call (callers do not need
 // to coordinate with shutdown).
 func (b *InMemory) Publish(event domain.Event) {
-	if b.closed.Load() {
+	// The closed-check and wg.Add must both happen inside the read-locked
+	// section: Close flips the flag under the write lock, so a Publish
+	// that passed the check has finished its Add before Close starts
+	// wg.Wait. Checking the flag outside the lock allowed handlers to be
+	// spawned after Close had already returned.
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
 		return
 	}
-	b.mu.RLock()
 	handlers := append([]func(domain.Event){}, b.subs[event.Type]...)
 	handlers = append(handlers, b.subs["*"]...)
+	b.wg.Add(len(handlers))
 	b.mu.RUnlock()
 
 	for _, h := range handlers {
 		select {
 		case b.parallelism <- struct{}{}:
-			b.wg.Add(1)
 			go func(handler func(domain.Event)) {
 				defer b.wg.Done()
 				defer func() { <-b.parallelism }()
@@ -54,6 +58,7 @@ func (b *InMemory) Publish(event domain.Event) {
 		default:
 			// Backpressure fallback: run inline when the async budget is saturated.
 			safeInvoke(event, h)
+			b.wg.Done()
 		}
 	}
 }
@@ -67,8 +72,8 @@ func safeInvoke(event domain.Event, handler func(domain.Event)) {
 	handler(event)
 }
 
-// Subscribe registers handler for events of the given type. Use the empty
-// string (the "*" sentinel) to subscribe to all events.
+// Subscribe registers handler for events of the given type. Use the "*"
+// sentinel to subscribe to all events.
 func (b *InMemory) Subscribe(eventType domain.EventType, handler func(domain.Event)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -76,10 +81,14 @@ func (b *InMemory) Subscribe(eventType domain.EventType, handler func(domain.Eve
 }
 
 // Close marks the bus as closed (Publish becomes a no-op) and waits for
-// any in-flight async handler goroutines to finish. Idempotent.
+// any in-flight handlers to finish. Idempotent.
 func (b *InMemory) Close() {
-	if !b.closed.CompareAndSwap(false, true) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
 		return
 	}
+	b.closed = true
+	b.mu.Unlock()
 	b.wg.Wait()
 }
