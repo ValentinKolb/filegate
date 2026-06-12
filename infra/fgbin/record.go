@@ -3,7 +3,6 @@ package fgbin
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"sort"
 )
 
@@ -343,14 +342,4 @@ func ExtensionByID(ext []Extension, fieldID uint16) ([]byte, bool) {
 		}
 	}
 	return nil, false
-}
-
-// MustValidRecordType returns an error if t is not a recognized record type byte.
-func MustValidRecordType(t byte) error {
-	switch t {
-	case recordTypeEntity, recordTypeChild:
-		return nil
-	default:
-		return fmt.Errorf("%w: %d", ErrUnknownType, t)
-	}
 }

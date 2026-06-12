@@ -101,16 +101,6 @@ func FuzzChildRoundTrip(f *testing.F) {
 	})
 }
 
-func FuzzMustValidRecordType(f *testing.F) {
-	f.Add(byte(1))
-	f.Add(byte(2))
-	f.Add(byte(0))
-	f.Add(byte(255))
-	f.Fuzz(func(t *testing.T, b byte) {
-		_ = MustValidRecordType(b)
-	})
-}
-
 func FuzzDecodeEntityWithCorruptedLengths(f *testing.F) {
 	base, err := EncodeEntity(Entity{Name: "a", MimeType: "b"})
 	if err != nil {
