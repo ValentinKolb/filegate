@@ -103,6 +103,9 @@ type Index struct {
 // Open creates or opens a Pebble-backed index at the given path.
 func Open(path string, blockCacheBytes int64) (*Index, error) {
 	cache := pebble.NewCache(blockCacheBytes)
+	// pebble.Open takes its own reference; release ours so the cache
+	// memory is freed when the DB closes.
+	defer cache.Unref()
 	pebbleLogger := &nonFatalPebbleLogger{}
 	opts := &pebble.Options{
 		Cache: cache,
@@ -113,7 +116,6 @@ func Open(path string, blockCacheBytes int64) (*Index, error) {
 	}
 	db, err := pebble.Open(path, opts)
 	if err != nil {
-		cache.Unref()
 		return nil, err
 	}
 	idx := &Index{db: db}
