@@ -1733,22 +1733,31 @@ func (s *Service) CreateChild(parentID FileID, name string, isDir bool, ownershi
 		}
 	}
 
+	// Atomic no-replace creates. The Stat pre-check above gives the
+	// friendly ErrConflict for the common case, but it leaves a window
+	// against external writers; Mkdir / commitNoReplace (via
+	// writeFileAtomic mustNotExist) fail with EEXIST instead of
+	// truncating whatever appeared in between.
 	if isDir {
-		if err := s.store.MkdirAll(abs, dirPerm); err != nil {
+		if err := os.Mkdir(abs, dirPerm); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return nil, ErrConflict
+			}
+			return nil, err
+		}
+		if err := s.applyOwnership(abs, effectiveOwnership, true); err != nil {
 			return nil, err
 		}
 	} else {
-		w, err := s.store.OpenWrite(abs, filePerm)
+		newFileID, err := newID()
 		if err != nil {
 			return nil, err
 		}
-		if err := w.Close(); err != nil {
+		// writeFileAtomic applies ownership to the temp file before the
+		// atomic link, so no separate applyOwnership pass is needed.
+		if _, err := s.writeFileAtomic(abs, strings.NewReader(""), filePerm, effectiveOwnership, &newFileID, true); err != nil {
 			return nil, err
 		}
-	}
-
-	if err := s.applyOwnership(abs, effectiveOwnership, isDir); err != nil {
-		return nil, err
 	}
 	if err := s.syncSingle(abs); err != nil {
 		return nil, err
