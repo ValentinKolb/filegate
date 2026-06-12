@@ -342,6 +342,12 @@ func writePartTempTeeMD5(body io.Reader, partPath string, expectedETag string) (
 	hasher := md5.New()
 	tee := io.MultiWriter(f, hasher)
 	written, err := io.Copy(tee, body)
+	// fsync the data file so the rename'd part survives a crash —
+	// otherwise a client that uploaded parts over hours could lose
+	// them right before Complete.
+	if err == nil {
+		err = f.Sync()
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -357,10 +363,9 @@ func writePartTempTeeMD5(body io.Reader, partPath string, expectedETag string) (
 		_ = os.Remove(tmp)
 		return "", 0, "", sigErr(errBadDigest, "Content-MD5 does not match part body")
 	}
-	// fsync the data file so the rename'd part is durable.
-	if err := filesystem.SyncDir(filepath.Dir(tmp)); err == nil {
-		// ignore — best-effort dir-sync
-	}
+	// Best-effort dir-sync so the temp entry itself is durable before
+	// the caller's rename publishes it.
+	_ = filesystem.SyncDir(filepath.Dir(tmp))
 	return tmp, written, partETag, nil
 }
 
