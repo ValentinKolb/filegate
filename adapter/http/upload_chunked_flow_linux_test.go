@@ -43,6 +43,74 @@ func chunkedStart(t *testing.T, r http.Handler, parentID, filename string, size,
 	return out
 }
 
+// TestChunkedStartDoesNotTouchManifestWhileFinalizing pins the
+// finalize fence: a /start resume arriving while the upload is
+// finalizing must not rewrite the manifest — finalize works on a copy
+// outside the upload lock and a concurrent resume write could corrupt
+// the manifest (fixed tmp name) or clobber Completed state.
+func TestChunkedStartDoesNotTouchManifestWhileFinalizing(t *testing.T) {
+	r, svc, cleanup := newTestRouter(t)
+	defer cleanup()
+
+	root := svc.ListRoot()[0]
+	rootAbs, err := svc.ResolveAbsPath(root.ID)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	content := []byte("abcdefghijkl")
+	checksum := sha256Prefixed(content)
+
+	start := chunkedStart(t, r, root.ID.String(), "fence.bin", int64(len(content)), 4, checksum)
+	uploadID, _ := start["uploadId"].(string)
+	if uploadID == "" {
+		t.Fatalf("missing uploadId")
+	}
+
+	manifest := filepath.Join(rootAbs, ".fg-uploads", uploadID, "manifest.json")
+	raw, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	meta["finalizing"] = true
+	frozen, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("encode manifest: %v", err)
+	}
+	if err := os.WriteFile(manifest, frozen, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	// Resume with a different conflict mode while "finalizing".
+	body, err := json.Marshal(map[string]any{
+		"parentId":   root.ID.String(),
+		"filename":   "fence.bin",
+		"size":       int64(len(content)),
+		"checksum":   checksum,
+		"chunkSize":  4,
+		"onConflict": "overwrite",
+	})
+	if err != nil {
+		t.Fatalf("marshal resume body: %v", err)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, authedJSONRequest(http.MethodPost, "/v1/uploads/chunked/start", body))
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("resume status=%d body=%s", w.Result().StatusCode, w.Body.String())
+	}
+
+	after, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatalf("re-read manifest: %v", err)
+	}
+	if !bytes.Equal(after, frozen) {
+		t.Fatalf("manifest rewritten during finalize fence:\nbefore=%s\nafter=%s", frozen, after)
+	}
+}
+
 func TestChunkedUploadOutOfOrderDuplicateAndAutoComplete(t *testing.T) {
 	r, svc, cleanup := newTestRouter(t)
 	defer cleanup()

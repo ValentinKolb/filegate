@@ -591,36 +591,43 @@ func nodeFromMeta(m *chunkedUploadMeta, svc *domain.Service) (*apiv1.NodeWithChe
 	return out, nil
 }
 
+// finalize assembles and installs the upload. Caller contract
+// (handleChunk): meta.Finalizing was set and persisted under the upload
+// lock BEFORE calling, and finalize runs on a copy. While the flag is
+// set no other writer touches the manifest — chunk uploads and /start
+// resumes return early on Finalizing — so the copy stays authoritative.
+// Manifest writes below still take the upload lock: WriteFileAtomic
+// uses a fixed tmp name, so an unlocked write racing a locked one
+// could corrupt the manifest.
 func (m *chunkedManager) finalize(meta *chunkedUploadMeta) (*apiv1.NodeWithChecksum, error) {
 	if meta.Completed {
 		return nodeFromMeta(meta, m.svc)
 	}
-	meta.Finalizing = true
-	meta.UpdatedAt = time.Now().UnixMilli()
-	if err := m.writeMeta(meta); err != nil {
-		return nil, err
+	writeState := func() error {
+		lock := m.lock(meta.UploadID)
+		lock.Lock()
+		defer lock.Unlock()
+		meta.UpdatedAt = time.Now().UnixMilli()
+		return m.writeMeta(meta)
+	}
+	resetFinalizing := func() {
+		meta.Finalizing = false
+		if wErr := writeState(); wErr != nil {
+			log.Printf("[filegate] warning: failed to reset finalizing state for upload %s: %v", meta.UploadID, wErr)
+		}
 	}
 
 	actual, size, err := hashWholeFile(meta.PartPath)
 	if err != nil {
-		meta.Finalizing = false
-		if wErr := m.writeMeta(meta); wErr != nil {
-			log.Printf("[filegate] warning: failed to reset finalizing state for upload %s: %v", meta.UploadID, wErr)
-		}
+		resetFinalizing()
 		return nil, err
 	}
 	if size != meta.Size {
-		meta.Finalizing = false
-		if wErr := m.writeMeta(meta); wErr != nil {
-			log.Printf("[filegate] warning: failed to reset finalizing state for upload %s: %v", meta.UploadID, wErr)
-		}
+		resetFinalizing()
 		return nil, fmt.Errorf("assembled size mismatch")
 	}
 	if actual != meta.Checksum {
-		meta.Finalizing = false
-		if wErr := m.writeMeta(meta); wErr != nil {
-			log.Printf("[filegate] warning: failed to reset finalizing state for upload %s: %v", meta.UploadID, wErr)
-		}
+		resetFinalizing()
 		return nil, fmt.Errorf("checksum mismatch")
 	}
 
@@ -630,10 +637,7 @@ func (m *chunkedManager) finalize(meta *chunkedUploadMeta) (*apiv1.NodeWithCheck
 	}
 	fileMeta, err := m.svc.ReplaceFile(meta.ParentID, meta.Filename, meta.PartPath, meta.Ownership, finalizeMode)
 	if err != nil {
-		meta.Finalizing = false
-		if wErr := m.writeMeta(meta); wErr != nil {
-			log.Printf("[filegate] warning: failed to reset finalizing state for upload %s: %v", meta.UploadID, wErr)
-		}
+		resetFinalizing()
 		return nil, err
 	}
 
@@ -641,8 +645,7 @@ func (m *chunkedManager) finalize(meta *chunkedUploadMeta) (*apiv1.NodeWithCheck
 	meta.Completed = true
 	meta.CompletedChecksum = actual
 	meta.CompletedNodeID = fileMeta.ID.String()
-	meta.UpdatedAt = time.Now().UnixMilli()
-	if err := m.writeMeta(meta); err != nil {
+	if err := writeState(); err != nil {
 		return nil, err
 	}
 	m.clearChunkLocks(meta.UploadID)
@@ -788,13 +791,20 @@ func (m *chunkedManager) handleStart(w http.ResponseWriter, r *http.Request) {
 		// it even if it differs from the persisted one. This lets a client
 		// retry with "overwrite" or "rename" after an initial "error" was
 		// rejected at finalize, without needing to abandon the upload.
-		if mode != domain.ConflictError || strings.TrimSpace(body.OnConflict) != "" {
-			meta.OnConflict = mode
-		}
-		meta.UpdatedAt = time.Now().UnixMilli()
-		if err := m.writeMeta(meta); err != nil {
-			writeErr(w, http.StatusInternalServerError, "failed to update upload")
-			return
+		//
+		// Skipped while finalizing or after completion: finalize works on
+		// a copy outside the upload lock and relies on the Finalizing flag
+		// fencing every other manifest writer — a resume write here would
+		// race it (and could clobber Completed state).
+		if !meta.Finalizing && !meta.Completed {
+			if mode != domain.ConflictError || strings.TrimSpace(body.OnConflict) != "" {
+				meta.OnConflict = mode
+			}
+			meta.UpdatedAt = time.Now().UnixMilli()
+			if err := m.writeMeta(meta); err != nil {
+				writeErr(w, http.StatusInternalServerError, "failed to update upload")
+				return
+			}
 		}
 	}
 
