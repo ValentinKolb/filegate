@@ -542,3 +542,13 @@ func encodeChunks(t *testing.T, chunks [][]byte, signingKey []byte, seedSig, tim
 	fmt.Fprintf(&buf, "0;chunk-signature=%s\r\n\r\n", sig)
 	return buf.Bytes(), sig
 }
+
+// readAllChunked drains the decoder fully and returns the
+// concatenated decoded bytes. Test-only helper.
+func readAllChunked(d *chunkedDecoder) ([]byte, error) {
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, d); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}

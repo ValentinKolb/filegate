@@ -2,7 +2,6 @@ package s3
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -324,12 +323,3 @@ func discardChunkTrailers(src *bufio.Reader) error {
 	}
 }
 
-// readAllChunked is a convenience for tests / verification: drains
-// the decoder fully and returns the concatenated decoded bytes.
-func readAllChunked(d *chunkedDecoder) ([]byte, error) {
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, d); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
