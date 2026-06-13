@@ -2241,6 +2241,11 @@ func (s *Service) reParentNode(id FileID, oldName string, newParentID FileID, ne
 		return err
 	}
 	oldParentID := entity.ParentID
+	// Capture the pre-move path while the index still reflects it: the
+	// moved node's descendants have id→path cache entries under THIS
+	// prefix, and they must be dropped after the move (the full-purge
+	// that used to hide this is gone).
+	oldVP, oldVPErr := s.VirtualPath(id)
 
 	newParentAbs, err := s.ResolveAbsPath(newParentID)
 	if err != nil {
@@ -2279,6 +2284,11 @@ func (s *Service) reParentNode(id FileID, oldName string, newParentID FileID, ne
 	}
 	oldParentPath, _ := s.VirtualPath(oldParentID)
 	newParentPath, _ := s.VirtualPath(newParentID)
+	if oldVPErr == nil {
+		s.invalidateCachePrefix(oldVP)
+	} else {
+		s.purgePathCaches()
+	}
 	s.invalidateCacheByID(id)
 	s.InvalidatePathCache(oldParentPath)
 	s.InvalidatePathCache(newParentPath)
@@ -3562,13 +3572,18 @@ func (s *Service) Stats() (*ServiceStats, error) {
 	}, nil
 }
 
+// InvalidatePathCache drops the path→id mapping for one exact path.
+// It does NOT touch the id→path cache: entries there only go stale
+// when an id's path changes, and every mutator handles that through
+// invalidateCacheByID / invalidateCachePrefix on the affected ids. A
+// dead id's leftover mapping is unreachable (entity lookups fail
+// first) and ages out of the LRU.
 func (s *Service) InvalidatePathCache(path string) {
 	key := normalizeCacheKey(path)
 	if key == "" {
 		return
 	}
 	s.cache.Remove(key)
-	s.idPathCache.Purge()
 }
 
 func (s *Service) purgePathCaches() {
@@ -3601,19 +3616,32 @@ func parentCacheKey(v string) string {
 	return p
 }
 
+// invalidateCachePrefix drops every cached mapping at or under
+// pathPrefix from BOTH caches. The id→path side is scanned the same
+// way the path→id side always was — same O(cache size) cost, but hot
+// entries for unrelated paths survive instead of being purged on
+// every mutation.
 func (s *Service) invalidateCachePrefix(pathPrefix string) {
 	prefix := normalizeCacheKey(pathPrefix)
 	if prefix == "" {
 		s.purgePathCaches()
 		return
 	}
-	keys := s.cache.Keys()
-	for _, key := range keys {
+	for _, key := range s.cache.Keys() {
 		if key == prefix || strings.HasPrefix(key, prefix+"/") {
 			s.cache.Remove(key)
 		}
 	}
-	s.idPathCache.Purge()
+	for _, id := range s.idPathCache.Keys() {
+		vp, ok := s.idPathCache.Peek(id)
+		if !ok {
+			continue
+		}
+		key := normalizeCacheKey(vp)
+		if key == prefix || strings.HasPrefix(key, prefix+"/") {
+			s.idPathCache.Remove(id)
+		}
+	}
 }
 
 func (s *Service) invalidateCacheByID(id FileID) {
