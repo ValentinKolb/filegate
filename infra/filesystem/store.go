@@ -55,6 +55,10 @@ func (s *Store) Rename(oldPath, newPath string) error {
 	return os.Rename(oldPath, newPath)
 }
 
+func (s *Store) RenameNoReplace(oldPath, newPath string) error {
+	return renameNoReplace(oldPath, newPath)
+}
+
 func (s *Store) OpenRead(path string) (io.ReadCloser, error) {
 	return os.Open(path)
 }

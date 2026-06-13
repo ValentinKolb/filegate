@@ -101,6 +101,12 @@ type Store interface {
 	RemoveAll(path string) error
 	Remove(path string) error
 	Rename(oldPath, newPath string) error
+	// RenameNoReplace renames oldPath to newPath, failing with an error
+	// matching errors.Is(err, os.ErrExist) when newPath already exists —
+	// atomically, without the Stat-then-Rename window in which an
+	// external writer's file at newPath would be silently clobbered.
+	// Backed by renameat2(RENAME_NOREPLACE) on Linux.
+	RenameNoReplace(oldPath, newPath string) error
 	OpenRead(path string) (io.ReadCloser, error)
 	OpenWrite(path string, perm os.FileMode) (io.WriteCloser, error)
 	SetID(path string, id FileID) error

@@ -1884,7 +1884,14 @@ func (s *Service) UpdateNode(id FileID, name *string, ownership *Ownership, recu
 				return nil, err
 			}
 
-			if err := s.store.Rename(abs, targetAbs); err != nil {
+			// No-replace rename: the Stat above gives the friendly
+			// conflict answer, but an external writer can still drop a
+			// file at targetAbs in between — plain rename(2) would
+			// silently clobber it.
+			if err := s.store.RenameNoReplace(abs, targetAbs); err != nil {
+				if errors.Is(err, os.ErrExist) {
+					return nil, ErrConflict
+				}
 				return nil, err
 			}
 			abs = targetAbs
@@ -2174,7 +2181,16 @@ func (s *Service) Transfer(req TransferRequest) (*FileMeta, error) {
 	}
 
 	if req.Op == "move" {
-		if err := s.store.Rename(sourceAbs, targetAbs); err != nil {
+		// No-replace rename: the conflict was resolved above (error
+		// checked / target deleted / unique name picked), but an
+		// external writer can still drop a file at targetAbs in the
+		// window — plain rename(2) would silently clobber it. EEXIST
+		// must NOT fall through to the copy path, which would write
+		// over the target; only genuine rename failures (EXDEV) do.
+		if err := s.store.RenameNoReplace(sourceAbs, targetAbs); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return nil, ErrConflict
+			}
 			if err := s.copyPath(sourceAbs, targetAbs, true); err != nil {
 				return nil, err
 			}
