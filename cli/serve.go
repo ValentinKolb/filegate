@@ -149,10 +149,21 @@ func newDaemonServeCmd() *cobra.Command {
 					cfg.Versioning.Enabled)
 			}
 
+			trustedProxies, err := httpadapter.ParseTrustedProxies(cfg.Server.TrustedProxies)
+			if err != nil {
+				cancel()
+				detector.Close()
+				<-detectorDone
+				<-prunerDone
+				_ = idx.Close()
+				return err
+			}
+
 			router := httpadapter.NewRouter(svc, httpadapter.RouterOptions{
 				BearerToken:              cfg.Auth.BearerToken,
 				AccessLogEnabled:         cfg.Server.AccessLogEnabled,
 				PublicURL:                cfg.Server.PublicURL,
+				TrustedProxies:           trustedProxies,
 				CORS:                     cfg.Server.CORS,
 				IndexPath:                cfg.Storage.IndexPath,
 				JobWorkers:               cfg.Jobs.Workers,

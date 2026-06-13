@@ -37,6 +37,7 @@ func allConfigFlagSpecs() []configFlagSpec {
 	return []configFlagSpec{
 		{Name: "server-listen", Path: "server.listen", Kind: configFlagString, Usage: "REST listener address"},
 		{Name: "server-public-url", Path: "server.public_url", Kind: configFlagString, Usage: "public REST base URL used when minting direct upload URLs"},
+		{Name: "server-trusted-proxies", Path: "server.trusted_proxies", Kind: configFlagStringArray, Usage: "proxy IP or CIDR whose X-Forwarded-For is honored; repeat for multiple; empty ignores forward headers"},
 		{Name: "server-cors-allowed-origins", Path: "server.cors.allowed_origins", Kind: configFlagStringArray, Usage: "CORS allowed origin; repeat for multiple origins; empty disables CORS"},
 		{Name: "server-cors-allowed-methods", Path: "server.cors.allowed_methods", Kind: configFlagStringArray, Usage: "CORS allowed method; repeat for multiple methods; empty uses REST defaults"},
 		{Name: "server-cors-allowed-headers", Path: "server.cors.allowed_headers", Kind: configFlagStringArray, Usage: "CORS allowed request header; repeat for multiple headers; empty uses REST defaults"},
@@ -143,6 +144,8 @@ func applyChangedConfigFlag(flags *pflag.FlagSet, spec configFlagSpec, cfg *doma
 		cfg.Server.Listen = getFlagString(flags, spec.Name)
 	case "server.public_url":
 		cfg.Server.PublicURL = strings.TrimRight(getFlagString(flags, spec.Name), "/")
+	case "server.trusted_proxies":
+		cfg.Server.TrustedProxies = cleanStringList(getFlagStringArray(flags, spec.Name))
 	case "server.cors.allowed_origins":
 		cfg.Server.CORS.AllowedOrigins = cleanStringList(getFlagStringArray(flags, spec.Name))
 	case "server.cors.allowed_methods":

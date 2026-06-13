@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/viper"
 
+	httpadapter "github.com/valentinkolb/filegate/adapter/http"
 	"github.com/valentinkolb/filegate/domain"
 )
 
@@ -18,6 +19,7 @@ func loadConfig(configFile string) (domain.Config, error) {
 
 	v.SetDefault("server.listen", ":8080")
 	v.SetDefault("server.public_url", "")
+	v.SetDefault("server.trusted_proxies", []string{})
 	v.SetDefault("server.cors.allowed_origins", []string{})
 	v.SetDefault("server.cors.allowed_methods", []string{})
 	v.SetDefault("server.cors.allowed_headers", []string{})
@@ -157,6 +159,14 @@ func loadConfig(configFile string) (domain.Config, error) {
 	cfg.Server.WriteTimeout = v.GetDuration("server.write_timeout")
 	cfg.Server.ShutdownTimeout = v.GetDuration("server.shutdown_timeout")
 	cfg.Server.CORS.MaxAge = v.GetDuration("server.cors.max_age")
+	if len(cfg.Server.TrustedProxies) == 0 {
+		cfg.Server.TrustedProxies = splitList(v.GetString("server.trusted_proxies"))
+	}
+	// Validate eagerly so `fg config validate` and startup both reject
+	// a malformed entry instead of silently trusting nobody.
+	if _, err := httpadapter.ParseTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		return cfg, err
+	}
 	if len(cfg.Server.CORS.AllowedOrigins) == 0 {
 		cfg.Server.CORS.AllowedOrigins = splitList(v.GetString("server.cors.allowed_origins"))
 	}

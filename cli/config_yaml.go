@@ -240,8 +240,9 @@ func appendMapNode(node *yaml.Node, key string, value *yaml.Node) {
 func configDisplayMap(cfg domain.Config, showSecrets bool) map[string]any {
 	return map[string]any{
 		"server": map[string]any{
-			"listen":     cfg.Server.Listen,
-			"public_url": cfg.Server.PublicURL,
+			"listen":          cfg.Server.Listen,
+			"public_url":      cfg.Server.PublicURL,
+			"trusted_proxies": cfg.Server.TrustedProxies,
 			"cors": map[string]any{
 				"allowed_origins":   cfg.Server.CORS.AllowedOrigins,
 				"allowed_methods":   cfg.Server.CORS.AllowedMethods,

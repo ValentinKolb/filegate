@@ -127,9 +127,16 @@ type S3KeyConfig struct {
 }
 
 // ServerConfig controls HTTP server behavior.
+//
+// TrustedProxies lists the peers (IPs or CIDRs) whose
+// X-Forwarded-For / X-Real-Ip headers are honored for the logged
+// client address. Empty (the default) means the headers are ignored —
+// any direct client could otherwise spoof its logged IP. Operators
+// behind Traefik/Caddy/nginx list the proxy's address here.
 type ServerConfig struct {
 	Listen           string        `mapstructure:"listen"`
 	PublicURL        string        `mapstructure:"public_url"`
+	TrustedProxies   []string      `mapstructure:"trusted_proxies"`
 	CORS             CORSConfig    `mapstructure:"cors"`
 	WriteTimeout     time.Duration `mapstructure:"write_timeout"`
 	AccessLogEnabled bool          `mapstructure:"access_log_enabled"`

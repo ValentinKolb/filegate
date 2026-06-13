@@ -98,6 +98,7 @@ Special host handling:
 ```bash
 --server-listen
 --server-public-url
+--server-trusted-proxies
 --server-cors-allowed-origins
 --server-cors-allowed-methods
 --server-cors-allowed-headers

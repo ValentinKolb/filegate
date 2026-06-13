@@ -3,6 +3,11 @@ server:
   # Public REST base URL used when minting direct browser upload URLs.
   # Leave empty when requests already arrive with the public host/scheme.
   public_url: ""
+  # Proxy IPs/CIDRs whose X-Forwarded-For / X-Real-Ip headers are
+  # honored for the logged client address. Empty ignores the headers —
+  # otherwise any direct client could spoof its logged IP. Behind
+  # Traefik/Caddy/nginx, list the proxy address, e.g. ["127.0.0.1"].
+  trusted_proxies: []
   cors:
     # Empty allowed_origins disables CORS. Prefer configuring CORS at
     # Traefik/Caddy/nginx; use this only when Filegate must answer

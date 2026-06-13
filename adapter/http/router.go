@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -32,9 +33,13 @@ import (
 // RouterOptions configures the HTTP router including authentication, upload limits,
 // thumbnail generation, and background job worker pools.
 type RouterOptions struct {
-	BearerToken              string
-	AccessLogEnabled         bool
-	PublicURL                string
+	BearerToken      string
+	AccessLogEnabled bool
+	PublicURL        string
+	// TrustedProxies are the peers whose X-Forwarded-For / X-Real-Ip
+	// headers are honored (see ParseTrustedProxies). Empty = headers
+	// ignored.
+	TrustedProxies           []netip.Prefix
 	CORS                     domain.CORSConfig
 	IndexPath                string
 	JobWorkers               int
@@ -613,7 +618,11 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, apiv1.IndexResolveManyResponse{Items: items, Total: len(items)})
 	})
-	chain := []middlewareFunc{recoverMiddleware, requestIDMiddleware, realIPMiddleware, secureHeadersMiddleware}
+	chain := []middlewareFunc{recoverMiddleware, requestIDMiddleware}
+	if realIP := realIPMiddleware(opts.TrustedProxies); realIP != nil {
+		chain = append(chain, realIP)
+	}
+	chain = append(chain, secureHeadersMiddleware)
 	if cors := corsMiddleware(opts.CORS); cors != nil {
 		chain = append(chain, cors)
 	}
@@ -1176,23 +1185,113 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func realIPMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-		if xff != "" {
-			if idx := strings.IndexByte(xff, ','); idx >= 0 {
-				xff = strings.TrimSpace(xff[:idx])
+// ParseTrustedProxies converts the configured server.trusted_proxies
+// entries (bare IPs or CIDRs) into prefixes. Returns an error on the
+// first malformed entry so startup fails loudly instead of silently
+// trusting nobody.
+func ParseTrustedProxies(entries []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(entries))
+	for _, raw := range entries {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if strings.Contains(raw, "/") {
+			p, err := netip.ParsePrefix(raw)
+			if err != nil {
+				return nil, fmt.Errorf("server.trusted_proxies entry %q is not a valid CIDR: %w", raw, err)
 			}
-			if ip, err := netip.ParseAddr(xff); err == nil {
-				r.RemoteAddr = ip.String()
-			}
-		} else if xrip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); xrip != "" {
-			if ip, err := netip.ParseAddr(xrip); err == nil {
-				r.RemoteAddr = ip.String()
+			out = append(out, p.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("server.trusted_proxies entry %q is not a valid IP or CIDR: %w", raw, err)
+		}
+		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return out, nil
+}
+
+// realIPMiddleware rewrites r.RemoteAddr from X-Forwarded-For /
+// X-Real-Ip, but ONLY when the direct peer is a configured trusted
+// proxy — any direct client could otherwise spoof its logged address.
+// Returns nil (middleware skipped entirely) when no proxies are
+// trusted, which is the default.
+func realIPMiddleware(trusted []netip.Prefix) middlewareFunc {
+	if len(trusted) == 0 {
+		return nil
+	}
+	inTrusted := func(a netip.Addr) bool {
+		a = a.Unmap()
+		for _, p := range trusted {
+			if p.Contains(a) {
+				return true
 			}
 		}
-		next.ServeHTTP(w, r)
-	})
+		return false
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			peer, err := peerAddr(r.RemoteAddr)
+			if err == nil && inTrusted(peer) {
+				if client, ok := clientFromForwardHeaders(r, inTrusted); ok {
+					r.RemoteAddr = client.String()
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// clientFromForwardHeaders extracts the real client address from the
+// proxy headers. X-Forwarded-For is walked right to left: the rightmost
+// entries were appended by our own trusted proxy chain, anything the
+// client pre-filled sits further left — the first hop that is not
+// itself a trusted proxy is the client. A malformed entry distrusts the
+// whole chain. X-Real-Ip is the fallback when no X-Forwarded-For is
+// present.
+func clientFromForwardHeaders(r *http.Request, inTrusted func(netip.Addr) bool) (netip.Addr, bool) {
+	if xff := strings.TrimSpace(strings.Join(r.Header.Values("X-Forwarded-For"), ",")); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			hop := strings.TrimSpace(parts[i])
+			if hop == "" {
+				continue
+			}
+			addr, err := netip.ParseAddr(hop)
+			if err != nil {
+				return netip.Addr{}, false
+			}
+			if inTrusted(addr) {
+				continue
+			}
+			return addr.Unmap(), true
+		}
+		// Every hop is a trusted proxy — proxy-internal traffic; keep
+		// the peer address.
+		return netip.Addr{}, false
+	}
+	if xrip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); xrip != "" {
+		if addr, err := netip.ParseAddr(xrip); err == nil {
+			return addr.Unmap(), true
+		}
+	}
+	return netip.Addr{}, false
+}
+
+// peerAddr parses the connection peer out of r.RemoteAddr, tolerating
+// the port-less form some tests use.
+func peerAddr(remoteAddr string) (netip.Addr, error) {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return addr.Unmap(), nil
 }
 
 type statusWriter struct {
