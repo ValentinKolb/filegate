@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type directUploadManager struct {
 	svc            *domain.Service
 	secret         []byte
 	publicURL      string
+	trusted        []netip.Prefix
 	maxUploadBytes int64
 }
 
@@ -40,7 +42,7 @@ type directUploadToken struct {
 	Nonce       string `json:"nonce"`
 }
 
-func newDirectUploadManager(svc *domain.Service, bearerToken, publicURL string, maxUploadBytes int64) *directUploadManager {
+func newDirectUploadManager(svc *domain.Service, bearerToken, publicURL string, maxUploadBytes int64, trusted []netip.Prefix) *directUploadManager {
 	if maxUploadBytes <= 0 {
 		maxUploadBytes = int64(500 * 1024 * 1024)
 	}
@@ -48,6 +50,7 @@ func newDirectUploadManager(svc *domain.Service, bearerToken, publicURL string, 
 		svc:            svc,
 		secret:         []byte(strings.TrimSpace(bearerToken)),
 		publicURL:      strings.TrimRight(strings.TrimSpace(publicURL), "/"),
+		trusted:        append([]netip.Prefix(nil), trusted...),
 		maxUploadBytes: maxUploadBytes,
 	}
 }
@@ -216,14 +219,17 @@ func (m *directUploadManager) baseURLForRequest(r *http.Request) (string, error)
 	if m.publicURL != "" {
 		return m.publicURL, nil
 	}
-	host := firstHeaderValue(r.Header.Get("X-Forwarded-Host"))
-	if host == "" {
-		host = r.Host
+	host := r.Host
+	proto := ""
+	if peerTrusted(r.RemoteAddr, m.trusted) {
+		if forwardedHost := firstHeaderValue(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+			host = forwardedHost
+		}
+		proto = firstHeaderValue(r.Header.Get("X-Forwarded-Proto"))
 	}
 	if strings.TrimSpace(host) == "" {
 		return "", fmt.Errorf("missing host")
 	}
-	proto := firstHeaderValue(r.Header.Get("X-Forwarded-Proto"))
 	if proto == "" {
 		if r.TLS != nil {
 			proto = "https"

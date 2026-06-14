@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,6 +135,39 @@ func TestEnsureFileSHA256BackfillsMissingFingerprint(t *testing.T) {
 	}
 	if persisted.SHA256 != sha256sum(body) {
 		t.Fatalf("persisted SHA256=%q, want %q", persisted.SHA256, sha256sum(body))
+	}
+}
+
+func TestEnsureFileSHA256RejectsStaleEntity(t *testing.T) {
+	svc, idx, cleanup := newServiceWithIndex(t)
+	defer cleanup()
+
+	rootName := svc.ListRoot()[0].Name
+	body := []byte("legacy sha backfill with stale entity")
+	meta, _, err := svc.WriteContentByVirtualPath(
+		"/"+rootName+"/stale-sha.txt",
+		strings.NewReader(string(body)),
+		domain.ConflictError,
+	)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	entity, err := idx.GetEntity(meta.ID)
+	if err != nil {
+		t.Fatalf("get entity: %v", err)
+	}
+	entity.SHA256 = ""
+	entity.Size++
+	if err := idx.Batch(func(b domain.Batch) error {
+		b.PutEntity(*entity)
+		return nil
+	}); err != nil {
+		t.Fatalf("write stale entity: %v", err)
+	}
+
+	if _, err := svc.EnsureFileSHA256(meta.ID); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("EnsureFileSHA256 err=%v, want ErrConflict", err)
 	}
 }
 

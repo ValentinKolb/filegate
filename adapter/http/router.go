@@ -117,7 +117,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 	thumbnailQueueSize := resolveThumbnailQueueSize(opts)
 
 	thumbnailScheduler := jobs.New(thumbnailWorkers, thumbnailQueueSize)
-	directUploads := newDirectUploadManager(svc, opts.BearerToken, opts.PublicURL, opts.MaxUploadBytes)
+	directUploads := newDirectUploadManager(svc, opts.BearerToken, opts.PublicURL, opts.MaxUploadBytes, opts.TrustedProxies)
 	uploadSessions := newUploadSessionManager(
 		svc,
 		opts.BearerToken,
@@ -1366,6 +1366,22 @@ func peerAddr(remoteAddr string) (netip.Addr, error) {
 		return netip.Addr{}, err
 	}
 	return addr.Unmap(), nil
+}
+
+func peerTrusted(remoteAddr string, trusted []netip.Prefix) bool {
+	if len(trusted) == 0 {
+		return false
+	}
+	peer, err := peerAddr(remoteAddr)
+	if err != nil {
+		return false
+	}
+	for _, p := range trusted {
+		if p.Contains(peer) {
+			return true
+		}
+	}
+	return false
 }
 
 type statusWriter struct {

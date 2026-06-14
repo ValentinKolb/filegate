@@ -4,6 +4,7 @@ package httpadapter
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -91,8 +92,31 @@ func TestUploadSessionPutCommitAndResolve(t *testing.T) {
 	if commit.Result().StatusCode != http.StatusOK {
 		t.Fatalf("commit status=%d body=%s", commit.Result().StatusCode, commit.Body.String())
 	}
+	var committed apiv1.UploadSessionCommitResponse
+	if err := json.NewDecoder(commit.Result().Body).Decode(&committed); err != nil {
+		t.Fatalf("decode commit response: %v", err)
+	}
+	wantMD5 := md5.Sum(content)
+	if committed.Node.ETag != hex.EncodeToString(wantMD5[:]) {
+		t.Fatalf("commit ETag=%q, want %x", committed.Node.ETag, wantMD5)
+	}
+	if committed.Node.SHA256 != sha256Prefixed(content) {
+		t.Fatalf("commit SHA256=%q, want %q", committed.Node.SHA256, sha256Prefixed(content))
+	}
 	if _, err := svc.ResolvePath(root.Name + "/uploads/resumable.txt"); err != nil {
 		t.Fatalf("resolve committed file: %v", err)
+	}
+	committedID, err := domain.ParseFileID(committed.Node.ID)
+	if err != nil {
+		t.Fatalf("parse committed id: %v", err)
+	}
+	persisted, err := svc.GetFile(committedID)
+	if err != nil {
+		t.Fatalf("get committed file: %v", err)
+	}
+	if persisted.ETag != committed.Node.ETag || persisted.SHA256 != committed.Node.SHA256 {
+		t.Fatalf("persisted hashes ETag=%q SHA256=%q, want %q %q",
+			persisted.ETag, persisted.SHA256, committed.Node.ETag, committed.Node.SHA256)
 	}
 	rootAbs, err := svc.ResolveAbsPath(root.ID)
 	if err != nil {

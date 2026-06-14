@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,73 @@ func TestDirectUploadURLWritesWithoutBearer(t *testing.T) {
 	}
 }
 
+func TestDirectUploadURLIgnoresUntrustedForwardedHost(t *testing.T) {
+	r, svc, cleanup := newTestRouterWithCustomLimits(t, t.TempDir(), t.TempDir(), RouterOptions{
+		BearerToken:           "test-token",
+		JobWorkers:            2,
+		JobQueueSize:          64,
+		UploadExpiry:          time.Hour,
+		UploadCleanupInterval: time.Hour,
+		MaxChunkBytes:         10 << 20,
+		MaxUploadBytes:        1024,
+	})
+	defer cleanup()
+
+	root := svc.ListRoot()[0]
+	body := []byte(`{"path":"` + root.Name + `/direct-host.txt","maxBytes":64,"expiresInSeconds":60}`)
+	req := authedJSONRequest(http.MethodPost, "/v1/uploads/direct", body)
+	req.Host = "files.local"
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Forwarded-Host", "attacker.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Result().StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Result().StatusCode, w.Body.String())
+	}
+	var out apiv1.DirectUploadURLResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.HasPrefix(out.UploadURL, "http://files.local/v1/uploads/direct/") {
+		t.Fatalf("uploadUrl=%q", out.UploadURL)
+	}
+}
+
+func TestDirectUploadURLHonorsTrustedForwardedHost(t *testing.T) {
+	r, svc, cleanup := newTestRouterWithCustomLimits(t, t.TempDir(), t.TempDir(), RouterOptions{
+		BearerToken:           "test-token",
+		TrustedProxies:        []netip.Prefix{netip.MustParsePrefix("203.0.113.10/32")},
+		JobWorkers:            2,
+		JobQueueSize:          64,
+		UploadExpiry:          time.Hour,
+		UploadCleanupInterval: time.Hour,
+		MaxChunkBytes:         10 << 20,
+		MaxUploadBytes:        1024,
+	})
+	defer cleanup()
+
+	root := svc.ListRoot()[0]
+	body := []byte(`{"path":"` + root.Name + `/direct-host.txt","maxBytes":64,"expiresInSeconds":60}`)
+	req := authedJSONRequest(http.MethodPost, "/v1/uploads/direct", body)
+	req.Host = "files.local"
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Forwarded-Host", "public.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Result().StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Result().StatusCode, w.Body.String())
+	}
+	var out apiv1.DirectUploadURLResponse
+	if err := json.NewDecoder(w.Result().Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.HasPrefix(out.UploadURL, "https://public.example/v1/uploads/direct/") {
+		t.Fatalf("uploadUrl=%q", out.UploadURL)
+	}
+}
+
 func TestDirectUploadCreateRequiresBearer(t *testing.T) {
 	r, svc, cleanup := newTestRouter(t)
 	defer cleanup()
@@ -103,7 +171,7 @@ func TestDirectUploadRejectsExpiredToken(t *testing.T) {
 	defer cleanup()
 
 	root := svc.ListRoot()[0]
-	direct := newDirectUploadManager(svc, "test-token", "", 1024)
+	direct := newDirectUploadManager(svc, "test-token", "", 1024, nil)
 	token, err := direct.sign(directUploadToken{
 		Version:    1,
 		Path:       root.Name + "/expired.txt",

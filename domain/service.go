@@ -687,14 +687,31 @@ func (s *Service) EnsureFileSHA256(id FileID) (*FileMeta, error) {
 		}
 	}
 
-	entity.SHA256 = sha
+	after, err := os.Lstat(abs)
+	if err != nil {
+		return nil, err
+	}
+	fresh, err := s.idx.GetEntity(id)
+	if err != nil {
+		return nil, err
+	}
+	if fresh.IsDir || fresh.SHA256 != "" {
+		return fileMetaFromEntity(fresh, vp), nil
+	}
+	afterDev, afterInode, _ := fileInodeIdentity(after)
+	if fresh.Size != after.Size() ||
+		fresh.Mtime != after.ModTime().UnixMilli() ||
+		(fresh.Device != 0 && fresh.Inode != 0 && (fresh.Device != afterDev || fresh.Inode != afterInode)) {
+		return nil, ErrConflict
+	}
+	fresh.SHA256 = sha
 	if err := s.idx.Batch(func(b Batch) error {
-		b.PutEntity(*entity)
+		b.PutEntity(*fresh)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return fileMetaFromEntity(entity, vp), nil
+	return fileMetaFromEntity(fresh, vp), nil
 }
 
 func (s *Service) GetFileByVirtualPath(virtualPath string) (*FileMeta, error) {

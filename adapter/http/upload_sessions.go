@@ -1,6 +1,7 @@
 package httpadapter
 
 import (
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -276,26 +277,30 @@ func generateUploadSessionID() (string, error) {
 	return uploadSessionIDPrefix + hex.EncodeToString(raw[:]), nil
 }
 
-func hashWholeFile(path string) (string, int64, error) {
+func hashWholeFile(path string) (domain.ContentHashes, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0, err
+		return domain.ContentHashes{}, 0, err
 	}
 	defer f.Close()
 
 	st, err := f.Stat()
 	if err != nil {
-		return "", 0, err
+		return domain.ContentHashes{}, 0, err
 	}
-	h := sha256.New()
+	md5Hash := md5.New()
+	shaHash := sha256.New()
 	bufPtr := copyBufPool.Get().(*[]byte)
 	buf := *bufPtr
-	_, copyErr := io.CopyBuffer(h, f, buf)
+	_, copyErr := io.CopyBuffer(io.MultiWriter(md5Hash, shaHash), f, buf)
 	copyBufPool.Put(bufPtr)
 	if copyErr != nil {
-		return "", 0, copyErr
+		return domain.ContentHashes{}, 0, copyErr
 	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), st.Size(), nil
+	return domain.ContentHashes{
+		MD5Hex: hex.EncodeToString(md5Hash.Sum(nil)),
+		SHA256: "sha256:" + hex.EncodeToString(shaHash.Sum(nil)),
+	}, st.Size(), nil
 }
 
 func uploadAllowed(allow []string, op string) bool {
@@ -464,20 +469,7 @@ func (m *uploadSessionManager) baseURLForRequest(r *http.Request) (string, error
 }
 
 func (m *uploadSessionManager) peerTrusted(remoteAddr string) bool {
-	if len(m.trusted) == 0 {
-		return false
-	}
-	peer, err := peerAddr(remoteAddr)
-	if err != nil {
-		return false
-	}
-	peer = peer.Unmap()
-	for _, p := range m.trusted {
-		if p.Contains(peer) {
-			return true
-		}
-	}
-	return false
+	return peerTrusted(remoteAddr, m.trusted)
 }
 
 func cleanSessionUploadPath(raw string) (string, error) {
@@ -1101,12 +1093,12 @@ func (m *uploadSessionManager) handleCommit(w http.ResponseWriter, r *http.Reque
 		statusFromErr(w, err)
 		return
 	}
-	actual, size, err := hashWholeFile(completePath)
+	hashes, size, err := hashWholeFile(completePath)
 	if err != nil {
 		statusFromErr(w, err)
 		return
 	}
-	if size != session.Size || actual != session.Checksum {
+	if size != session.Size || hashes.SHA256 != session.Checksum {
 		writeErr(w, http.StatusBadRequest, "checksum mismatch")
 		return
 	}
@@ -1130,7 +1122,7 @@ func (m *uploadSessionManager) handleCommit(w http.ResponseWriter, r *http.Reque
 		completePath,
 		session.Ownership,
 		session.OnConflict,
-		domain.ContentHashes{SHA256: session.Checksum},
+		hashes,
 	)
 	if err != nil {
 		cleanupParents()
@@ -1182,11 +1174,11 @@ func (m *uploadSessionManager) recoverCommittedSession(session domain.UploadSess
 	if err != nil {
 		return nil, false, err
 	}
-	checksum, size, err := hashWholeFile(abs)
+	hashes, size, err := hashWholeFile(abs)
 	if err != nil {
 		return nil, false, err
 	}
-	if size != session.Size || checksum != session.Checksum {
+	if size != session.Size || hashes.SHA256 != session.Checksum {
 		return nil, false, nil
 	}
 	now := time.Now().UnixMilli()
