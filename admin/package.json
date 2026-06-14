@@ -1,0 +1,22 @@
+{
+  "name": "@valentinkolb/filegate-admin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server.tsx",
+    "build": "bun run build:sdk && bun run src/build.ts",
+    "build:sdk": "bunx tsc -p ../sdk/ts/tsconfig.json && rm -rf node_modules/@valentinkolb/filegate/dist && cp -R ../sdk/ts/dist node_modules/@valentinkolb/filegate/dist",
+    "start": "bun dist/server.js"
+  },
+  "dependencies": {
+    "@valentinkolb/filegate": "file:../sdk/ts",
+    "@valentinkolb/ssr": "^0.10.0",
+    "hono": "^4.12.25",
+    "solid-js": "^1.9.13"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "typescript": "^5.8.3"
+  }
+}

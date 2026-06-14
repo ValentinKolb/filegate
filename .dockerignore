@@ -1,0 +1,5 @@
+.git
+admin/node_modules
+admin/dist
+sdk/ts/node_modules
+sdk/ts/dist
