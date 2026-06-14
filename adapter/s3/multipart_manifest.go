@@ -14,8 +14,8 @@ import (
 //
 // On disk under each mount we use the existing .fg-uploads staging
 // dir; multipart uploads live under their own subprefix so the
-// existing chunked-upload cleanup loop and the new multipart
-// cleanup loop don't trip over each other:
+// Filegate upload-session cleanup and S3 multipart cleanup don't trip over
+// each other:
 //
 //	<mountAbs>/.fg-uploads/s3-<uploadId>/parts/00001.bin
 //	<mountAbs>/.fg-uploads/s3-<uploadId>/parts/00002.bin
@@ -58,7 +58,7 @@ const (
 // multipartManifest is the legacy manifest.json shape.
 type multipartManifest struct {
 	Format    int    `json:"format"`
-	Kind      string `json:"kind"` // "s3-multipart" — distinguishes from chunked-upload manifests
+	Kind      string `json:"kind"` // "s3-multipart" — distinguishes old S3 manifests from other staging data
 	UploadID  string `json:"upload_id"`
 	Bucket    string `json:"bucket"`
 	Key       string `json:"key"`

@@ -43,6 +43,7 @@ const (
 //	5 — Content-Encoding HTTP header round-trip (S3)
 //	6 — Content-Disposition HTTP header round-trip (S3)
 //	7 — opaque blob: serialized x-amz-meta-* user metadata (S3)
+//	8 — Filegate canonical SHA-256 fingerprint; "sha256:<hex>"
 const (
 	FieldEXIF               uint16 = 1
 	FieldETagMD5            uint16 = 2
@@ -51,6 +52,7 @@ const (
 	FieldContentEncoding    uint16 = 5
 	FieldContentDisposition uint16 = 6
 	FieldS3UserMetadata     uint16 = 7
+	FieldSHA256             uint16 = 8
 )
 
 var (

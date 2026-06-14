@@ -94,6 +94,7 @@ func TestEntityRoundTripWithS3Extensions(t *testing.T) {
 			{FieldID: FieldContentEncoding, Value: []byte("gzip")},
 			{FieldID: FieldContentDisposition, Value: []byte(`attachment; filename="x.bin"`)},
 			{FieldID: FieldS3UserMetadata, Value: []byte("user-meta-blob")},
+			{FieldID: FieldSHA256, Value: []byte("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")},
 		},
 	}
 	blob, err := EncodeEntity(in)
@@ -105,12 +106,12 @@ func TestEntityRoundTripWithS3Extensions(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	// Extensions must round-trip in canonical (FieldID-ascending) order.
-	if len(out.Extensions) != 7 {
-		t.Fatalf("ext count=%d, want 7", len(out.Extensions))
+	if len(out.Extensions) != 8 {
+		t.Fatalf("ext count=%d, want 8", len(out.Extensions))
 	}
 	wantOrder := []uint16{
 		FieldEXIF, FieldETagMD5, FieldMultipartETag, FieldContentType,
-		FieldContentEncoding, FieldContentDisposition, FieldS3UserMetadata,
+		FieldContentEncoding, FieldContentDisposition, FieldS3UserMetadata, FieldSHA256,
 	}
 	for i, ext := range out.Extensions {
 		if ext.FieldID != wantOrder[i] {
@@ -122,6 +123,9 @@ func TestEntityRoundTripWithS3Extensions(t *testing.T) {
 	}
 	if got, _ := ExtensionByID(out.Extensions, FieldMultipartETag); string(got) != "abc-3" {
 		t.Fatalf("MultipartETag round-trip: got %q", got)
+	}
+	if got, _ := ExtensionByID(out.Extensions, FieldSHA256); string(got) != "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Fatalf("SHA256 round-trip: got %q", got)
 	}
 }
 

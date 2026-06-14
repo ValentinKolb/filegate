@@ -61,7 +61,7 @@ Don't comment what well-named code already says. Don't write changelogs in comme
     `jobs.Scheduler`. Always pass a context with a deadline at the call
     site.
   - **`Close()` (no context)** — when the wait is bounded by your own
-    code. Examples: `chunkedManager.Close()` (waits on its own cleanup
+    code. Examples: `uploadSessionManager.Close()` (waits on its own cleanup
     loop) and `closeableHandler.Close() error` (runs the router's
     pre-registered close functions).
 - `Scheduler.Close(ctx)` is the canonical pattern for the contextful shape:
@@ -74,14 +74,14 @@ Don't comment what well-named code already says. Don't write changelogs in comme
 
 - Go and TS SDKs expose the same shape: `Paths`, `Nodes`, `Uploads`,
   `Transfers`, `Search`, `Index`, `Stats`.
-- Pure helpers (chunk math, relay) live in dedicated subpackages
-  (`sdk/filegate/chunks`, `sdk/filegate/relay`) and a dedicated subpath
+- Pure helpers (segment planning/checksums, relay) live in dedicated subpackages
+  (`sdk/filegate/segments`, `sdk/filegate/relay`) and a dedicated subpath
   export (`@valentinkolb/filegate/utils`) so callers without a token can
   use them.
 - Never re-attach pure helpers as fields on the `Filegate` client — that's
   the DRY rule we explicitly removed `Utils`/`UtilsNamespace` for.
 - `*Raw` SDK methods (`paths.putRaw`, `nodes.contentRaw`,
-  `nodes.thumbnailRaw`, `uploads.chunked.sendChunkRaw`) **must** return
+  `nodes.thumbnailRaw`, `uploads.sessions.segments.putRaw`) **must** return
   the raw `Response` / `*http.Response` unchanged on 4xx/5xx. They exist
   for relay/passthrough handlers; throwing on non-2xx breaks that
   contract. The Go side has a regression test

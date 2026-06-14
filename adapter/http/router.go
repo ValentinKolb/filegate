@@ -39,24 +39,24 @@ type RouterOptions struct {
 	// TrustedProxies are the peers whose X-Forwarded-For / X-Real-Ip
 	// headers are honored (see ParseTrustedProxies). Empty = headers
 	// ignored.
-	TrustedProxies           []netip.Prefix
-	CORS                     domain.CORSConfig
-	IndexPath                string
-	JobWorkers               int
-	JobQueueSize             int
-	ThumbnailJobWorkers      int
-	ThumbnailJobQueueSize    int
-	UploadExpiry             time.Duration
-	UploadCleanupInterval    time.Duration
-	MaxChunkBytes            int64
-	MaxUploadBytes           int64
-	MaxChunkedUploadBytes    int64
-	MaxConcurrentChunkWrites int
-	UploadMinFreeBytes       int64
-	ThumbnailLRUCacheSize    int
-	ThumbnailMaxSourceBytes  int64
-	ThumbnailMaxPixels       int64
-	Rescan                   func() error
+	TrustedProxies             []netip.Prefix
+	CORS                       domain.CORSConfig
+	IndexPath                  string
+	JobWorkers                 int
+	JobQueueSize               int
+	ThumbnailJobWorkers        int
+	ThumbnailJobQueueSize      int
+	UploadExpiry               time.Duration
+	UploadCleanupInterval      time.Duration
+	MaxChunkBytes              int64
+	MaxUploadBytes             int64
+	MaxSessionUploadBytes      int64
+	MaxConcurrentSegmentWrites int
+	UploadMinFreeBytes         int64
+	ThumbnailLRUCacheSize      int
+	ThumbnailMaxSourceBytes    int64
+	ThumbnailMaxPixels         int64
+	Rescan                     func() error
 
 	// MetricsHandler, when non-nil, is mounted at MetricsPath on the
 	// REST listener (no separate port). Auth is layered: MetricsToken
@@ -117,17 +117,19 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 	thumbnailQueueSize := resolveThumbnailQueueSize(opts)
 
 	thumbnailScheduler := jobs.New(thumbnailWorkers, thumbnailQueueSize)
-	chunked := newChunkedManager(
+	directUploads := newDirectUploadManager(svc, opts.BearerToken, opts.PublicURL, opts.MaxUploadBytes)
+	uploadSessions := newUploadSessionManager(
 		svc,
+		opts.BearerToken,
+		opts.PublicURL,
+		opts.MaxChunkBytes,
+		opts.MaxSessionUploadBytes,
+		opts.MaxConcurrentSegmentWrites,
+		opts.UploadMinFreeBytes,
 		opts.UploadExpiry,
 		opts.UploadCleanupInterval,
-		opts.MaxChunkBytes,
-		opts.MaxUploadBytes,
-		opts.MaxChunkedUploadBytes,
-		opts.MaxConcurrentChunkWrites,
-		opts.UploadMinFreeBytes,
+		opts.TrustedProxies,
 	)
-	directUploads := newDirectUploadManager(svc, opts.BearerToken, opts.PublicURL, opts.MaxUploadBytes)
 	thumbs := newThumbnailer(
 		svc,
 		opts.ThumbnailLRUCacheSize,
@@ -154,6 +156,10 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 	}
 
 	root.HandleFunc("PUT /v1/uploads/direct/{token}", directUploads.handlePut)
+	root.HandleFunc("GET /v1/uploads/sessions/{sessionId}", uploadSessions.handleStatus)
+	root.HandleFunc("PUT /v1/uploads/sessions/{sessionId}/segments/{index}", uploadSessions.handlePutSegment)
+	root.HandleFunc("POST /v1/uploads/sessions/{sessionId}/commit", uploadSessions.handleCommit)
+	root.HandleFunc("DELETE /v1/uploads/sessions/{sessionId}", uploadSessions.handleAbort)
 
 	auth := authMiddleware(opts.BearerToken)
 	handleV1 := func(pattern string, handler http.HandlerFunc) {
@@ -203,7 +209,24 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		})
 	})
 
-	handleV1("GET /v1/paths/{$}", func(w http.ResponseWriter, _ *http.Request) {
+	handleV1("GET /v1/capabilities", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, apiv1.CapabilitiesResponse{
+			Uploads: apiv1.UploadCapabilities{
+				MaxChunkBytes:              uploadSessions.maxSegmentBytes,
+				MaxUploadBytes:             opts.MaxUploadBytes,
+				MaxSessionUploadBytes:      uploadSessions.maxUploadBytes,
+				MaxConcurrentSegmentWrites: uploadSessions.maxWrites,
+			},
+		})
+	})
+
+	handleV1("GET /v1/paths/{$}", func(w http.ResponseWriter, r *http.Request) {
+		computeRecursiveSizes := strings.EqualFold(r.URL.Query().Get("computeRecursiveSizes"), "true")
+		fingerprint, err := parseFingerprintMode(r.URL.Query().Get("fingerprint"))
+		if err != nil {
+			statusFromErr(w, err)
+			return
+		}
 		mounts := svc.ListRoot()
 		items := make([]apiv1.Node, 0, len(mounts))
 		for _, m := range mounts {
@@ -211,7 +234,14 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 			if err != nil {
 				continue
 			}
-			items = append(items, nodeResponse(meta))
+			if meta.Type == "directory" && computeRecursiveSizes {
+				copyMeta := *meta
+				if size, ok := svc.RecursiveDirectorySize(meta.ID); ok {
+					copyMeta.Size = size
+				}
+				meta = &copyMeta
+			}
+			items = append(items, nodeResponseForFingerprint(meta, fingerprint))
 		}
 		writeJSON(w, http.StatusOK, apiv1.NodeListResponse{Items: items, Total: len(items)})
 	})
@@ -543,10 +573,9 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		})
 	})
 
-	handleV1("POST /v1/uploads/chunked/start", chunked.handleStart)
-	handleV1("GET /v1/uploads/chunked/{uploadId}", chunked.handleStatus)
-	handleV1("PUT /v1/uploads/chunked/{uploadId}/chunks/{index}", chunked.handleChunk)
 	handleV1("POST /v1/uploads/direct", directUploads.handleCreate)
+	handleV1("POST /v1/uploads/sessions", uploadSessions.handleCreate)
+	handleV1("POST /v1/uploads/sessions:batch", uploadSessions.handleCreateBatch)
 
 	handleV1("POST /v1/index/rescan", func(w http.ResponseWriter, _ *http.Request) {
 		if opts.Rescan == nil {
@@ -633,7 +662,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 	return &closeableHandler{
 		handler: handler,
 		closeFn: func() {
-			chunked.Close()
+			uploadSessions.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := thumbnailScheduler.Close(ctx); err != nil {
@@ -653,11 +682,28 @@ func respondNodeWithOptionalChildren(w http.ResponseWriter, r *http.Request, svc
 }
 
 func respondMetaWithOptionalChildren(w http.ResponseWriter, r *http.Request, svc *domain.Service, meta *domain.FileMeta) {
-	response := nodeResponse(meta)
+	computeRecursiveSizes := strings.EqualFold(r.URL.Query().Get("computeRecursiveSizes"), "true")
+	fingerprint, err := parseFingerprintMode(r.URL.Query().Get("fingerprint"))
+	if err != nil {
+		statusFromErr(w, err)
+		return
+	}
+	meta, err = metaForFingerprint(svc, meta, fingerprint)
+	if err != nil {
+		statusFromErr(w, err)
+		return
+	}
+	if meta.Type == "directory" && computeRecursiveSizes {
+		copyMeta := *meta
+		if size, ok := svc.RecursiveDirectorySize(meta.ID); ok {
+			copyMeta.Size = size
+		}
+		meta = &copyMeta
+	}
+	response := nodeResponseForFingerprint(meta, fingerprint)
 	if meta.Type == "directory" {
 		pageSize := parseIntDefault(r.URL.Query().Get("pageSize"), 100)
 		cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
-		computeRecursiveSizes := strings.EqualFold(r.URL.Query().Get("computeRecursiveSizes"), "true")
 		listed, err := svc.ListNodeChildren(meta.ID, cursor, pageSize, computeRecursiveSizes)
 		if err != nil {
 			statusFromErr(w, err)
@@ -665,7 +711,7 @@ func respondMetaWithOptionalChildren(w http.ResponseWriter, r *http.Request, svc
 		}
 		items := make([]apiv1.Node, 0, len(listed.Items))
 		for i := range listed.Items {
-			items = append(items, nodeResponse(&listed.Items[i]))
+			items = append(items, nodeResponseForFingerprint(&listed.Items[i], fingerprint))
 		}
 		response.Children = items
 		response.PageSize = &pageSize
@@ -682,6 +728,34 @@ func parseIntDefault(v string, def int) int {
 		return def
 	}
 	return n
+}
+
+type fingerprintMode string
+
+const (
+	fingerprintCached fingerprintMode = "cached"
+	fingerprintNone   fingerprintMode = "none"
+	fingerprintEnsure fingerprintMode = "ensure"
+)
+
+func parseFingerprintMode(raw string) (fingerprintMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "cached":
+		return fingerprintCached, nil
+	case "none":
+		return fingerprintNone, nil
+	case "ensure":
+		return fingerprintEnsure, nil
+	default:
+		return "", domain.ErrInvalidArgument
+	}
+}
+
+func metaForFingerprint(svc *domain.Service, meta *domain.FileMeta, mode fingerprintMode) (*domain.FileMeta, error) {
+	if mode != fingerprintEnsure || meta == nil || meta.Type != "file" || meta.SHA256 != "" {
+		return meta, nil
+	}
+	return svc.EnsureFileSHA256(meta.ID)
 }
 
 func parseBoolDefault(v string, def bool) bool {
@@ -1336,6 +1410,17 @@ func ValidateMetricsPath(path string) error {
 	return nil
 }
 
+// PathsOverlap reports whether either path is equal to or mounted under
+// the other. It is used for startup-time route collision checks.
+func PathsOverlap(a, b string) bool {
+	a = strings.TrimRight(strings.TrimSpace(a), "/")
+	b = strings.TrimRight(strings.TrimSpace(b), "/")
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
 // metricsAuthMiddleware guards the /metrics endpoint with the layered
 // token rule: require metricsToken if set, else require bearerToken,
 // else serve openly. The "open" case is intentional — operators on a
@@ -1434,7 +1519,7 @@ func corsMiddleware(cfg domain.CORSConfig) middlewareFunc {
 	}
 	allowedHeaders := cleanList(cfg.AllowedHeaders)
 	if len(allowedHeaders) == 0 {
-		allowedHeaders = []string{"Authorization", "Content-Type", "X-Chunk-Checksum"}
+		allowedHeaders = []string{"Authorization", "Content-Type", "Filegate-Upload-Session", "X-Segment-Checksum"}
 	}
 	exposedHeaders := cleanList(cfg.ExposedHeaders)
 	maxAge := ""
@@ -1547,11 +1632,26 @@ func nodeResponse(meta *domain.FileMeta) apiv1.Node {
 		},
 		Exif: map[string]string{},
 	}
+	if meta.ETag != "" {
+		resp.ETag = meta.ETag
+	}
+	if meta.SHA256 != "" {
+		resp.SHA256 = meta.SHA256
+	}
 	if meta.MimeType != "" {
 		resp.MimeType = meta.MimeType
 	}
 	if len(meta.Exif) > 0 {
 		resp.Exif = meta.Exif
+	}
+	return resp
+}
+
+func nodeResponseForFingerprint(meta *domain.FileMeta, mode fingerprintMode) apiv1.Node {
+	resp := nodeResponse(meta)
+	if mode == fingerprintNone {
+		resp.ETag = ""
+		resp.SHA256 = ""
 	}
 	return resp
 }
@@ -1620,7 +1720,7 @@ func lookupExistingUnderParent(svc *domain.Service, parentID domain.FileID, relP
 
 // lookupChildOfParent reports whether a child with the given name exists
 // under parent and, if so, returns the diagnostic id/path strings. Used by
-// chunked upload start to fail fast before any chunk is uploaded.
+// upload session create to fail fast before any segment is uploaded.
 func lookupChildOfParent(svc *domain.Service, parent *domain.FileMeta, name string) (id, path string, found bool) {
 	if parent == nil {
 		return "", "", false

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --hot src/server.tsx",
+    "dev": "bun run build && bun dist/server.js",
     "build": "bun run build:sdk && bun run src/build.ts",
     "build:sdk": "bunx tsc -p ../sdk/ts/tsconfig.json && rm -rf node_modules/@valentinkolb/filegate/dist && cp -R ../sdk/ts/dist node_modules/@valentinkolb/filegate/dist",
     "start": "bun dist/server.js"
@@ -12,6 +12,7 @@
   "dependencies": {
     "@valentinkolb/filegate": "file:../sdk/ts",
     "@valentinkolb/ssr": "^0.10.0",
+    "@valentinkolb/stdlib": "^0.13.0",
     "hono": "^4.12.25",
     "solid-js": "^1.9.13"
   },

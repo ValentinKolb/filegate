@@ -19,16 +19,16 @@ Symptoms → causes → fixes, ranked roughly by frequency.
 ## 409 Conflict — what now?
 
 - The body **may** have `existingId` and `existingPath`. They're populated
-  for path-PUT, mkdir, chunked-start, and transfer conflicts where the
-  daemon could resolve the colliding node. Chunked
-  duplicate-chunk-content rejects and a few generic conflict paths return
+  for path-PUT, mkdir, upload-session create/commit, and transfer conflicts
+  where the daemon could resolve the colliding node. Segment duplicate-content
+  rejects and a few generic conflict paths return
   just `{"error": "conflict"}` — code defensively, fall back to a
   generic message when the diagnostic fields are missing.
 - If they're present, show them to the user and let them choose
   `overwrite`, `rename`, or cancel.
 - Default is `error` — explicit on purpose. If your business logic *always* wants to replace, set `onConflict: "overwrite"` consistently in your client code.
 - For mkdir, if you want idempotent "make sure this folder exists", use `onConflict: "skip"`.
-- For chunked uploads: a 409 at finalize after a clean start means another writer raced you. Retry `/start` with the same params and `onConflict: "overwrite"` — the staging chunks are kept.
+- For upload sessions: a 409 at commit after a clean create means another writer raced you. Ask the user whether to retry with `overwrite` or choose a new path.
 
 Full details: [`conflict-handling.md`](conflict-handling.md).
 
@@ -42,9 +42,8 @@ Full details: [`conflict-handling.md`](conflict-handling.md).
   are capped at 100,000 tar entries, 10 GiB regular-file content, and depth
   128. Use S3/rclone or direct filesystem access for larger exports.
 
-For oversized **chunked-upload** parameters, the daemon returns 400 (not
-413) at `/start` with `"invalid size"` or `"invalid chunkSize"`. For
-oversized **one-shot** PUT bodies, you'll typically see a connection-level
+For invalid **upload-session** size or segment size, the daemon returns 400.
+For an oversized segment body, it returns 413. For oversized **one-shot** PUT bodies, you'll typically see a connection-level
 `MaxBytesError` rather than a clean HTTP status.
 
 ## 507 Insufficient Storage
@@ -55,7 +54,7 @@ The daemon's `UploadMinFreeBytes` guard refused the write. Either:
 - Lower the guard at daemon config (not recommended — the guard exists to keep the system writable for other processes).
 - Move the write to a mount with more free space.
 
-This is also returned eagerly from `POST /v1/uploads/chunked/start` — no chunks land before the check fires.
+This is also returned eagerly from `POST /v1/uploads/sessions` — no segments land before the check fires.
 
 ## Browser uploads silently corrupt large files
 
@@ -63,15 +62,15 @@ This is also returned eagerly from `POST /v1/uploads/chunked/start` — no chunk
 - **Missing or wrong `Content-Type`.** Pass the actual MIME type via `opts.contentType`.
 - **Buffering in your relay backend.** If you do `await req.arrayBuffer()` and then forward, you've broken streaming. Use `paths.putRaw` (TS) or pass `r.Body` (Go) through directly.
 
-## Chunked upload "finalizes" but downloaded file is wrong size or corrupted
+## Upload session commits but downloaded file is wrong size or corrupted
 
-- **Wrong overall checksum** in the `start` request. The server hashes the assembled file at finalize and rejects on mismatch. Compute `sha256` over the WHOLE bytes and pass `sha256:<hex>` (lowercase hex, with the prefix).
-- **Wrong chunk boundaries.** Use `chunks.bounds(i, size, chunkSize)` from `@valentinkolb/filegate/utils` (or the Go equivalent) — manual arithmetic is the most common bug.
-- **Trailing chunk uploaded with wrong size.** The last chunk is `size - (totalChunks-1) * chunkSize` bytes, not `chunkSize`. The bounds helper handles this.
+- **Wrong overall checksum** in the create request. The server hashes the assembled file at commit and rejects on mismatch. Compute `sha256` over the whole file and pass `sha256:<hex>` (lowercase hex, with the prefix).
+- **Wrong segment boundaries.** Use `uploads.segments.bounds(index, size, segmentSize)` from `@valentinkolb/filegate/utils` (or the Go `segments` package) instead of manual arithmetic.
+- **Trailing segment uploaded with wrong size.** The last segment is `size - (totalSegments-1) * segmentSize` bytes, not `segmentSize`. The bounds helper handles this.
 
-## Resume "loses" already-uploaded chunks
+## Resume loses already-uploaded segments
 
-- **Different parameters in retry.** `uploadId = hex(sha256(parentId + ":" + filename + ":" + checksum)[0:8])`. Any change to those three → different upload session, fresh start. If you're computing the file checksum in the browser, make sure it's deterministic across reloads. (Most clients let the SDK return the `uploadId` from `/start` and don't compute it themselves.)
+- **Wrong session id.** Persist the `session.id` returned by create and resume with `GET /v1/uploads/sessions/{sessionId}`. Creating a new session creates a fresh plan.
 - **Staging dir was cleaned up.** The default expiry is 24h. Sessions older than that are gone. Tune `upload.expiry` in daemon config if you need longer.
 
 ## S3 multipart upload stuck in `committing`

@@ -49,8 +49,8 @@ upload:
   cleanup_interval: "6h"
   max_chunk_bytes: 52428800
   max_upload_bytes: 524288000
-  max_chunked_upload_bytes: 53687091200
-  max_concurrent_chunk_writes: 0
+  max_session_upload_bytes: 53687091200
+  max_concurrent_segment_writes: 0
   min_free_bytes: 67108864
 
 thumbnail:

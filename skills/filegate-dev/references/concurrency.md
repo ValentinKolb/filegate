@@ -1,8 +1,8 @@
 # Concurrency
 
-Filegate has many concurrent paths: the HTTP server, the change detector, the
-chunked upload state machine, the job scheduler, several internal coalescers,
-and the in-process event bus. Most of the bugs we've fixed in this codebase
+Filegate has many concurrent paths: the HTTP server, the change detector,
+upload sessions, the job scheduler, several internal coalescers, and the
+in-process event bus. Most of the bugs we've fixed in this codebase
 have been concurrency bugs. Read this before adding any goroutine.
 
 ## Locking conventions
@@ -56,10 +56,11 @@ to follow when the Scheduler is overkill:
 - **`infra/eventbus`** — bounded async event dispatch with a fixed semaphore
   controlling parallelism. No deduplication, no queue draining, just
   fire-and-forget pub/sub.
-- **Per-component cleanup goroutines + semaphores** — e.g. `chunkedManager`
-  in `adapter/http/upload_chunked.go` runs a single cleanup loop bounded by
-  `cleanupStop`/`cleanupDone` channels and uses a semaphore for chunk-write
-  parallelism. This is fine for component-internal bounded work.
+- **Per-component cleanup goroutines + semaphores** — e.g.
+  `uploadSessionManager` in `adapter/http/upload_sessions.go` runs a single
+  cleanup loop bounded by `cleanupStop`/`cleanupDone` channels and uses a
+  semaphore for segment-write parallelism. This is fine for
+  component-internal bounded work.
 
 What is **not** OK: free-form `go func() { ... }()` without a cancellation
 mechanism, or with no upper bound on concurrency.
@@ -88,8 +89,8 @@ The codebase has two `Close` shapes today, both intentional:
   and where shutdown can plausibly take time (the only example today is
   `jobs.Scheduler`). The context bounds the wait.
 - **`Close()` (no context)** — for components whose shutdown is bounded by
-  internal cooperation (e.g. `chunkedManager.Close()` only waits on its own
-  cleanup loop signaling done; `closeableHandler.Close() error` runs the
+  internal cooperation (e.g. `uploadSessionManager.Close()` only waits on its
+  own cleanup loop signaling done; `closeableHandler.Close() error` runs the
   router's pre-registered close functions in sequence). These are fine when
   the wait is genuinely short.
 
@@ -183,6 +184,6 @@ you want — it disables reconciliation for that entity by design.
   paths. The Go SDK's `*Raw` methods now return the response unchanged on
   4xx/5xx (relay-friendly), so callers are responsible for closing the body
   themselves.
-- Cleanup goroutines (`chunkedManager.cleanupLoop`, `Scheduler.workers`)
+- Cleanup goroutines (`uploadSessionManager.cleanupLoop`, `Scheduler.workers`)
   must be stoppable via the constructor's context, and the constructor must
   give the caller a `Close(...)` to wait for them.

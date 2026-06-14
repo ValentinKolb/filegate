@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	apiv1 "github.com/valentinkolb/filegate/api/v1"
 )
 
 func TestNodeChildrenAreDirsFirstWithStableCursor(t *testing.T) {
@@ -165,5 +167,65 @@ func TestNodeChildrenLegacyBareNameCursorStillWorks(t *testing.T) {
 
 	if _, status := listChildrenPage(t, r, root.ID.String(), "?pageSize=10&cursor=no-such-name"); status != http.StatusBadRequest {
 		t.Fatalf("unknown legacy cursor status=%d, want 400", status)
+	}
+}
+
+func TestRecursiveSizeFlagIncludesCurrentDirectoryAndRoots(t *testing.T) {
+	r, svc, cleanup := newTestRouter(t)
+	defer cleanup()
+
+	root := svc.ListRoot()[0]
+	dir, err := svc.CreateChild(root.ID, "dir", true, nil)
+	if err != nil {
+		t.Fatalf("create dir: %v", err)
+	}
+	if _, err := svc.CreateChild(dir.ID, "nested", true, nil); err != nil {
+		t.Fatalf("create nested: %v", err)
+	}
+	if w := putPath(t, r, root.Name+"/dir/a.txt", []byte("hello"), ""); w.Result().StatusCode != http.StatusCreated {
+		t.Fatalf("put a.txt status=%d", w.Result().StatusCode)
+	}
+	if w := putPath(t, r, root.Name+"/dir/nested/b.txt", []byte("world!!"), ""); w.Result().StatusCode != http.StatusCreated {
+		t.Fatalf("put b.txt status=%d", w.Result().StatusCode)
+	}
+
+	req := authedRequest(http.MethodGet, "/v1/paths/"+root.Name+"/dir?computeRecursiveSizes=true&pageSize=100")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("directory status=%d", w.Result().StatusCode)
+	}
+	var node apiv1.Node
+	if err := json.NewDecoder(w.Result().Body).Decode(&node); err != nil {
+		t.Fatalf("decode directory: %v", err)
+	}
+	if node.Size != 12 {
+		t.Fatalf("directory size=%d, want 12", node.Size)
+	}
+	var nestedSize int64 = -1
+	for _, child := range node.Children {
+		if child.Name == "nested" {
+			nestedSize = child.Size
+		}
+	}
+	if nestedSize != 7 {
+		t.Fatalf("nested size=%d, want 7", nestedSize)
+	}
+
+	rootReq := authedRequest(http.MethodGet, "/v1/paths/?computeRecursiveSizes=true")
+	rootW := httptest.NewRecorder()
+	r.ServeHTTP(rootW, rootReq)
+	if rootW.Result().StatusCode != http.StatusOK {
+		t.Fatalf("root listing status=%d", rootW.Result().StatusCode)
+	}
+	var roots apiv1.NodeListResponse
+	if err := json.NewDecoder(rootW.Result().Body).Decode(&roots); err != nil {
+		t.Fatalf("decode roots: %v", err)
+	}
+	if len(roots.Items) != 1 {
+		t.Fatalf("root count=%d, want 1", len(roots.Items))
+	}
+	if roots.Items[0].Size != 12 {
+		t.Fatalf("root size=%d, want 12", roots.Items[0].Size)
 	}
 }

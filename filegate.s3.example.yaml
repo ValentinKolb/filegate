@@ -44,13 +44,13 @@ storage:
   index_path: "/var/lib/filegate/index"
 
 upload:
-  # REST chunked-upload settings (S3 multipart has its own
+  # REST upload settings (S3 multipart has its own
   # internal staging under .fg-uploads).
   expiry: "24h"
   cleanup_interval: "6h"
   max_chunk_bytes: 52428800        # 50 MiB
   max_upload_bytes: 524288000      # 500 MiB REST one-shot upload limit
-  max_chunked_upload_bytes: 53687091200 # 50 GiB REST chunked upload limit
+  max_session_upload_bytes: 53687091200 # 50 GiB REST upload-session limit
   min_free_bytes: 67108864         # 64 MiB
 
 versioning:

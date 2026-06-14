@@ -108,71 +108,115 @@ func TestNodesPipeContent(t *testing.T) {
 	}
 }
 
-func TestChunkedSendChunkParsesUnion(t *testing.T) {
+func TestUploadSessionPutSegment(t *testing.T) {
 	t.Parallel()
 
-	t.Run("progress", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if got := r.Header.Get("X-Chunk-Checksum"); got != "sha256:abc" {
-				t.Fatalf("checksum header=%q", got)
-			}
-			_ = json.NewEncoder(w).Encode(ChunkedProgressResponse{
-				ChunkIndex:     0,
-				UploadedChunks: []int{0},
-				Completed:      false,
-			})
-		}))
-		defer server.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/uploads/sessions/upl_abc/segments/2" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Segment-Checksum"); got != "sha256:abc" {
+			t.Fatalf("checksum header=%q", got)
+		}
+		_ = json.NewEncoder(w).Encode(UploadSegmentResponse{
+			SessionID:        "upl_abc",
+			Index:            2,
+			UploadedSegments: []int{2},
+		})
+	}))
+	defer server.Close()
 
-		client, err := New(Config{BaseURL: server.URL})
-		if err != nil {
-			t.Fatalf("new client: %v", err)
-		}
-		res, err := client.Uploads.Chunked.SendChunk(context.Background(), "upload-1", 0, strings.NewReader("x"), "sha256:abc")
-		if err != nil {
-			t.Fatalf("send chunk: %v", err)
-		}
-		if res.Completed {
-			t.Fatalf("expected not completed")
-		}
-		if res.Progress == nil || res.Progress.ChunkIndex != 0 {
-			t.Fatalf("progress missing: %#v", res.Progress)
-		}
-		if res.Complete != nil {
-			t.Fatalf("complete should be nil")
-		}
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	res, err := client.Uploads.Sessions.PutSegment(context.Background(), UploadSessionPutSegmentRequest{
+		SessionID: "upl_abc",
+		Index:     2,
+		Body:      strings.NewReader("x"),
+		Checksum:  "sha256:abc",
 	})
+	if err != nil {
+		t.Fatalf("put segment: %v", err)
+	}
+	if res.SessionID != "upl_abc" || res.Index != 2 {
+		t.Fatalf("unexpected response: %#v", res)
+	}
+}
 
-	t.Run("complete", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_ = json.NewEncoder(w).Encode(ChunkedCompleteResponse{
-				Completed: true,
-				File: NodeWithChecksum{
-					Node:     Node{ID: "n1", Type: "file", Name: "x", Path: "/x"},
-					Checksum: "sha256:done",
-				},
-			})
-		}))
-		defer server.Close()
+func TestCreateDirectUploadURL(t *testing.T) {
+	t.Parallel()
 
-		client, err := New(Config{BaseURL: server.URL})
-		if err != nil {
-			t.Fatalf("new client: %v", err)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/uploads/direct" {
+			t.Fatalf("%s %s", r.Method, r.URL.Path)
 		}
-		res, err := client.Uploads.Chunked.SendChunk(context.Background(), "upload-1", 1, strings.NewReader("x"), "")
-		if err != nil {
-			t.Fatalf("send chunk: %v", err)
+		var body DirectUploadURLRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
 		}
-		if !res.Completed {
-			t.Fatalf("expected completed=true")
+		if body.Path != "mount/file.txt" || body.OnConflict != "overwrite" || body.MaxBytes != 123 {
+			t.Fatalf("body=%#v", body)
 		}
-		if res.Complete == nil || res.Complete.File.Checksum != "sha256:done" {
-			t.Fatalf("completion missing: %#v", res.Complete)
-		}
-		if res.Progress != nil {
-			t.Fatalf("progress should be nil")
-		}
+		_ = json.NewEncoder(w).Encode(DirectUploadURLResponse{
+			UploadURL: "https://uploads.example.test/token",
+			Method:    "PUT",
+			Path:      body.Path,
+			ExpiresAt: 42,
+			MaxBytes:  body.MaxBytes,
+		})
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	out, err := client.Uploads.CreateDirectUploadURL(context.Background(), DirectUploadURLRequest{
+		Path:       "mount/file.txt",
+		OnConflict: "overwrite",
+		MaxBytes:   123,
 	})
+	if err != nil {
+		t.Fatalf("create direct url: %v", err)
+	}
+	if out.UploadURL != "https://uploads.example.test/token" || out.Method != "PUT" {
+		t.Fatalf("response=%#v", out)
+	}
+}
+
+func TestCapabilitiesGet(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/capabilities" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Fatalf("auth=%q", got)
+		}
+		_ = json.NewEncoder(w).Encode(CapabilitiesResponse{
+			Uploads: UploadCapabilities{
+				MaxChunkBytes:              50 << 20,
+				MaxUploadBytes:             500 << 20,
+				MaxSessionUploadBytes:      50 << 30,
+				MaxConcurrentSegmentWrites: 64,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, Token: "secret"})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	out, err := client.Capabilities.Get(context.Background())
+	if err != nil {
+		t.Fatalf("get capabilities: %v", err)
+	}
+	if out.Uploads.MaxChunkBytes != 50<<20 {
+		t.Fatalf("max chunk=%d", out.Uploads.MaxChunkBytes)
+	}
 }
 
 func TestAPIErrorIncludesStatusAndMessage(t *testing.T) {
@@ -312,8 +356,12 @@ func TestRawMethodsDoNotThrowOnNon2xx(t *testing.T) {
 		{"ThumbnailRaw", func() (*http.Response, error) {
 			return client.Nodes.ThumbnailRaw(ctx, "any-id", ThumbnailOptions{Size: 256})
 		}},
-		{"SendChunkRaw", func() (*http.Response, error) {
-			return client.Uploads.Chunked.SendChunkRaw(ctx, "uploadid", 0, strings.NewReader("data"), "")
+		{"PutSegmentRaw", func() (*http.Response, error) {
+			return client.Uploads.Sessions.PutSegmentRaw(ctx, UploadSessionPutSegmentRequest{
+				SessionID: "upl_abc",
+				Index:     0,
+				Body:      strings.NewReader("data"),
+			})
 		}},
 	}
 

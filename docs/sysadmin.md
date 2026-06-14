@@ -162,10 +162,10 @@ Main levers:
 - `cache.path_cache_size`
 - `jobs.workers`, `jobs.queue_size`
 - `jobs.thumbnail_*`
-- `upload.max_chunk_bytes`, `upload.max_upload_bytes`, `upload.max_chunked_upload_bytes`
-- `upload.max_concurrent_chunk_writes`, `upload.min_free_bytes`
+- `upload.max_chunk_bytes`, `upload.max_upload_bytes`, `upload.max_session_upload_bytes`
+- `upload.max_concurrent_segment_writes`, `upload.min_free_bytes`
 
-`upload.max_chunked_upload_bytes` must be greater than or equal to
+`upload.max_session_upload_bytes` must be greater than or equal to
 `upload.max_chunk_bytes`; startup rejects the config otherwise.
 
 Host-level levers:

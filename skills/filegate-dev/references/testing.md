@@ -7,7 +7,7 @@
 | Pure logic, no I/O                    | `go test ./<changed-pkg>`                                    |
 | Anything with goroutines              | `go test -race -count=20 ./<changed-pkg>` (catch flakes)     |
 | Anything Linux-specific (`*_linux*.go`)| Docker — see "Running Linux tests" below                    |
-| Anything in `chunked` upload          | Both Docker tests AND `make fuzz-smoke`                      |
+| Upload session segment/commit paths   | Both Docker tests AND `make fuzz-smoke`                      |
 | The Pebble index format               | `make fuzz-smoke` (fgbin codec) + Docker rescan tests        |
 | Adapter/HTTP                          | Docker (almost all HTTP tests are Linux-tagged)              |
 
@@ -69,14 +69,13 @@ CI on overloaded runners has caught time-sleep-based tests as flakes; the conver
 
 ## Fuzz smoke
 
-`make fuzz-smoke` runs four fuzz targets for 10 seconds each:
+`make fuzz-smoke` runs fgbin fuzz targets for 10 seconds each:
 
 - `infra/fgbin.FuzzDecodeEntity`
 - `infra/fgbin.FuzzDecodeChild`
-- `adapter/http.FuzzHashChunkFromReader`
-- `adapter/http.FuzzWriteChunkAtPath`
 
-Run before opening a PR that touches the codec or chunked upload. New crash inputs land in `testdata/fuzz/<func>/` — commit them.
+Run before opening a PR that touches the codec. New crash inputs land in
+`testdata/fuzz/<func>/` — commit them.
 
 ## Commitable test artifacts
 

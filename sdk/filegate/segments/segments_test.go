@@ -1,4 +1,4 @@
-package chunks
+package segments
 
 import (
 	"bytes"
@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-func TestTotalChunks(t *testing.T) {
+func TestCount(t *testing.T) {
 	cases := []struct {
-		size, chunkSize int64
-		want            int
+		size, segmentSize int64
+		want              int
 	}{
 		{0, 4, 0},
 		{4, 0, 0},
@@ -21,14 +21,18 @@ func TestTotalChunks(t *testing.T) {
 		{1, 4, 1},
 	}
 	for _, c := range cases {
-		if got := TotalChunks(c.size, c.chunkSize); got != c.want {
-			t.Errorf("TotalChunks(%d, %d) = %d, want %d", c.size, c.chunkSize, got, c.want)
+		if got := Count(c.size, c.segmentSize); got != c.want {
+			t.Errorf("Count(%d, %d) = %d, want %d", c.size, c.segmentSize, got, c.want)
 		}
 	}
 }
 
-func TestBoundsCoversWholeFile(t *testing.T) {
-	const size, chunkSize = int64(10), int64(4)
+func TestPlanCoversWholeFile(t *testing.T) {
+	const size, segmentSize = int64(10), int64(4)
+	plan, err := Plan(size, segmentSize)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
 	got := make([]byte, 0, size)
 	want := make([]byte, size)
 	for i := range want {
@@ -36,12 +40,8 @@ func TestBoundsCoversWholeFile(t *testing.T) {
 	}
 	src := bytes.Clone(want)
 
-	for i := 0; i < TotalChunks(size, chunkSize); i++ {
-		start, end, err := Bounds(i, size, chunkSize)
-		if err != nil {
-			t.Fatalf("Bounds(%d): %v", i, err)
-		}
-		got = append(got, src[start:end]...)
+	for _, seg := range plan {
+		got = append(got, src[seg.Offset:seg.Offset+seg.Size]...)
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("reassembled bytes mismatch: got %v want %v", got, want)
@@ -58,7 +58,6 @@ func TestBoundsRejectsBadIndex(t *testing.T) {
 }
 
 func TestSHA256Bytes(t *testing.T) {
-	// Known vector: sha256("hello")
 	got := SHA256Bytes([]byte("hello"))
 	want := "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 	if got != want {

@@ -5,7 +5,7 @@ This document describes the intended stateless TS client pattern for Filegate.
 ## Goals
 
 - Stateless client construction
-- Scoped namespaces (`paths`, `nodes`, `uploads`, `transfers`, `search`, `index`, `stats`, `versions`, `utils`)
+- Scoped namespaces (`paths`, `nodes`, `uploads`, `transfers`, `search`, `index`, `stats`, `capabilities`, `versions`, `utils`)
 - Relay-first streaming APIs
 - Minimal runtime surprises across server and browser
 
@@ -22,6 +22,7 @@ process.env.FILEGATE_URL = "http://127.0.0.1:8080";
 process.env.FILEGATE_TOKEN = "dev-token";
 
 const roots = await filegate.paths.get();
+const caps = await filegate.capabilities.get();
 ```
 
 Behavior expectation:
@@ -96,11 +97,13 @@ try {
 // mkdir — `skip` is the idempotent-folder pattern (mkdir -p style)
 await fg.nodes.mkdir(parentId, { path: "uploads", onConflict: "skip" });
 
-// Chunked — fail fast at start, save bandwidth
-await fg.uploads.chunked.start({
-  parentId, filename: "video.mp4", size, checksum,
-  chunkSize: 8 << 20,
-  onConflict: "error",     // 409 immediately if "video.mp4" already exists
+// Upload session — resumable, parallel, explicit commit
+await fg.uploads.sessions.create({
+  path: "data/videos/video.mp4",
+  size,
+  checksum,
+  segmentSize: 8 << 20,
+  onConflict: "error",
 });
 ```
 
@@ -110,46 +113,48 @@ Available modes per endpoint:
 |---------------------------|--------------------------------|
 | `paths.put` / `paths.putRaw` | `error`, `overwrite`, `rename` |
 | `nodes.mkdir`             | `error`, `skip`, `rename`      |
-| `uploads.chunked.start`   | `error`, `overwrite`, `rename` |
+| `uploads.sessions.create` | `error`, `overwrite`           |
 | `transfers.create`        | `error`, `overwrite`, `rename` |
 
-### Chunked upload
+### Upload session
 
-Pure chunk math and hashing live at `@valentinkolb/filegate/utils`. They do
+Pure segment math and hashing live at `@valentinkolb/filegate/utils`. They do
 not require a `Filegate` instance, so they are safe in browsers, Web Workers,
 and any environment that does not have a token.
 
 ```ts
-import { chunks } from "@valentinkolb/filegate/utils";
+import { uploads } from "@valentinkolb/filegate/utils";
 
 const bytes = new Uint8Array(10 * 1024 * 1024);
-const checksum = await chunks.sha256Bytes(bytes);
-const chunkSize = 1024 * 1024;
+const checksum = await uploads.checksum.sha256(bytes);
+const segmentSize = 1024 * 1024;
 
-const start = await fg.uploads.chunked.start({
-  parentId: "<parent-id>",
-  filename: "video.bin",
+const session = await fg.uploads.sessions.create({
+  path: "data/video.bin",
   size: bytes.byteLength,
   checksum,
-  chunkSize,
+  segmentSize,
 });
 
-for (let i = 0; i < chunks.totalChunks(bytes.byteLength, chunkSize); i++) {
-  const { start: from, end: to } = chunks.bounds(i, bytes.byteLength, chunkSize);
-  const chunk = bytes.slice(from, to);
-  const chunkChecksum = await chunks.sha256Bytes(chunk);
-  const res = await fg.uploads.chunked.sendChunk(start.uploadId, i, chunk, chunkChecksum);
-  if (res.completed) {
-    console.log("done", res.complete?.file.id);
-  }
+for (const segment of session.segments) {
+  const bytesForSegment = bytes.slice(segment.offset, segment.offset + segment.size);
+  await fg.uploads.sessions.segments.put({
+    sessionId: session.id,
+    index: segment.index,
+    body: bytesForSegment,
+    checksum: await uploads.checksum.sha256(bytesForSegment),
+  });
 }
+
+const committed = await fg.uploads.sessions.commit({ sessionId: session.id });
+console.log("done", committed.node.id);
 ```
 
 Notes:
 
-- order does not matter
-- duplicate chunks are allowed when content matches
-- server auto-finalizes
+- segment order does not matter
+- duplicate segment PUTs are allowed when content matches
+- commit is explicit and safe to retry after success
 
 ### Direct browser upload
 
@@ -204,7 +209,10 @@ await uploadDirect(uploadUrlFromYourServer, file, {
 
 The signed URL is scoped to one virtual path, conflict mode, expiry, content
 type, and byte limit. It is a bearer credential until it expires; do not log it
-as a durable secret.
+as a durable secret. For large browser uploads, create an upload session with
+`direct: {}` on your backend and return the `direct` object. The browser can
+then call `directUploads.segments.put`, `directUploads.status`, and
+`directUploads.commit` without the Filegate bearer token.
 
 ### Versions
 

@@ -5,10 +5,10 @@ Filegate ships three integration paths. Pick based on your runtime:
 | Runtime                                 | Use                                                                  |
 |-----------------------------------------|----------------------------------------------------------------------|
 | Node / Bun / Deno (server-side)         | TS SDK — [`ts-sdk.md`](ts-sdk.md)                                    |
-| Browser (trusted internal only)         | TS SDK with explicit construction — [`ts-sdk.md`](ts-sdk.md). For public browser apps, **do NOT** construct the client; relay through your backend ([`relay-patterns.md`](relay-patterns.md)) and import only `@valentinkolb/filegate/utils` for hashing/chunk-math. |
+| Browser (trusted internal only)         | TS SDK with explicit construction — [`ts-sdk.md`](ts-sdk.md). For public browser apps, **do NOT** construct the client; relay through your backend ([`relay-patterns.md`](relay-patterns.md)) or use direct upload sessions; import only `@valentinkolb/filegate/utils` for hashing/segment math. |
 | Go service                              | Go SDK — [`go-sdk.md`](go-sdk.md)                                    |
 | Anything else (Python, Rust, curl, ...) | Raw HTTP — [`http-api.md`](http-api.md)                              |
-| Just need sha256/chunk math, no I/O    | Tree-shakeable subpackage — see "Pure helpers" below                 |
+| Just need sha256/segment math, no I/O  | Tree-shakeable subpackage — see "Pure helpers" below                 |
 
 ## TS vs Go — they expose the same shape
 
@@ -17,7 +17,7 @@ Both SDKs provide the same scoped namespaces:
 ```
 client.paths      ← virtual path operations (one-shot PUT, GET listings/metadata)
 client.nodes      ← ID-based operations (get, content, mkdir, patch, delete, thumbnail)
-client.uploads    ← chunked upload sub-namespace ONLY (.chunked.start/sendChunk/status)
+client.uploads    ← upload sessions (.sessions.create/status/segments.put/commit/abort)
 client.transfers  ← move / copy
 client.search     ← glob search
 client.index      ← rescan, resolve
@@ -26,7 +26,7 @@ client.versions   ← per-file version history
 ```
 
 One-shot uploads live under `client.paths.put` — not under `client.uploads`.
-`client.uploads` only contains the chunked sub-client.
+`client.uploads` contains resumable upload sessions and direct-URL minting.
 
 Method names differ in case (`paths.put` vs `Paths.Put`) but the semantics are identical. If you know one, you can use the other.
 
@@ -37,11 +37,11 @@ Both SDKs split off pure, non-network helpers into dedicated subpackages so call
 **TypeScript:**
 
 ```ts
-import { chunks } from "@valentinkolb/filegate/utils";
+import { uploads } from "@valentinkolb/filegate/utils";
 
-await chunks.sha256Bytes(uint8Array);
-chunks.totalChunks(fileSize, chunkSize);
-chunks.bounds(index, fileSize, chunkSize);
+await uploads.checksum.sha256(uint8Array);
+uploads.segments.count({ size: fileSize, segmentSize });
+uploads.segments.bounds(index, fileSize, segmentSize);
 ```
 
 The `/utils` subpath strips the entire HTTP client from the bundle — typically <1 KiB minified.
@@ -50,13 +50,13 @@ The `/utils` subpath strips the entire HTTP client from the bundle — typically
 
 ```go
 import (
-    "github.com/valentinkolb/filegate/sdk/filegate/chunks"
+    "github.com/valentinkolb/filegate/sdk/filegate/segments"
     "github.com/valentinkolb/filegate/sdk/filegate/relay"
 )
 
-sum := chunks.SHA256Bytes(data)
-total := chunks.TotalChunks(size, chunkSize)
-start, end, err := chunks.Bounds(index, size, chunkSize)
+sum := segments.SHA256Bytes(data)
+total := segments.Count(size, segmentSize)
+start, end, err := segments.Bounds(index, size, segmentSize)
 
 // HTTP relay (proxying upstream Filegate response to your own ResponseWriter)
 n, err := relay.CopyResponse(w, upstreamResp)
@@ -83,7 +83,7 @@ npm i @valentinkolb/filegate
 
 ```bash
 go get github.com/valentinkolb/filegate/sdk/filegate
-go get github.com/valentinkolb/filegate/sdk/filegate/chunks   # if you need pure helpers
+go get github.com/valentinkolb/filegate/sdk/filegate/segments # if you need pure helpers
 go get github.com/valentinkolb/filegate/sdk/filegate/relay    # if you need the relay helper
 ```
 

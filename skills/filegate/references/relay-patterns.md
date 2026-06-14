@@ -16,8 +16,8 @@ For each operation that can be relayed, the SDKs offer two variants:
 
 | Variant     | Examples                                          | On non-2xx       |
 |-------------|---------------------------------------------------|------------------|
-| **non-raw** | `paths.put`, `uploads.chunked.sendChunk`, `nodes.delete`, `nodes.get`, `nodes.mkdir`, `transfers.create`, ... | **Throws** `FilegateError` (TS) / `*APIError` (Go). The body is parsed; conflict diagnostics are typed. |
-| **`*Raw`**  | `paths.putRaw`, `nodes.contentRaw`, `nodes.thumbnailRaw`, `uploads.chunked.sendChunkRaw` | Returns the raw `Response` / `*http.Response` **unchanged** — including 4xx/5xx. Caller owns the body. |
+| **non-raw** | `paths.put`, `uploads.sessions.segments.put`, `nodes.delete`, `nodes.get`, `nodes.mkdir`, `transfers.create`, ... | **Throws** `FilegateError` (TS) / `*APIError` (Go). The body is parsed; conflict diagnostics are typed. |
+| **`*Raw`**  | `paths.putRaw`, `nodes.contentRaw`, `nodes.thumbnailRaw`, `uploads.sessions.segments.putRaw` | Returns the raw `Response` / `*http.Response` **unchanged** — including 4xx/5xx. Caller owns the body. |
 
 For relay/passthrough handlers always use the `*Raw` variant — the
 upstream status, headers, and body all reach the downstream client
@@ -192,29 +192,27 @@ function checkPath(userId: string, path: string) {
 For ID-based access, maintain a `(node_id → owner_user_id)` mapping in your
 own database. Resolve every request against it before forwarding.
 
-## Chunked uploads through a relay
+## Upload sessions through a relay
 
-For chunk **PUTs**, the SDK's `*Raw` variants forward the upstream
-response unchanged (including 409 / 507 / progress / completed bodies):
+For segment **PUTs**, the SDK's `*Raw` variants forward the upstream
+response unchanged, including 409, 413, and 507 bodies:
 
 ```ts
-// Backend chunk relay handler
-const upstream = await filegate.uploads.chunked.sendChunkRaw(
-  c.req.param("uploadId"),
-  Number(c.req.param("index")),
-  c.req.raw.body!,                                  // streamed through
-  c.req.header("X-Chunk-Checksum"),
-);
+const upstream = await filegate.uploads.sessions.segments.putRaw({
+  sessionId: c.req.param("sessionId"),
+  index: Number(c.req.param("index")),
+  body: c.req.raw.body!,                            // streamed through
+  checksum: c.req.header("X-Segment-Checksum"),
+});
 return new Response(upstream.body, {
   status: upstream.status,
   headers: upstream.headers,
 });
 ```
 
-For `start` and `status` there is currently **no `*Raw` variant** in the
-SDKs — `uploads.chunked.start` and `.status` are the typed methods that
-throw on non-2xx. To relay a 409 or 507 from `/start` unchanged you have
-two options:
+For create/status/commit, the typed SDK methods are usually enough because
+they exchange small JSON bodies. To relay a create `409` or `507` unchanged,
+catch `FilegateError` and rebuild the JSON response:
 
 ```ts
 // Option A: call the typed method, catch FilegateError, rebuild the
@@ -222,7 +220,7 @@ two options:
 // JSON bodies)
 import { FilegateError } from "@valentinkolb/filegate/client";
 try {
-  const result = await filegate.uploads.chunked.start(body);
+  const result = await filegate.uploads.sessions.create(body);
   return Response.json(result);
 } catch (e) {
   if (e instanceof FilegateError) {
@@ -234,12 +232,10 @@ try {
   throw e;
 }
 
-// Option B: bypass the SDK and issue the HTTP request yourself with
-// fetch (3 lines of code; preserves all headers exactly).
 ```
 
 Server-side staging happens on Filegate's host, not in your backend — the
-chunks pass through your relay but are never buffered there. For single
-browser uploads that should bypass your backend's request-body path, mint a
-direct upload URL on the backend and use `uploadDirect(...)` in the browser.
-For all other API calls, relay through your backend.
+segments pass through your relay but are never buffered there. For browser
+uploads that should bypass your backend's request-body path, create the
+session with `direct: {}` on the backend and use `directUploads` in the
+browser. For all other API calls, relay through your backend.

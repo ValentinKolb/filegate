@@ -1,6 +1,6 @@
 ---
 name: filegate
-description: Integrate the Filegate file gateway into another application — uploading and downloading files, managing virtual paths, browsing nodes, generating thumbnails, running searches, doing chunked/resumable uploads, relaying streams from a browser through a backend, or wiring authentication. Use this skill whenever the user mentions "filegate" by name, asks about file storage with stable IDs, asks how to upload/download to filegate from a TypeScript/Node/Bun/browser app or a Go backend, mentions the @valentinkolb/filegate npm package, or asks about REST endpoints under `/v1/paths`, `/v1/nodes`, `/v1/uploads/chunked`, `/v1/transfers`, or `/v1/search`. Also use this when integrating drag-and-drop uploads, building cloud relay handlers, debugging 409 conflicts, or implementing resumable file transfer flows. This skill is for code that USES Filegate from another project — for working ON Filegate itself, use the `filegate-dev` skill instead.
+description: Integrate the Filegate file gateway into another application — uploading and downloading files, managing virtual paths, browsing nodes, generating thumbnails, running searches, doing resumable upload sessions, relaying streams from a browser through a backend, or wiring authentication. Use this skill whenever the user mentions "filegate" by name, asks about file storage with stable IDs, asks how to upload/download to filegate from a TypeScript/Node/Bun/browser app or a Go backend, mentions the @valentinkolb/filegate npm package, or asks about REST endpoints under `/v1/paths`, `/v1/nodes`, `/v1/uploads/sessions`, `/v1/transfers`, or `/v1/search`. Also use this when integrating drag-and-drop uploads, building cloud relay handlers, debugging 409 conflicts, or implementing resumable file transfer flows. This skill is for code that USES Filegate from another project — for working ON Filegate itself, use the `filegate-dev` skill instead.
 ---
 
 # Filegate
@@ -9,7 +9,7 @@ You are integrating Filegate into an application. Filegate is a Linux-only HTTP 
 
 - **Stable file IDs** (UUID v7, stored as a Linux xattr) that survive renames and moves
 - **A Pebble-backed metadata index** for fast directory listing and path/id lookup
-- **Chunked, resumable, duplicate-safe uploads** with deterministic upload IDs
+- **Resumable, duplicate-safe upload sessions** with explicit commit
 - **Tar-stream downloads** of whole subtrees
 - **On-demand thumbnails** with LRU caching for images
 - **Per-file versioning** for HTTP-mediated writes on btrfs mounts
@@ -24,7 +24,7 @@ You are integrating Filegate into an application. Filegate is a Linux-only HTTP 
 | First time integrating, want the full picture     | [`references/function-overview.md`](references/function-overview.md) |
 | Decide which client (TS / Go / raw HTTP)          | [`references/clients.md`](references/clients.md)                    |
 | One-shot upload at a virtual path (small files)   | [`references/ts-sdk.md`](references/ts-sdk.md) or [`references/go-sdk.md`](references/go-sdk.md) |
-| Large/resumable uploads with progress             | [`references/chunked-uploads.md`](references/chunked-uploads.md)    |
+| Large/resumable uploads with progress             | [`references/upload-sessions.md`](references/upload-sessions.md)    |
 | Browser → my backend → Filegate (streaming relay) | [`references/relay-patterns.md`](references/relay-patterns.md)      |
 | Direct browser upload URL from a backend          | [`references/ts-sdk.md`](references/ts-sdk.md) and [`references/http-api.md`](references/http-api.md) |
 | User uploads a file with a name that already exists | [`references/conflict-handling.md`](references/conflict-handling.md) |
@@ -48,7 +48,7 @@ You are integrating Filegate into an application. Filegate is a Linux-only HTTP 
   browser environments where the token is already trusted by the runtime.
   Details in [`references/ts-sdk.md`](references/ts-sdk.md).
 - **Never assume an upload silently overwrites an existing file.** Default is `onConflict: "error"` — a 409 is returned with diagnostic fields. Choose `overwrite`, `rename`, or `skip` (mkdir only) explicitly. See [`references/conflict-handling.md`](references/conflict-handling.md).
-- **Never bundle the full TS client just to compute a sha256 or chunk-bounds.** Pure helpers ship as a tree-shakeable subpackage `@valentinkolb/filegate/utils` (Go: `sdk/filegate/chunks` + `sdk/filegate/relay`). Use those — no token needed.
+- **Never bundle the full TS client just to compute a sha256 or segment bounds.** Pure helpers ship as a tree-shakeable subpackage `@valentinkolb/filegate/utils` (Go: `sdk/filegate/segments` + `sdk/filegate/relay`). Use those — no token needed.
 - **Stream relays must not buffer.** When proxying browser uploads/downloads through your backend, pass through `ReadableStream` / `io.Reader` end-to-end. See [`references/relay-patterns.md`](references/relay-patterns.md).
 - **Persist file IDs, not paths.** Filegate's `id` is stable across renames/moves; the virtual `path` is not. If you store something in your own database that points to a Filegate node, store the `id`.
 - **Treat external filesystem changes as eventually consistent.** If something else writes to a mount, Filegate's index converges via the change detector — but not instantly. Don't race against the detector in tests; use `POST /v1/index/rescan` to force convergence when you need it.

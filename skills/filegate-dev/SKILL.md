@@ -1,11 +1,11 @@
 ---
 name: filegate-dev
-description: Work effectively on the Filegate Go codebase itself — implementing features, fixing bugs, refactoring, writing tests. Use whenever the task touches Filegate's own production code, internal packages (domain, infra/*, adapter/http, cli, sdk/filegate), or the surrounding test/build/release infrastructure. Triggers include "filegate bug", "add a feature to filegate", "refactor the filegate index", "write a test for the chunked upload code", "review my filegate change". This is for working ON Filegate, not for using it from another project — for that, use the `filegate` skill instead.
+description: Work effectively on the Filegate Go codebase itself — implementing features, fixing bugs, refactoring, writing tests. Use whenever the task touches Filegate's own production code, internal packages (domain, infra/*, adapter/http, cli, sdk/filegate), or the surrounding test/build/release infrastructure. Triggers include "filegate bug", "add a feature to filegate", "refactor the filegate index", "write a test for upload sessions", "review my filegate change". This is for working ON Filegate, not for using it from another project — for that, use the `filegate` skill instead.
 ---
 
 # Filegate Dev
 
-You are working on the Filegate codebase itself: a Linux-only HTTP gateway over the local filesystem with a Pebble-backed metadata index, btrfs/poll change detection, chunked uploads, thumbnails, EXIF, and a stable file-id model.
+You are working on the Filegate codebase itself: a Linux-only HTTP gateway over the local filesystem with a Pebble-backed metadata index, btrfs/poll change detection, resumable upload sessions, thumbnails, EXIF, and a stable file-id model.
 
 Filegate is treated as production infrastructure: durability and security come before clever throughput tricks, write paths must be idempotent, and every behavior change ships with a test that would have caught the previous behavior.
 
@@ -27,7 +27,7 @@ These come from past incidents in this codebase, not abstract style preferences:
 
 - **Never silently overwrite or drop data on a name collision.** Every
   write surface that can hit a name collision (`PUT /v1/paths`,
-  `POST /v1/nodes/{id}/mkdir`, `POST /v1/uploads/chunked/start`,
+  `POST /v1/nodes/{id}/mkdir`, `POST /v1/uploads/sessions`,
   `POST /v1/transfers`) defaults to `onConflict: "error"`. `PUT
   /v1/nodes/{id}` is exempt — it addresses an existing node by ID and is
   defined as content-replacement. Adding a new write surface? If it can
@@ -39,7 +39,7 @@ These come from past incidents in this codebase, not abstract style preferences:
   - `writeFileAtomic` (in `domain/write_atomic.go`) — full
     temp-file+rename with parent fsync. Used by `createAndWriteContent`
     and `WriteContent`.
-  - `ReplaceFile` (chunked finalize) — relies on Linux `rename(2)`
+  - `ReplaceFile` (upload session commit) — relies on Linux `rename(2)`
     atomic-replace as the fast path, with a non-atomic `OpenWrite +
     truncate + io.Copy` fallback for cross-device cases. The fast path
     is atomic; the fallback is not. If you change `ReplaceFile`, keep
@@ -57,7 +57,7 @@ These come from past incidents in this codebase, not abstract style preferences:
     `sanitizeVirtualPath` → mount resolution → `safeResolvedPath`.
   - **Relative path** (`mkdir` body's `path`): goes through
     `sanitizeRelativePath`, then walked under the parent's resolved abs.
-  - **Single filename** (chunked-upload `filename`, transfer `targetName`):
+  - **Single filename** (transfer `targetName`):
     must reject empty and any `/`. The handlers do this inline.
   - **Node ID** (most `/v1/nodes/{id}` routes): resolved via
     `ResolveAbsPath` which is index-backed — no string-level path math.
@@ -91,8 +91,8 @@ These come from past incidents in this codebase, not abstract style preferences:
   repo, in order of preference: (1) `infra/jobs.Scheduler` for keyed,
   deduplicated background work; (2) `infra/eventbus`'s bounded async
   dispatch with parallelism semaphore; (3) component-local cleanup
-  goroutines bounded by their own stop channel + a chunk-write semaphore
-  (see `chunkedManager`). All three must be stoppable via the
+  goroutines bounded by their own stop channel + a write semaphore
+  (see `uploadSessionManager`). All three must be stoppable via the
   constructor's context or an explicit `Close(...)`.
 - **`Scheduler.Close(ctx)` must respect the context deadline** even when
   jobs ignore cancellation — that's why it uses an atomic worker counter
@@ -137,4 +137,4 @@ These come from past incidents in this codebase, not abstract style preferences:
 
 ## When in doubt
 
-If the change touches Pebble layout, the index format version, or the chunked upload manifest schema: stop and discuss before coding. These have versioning concerns and rebuild-on-incompatible-format paths that must be updated in lockstep.
+If the change touches Pebble layout, the index format version, or upload-session metadata schema: stop and discuss before coding. These have versioning concerns and rebuild-on-incompatible-format paths that must be updated in lockstep.

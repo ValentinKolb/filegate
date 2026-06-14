@@ -4,7 +4,7 @@
 //
 // The package focuses on:
 //   - Node metadata and directory listing response shapes.
-//   - Chunked upload request/status/progress types.
+//   - Direct uploads and resumable upload-session contracts.
 //   - Transfer, search, index, and stats contracts.
 //   - Ownership and error envelope definitions.
 //

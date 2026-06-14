@@ -11,8 +11,8 @@ For runtimes without a Filegate SDK (Python, Rust, curl, ...), or when you need 
 - **Errors**: `{ "error": "..." }` for all non-2xx. **On 409 the body
   may also carry** `{ "existingId": "...", "existingPath": "..." }` —
   populated when the daemon could resolve the colliding node (PUT
-  `/v1/paths`, mkdir, chunked upload start, transfers). For chunked
-  duplicate-chunk-content conflicts and a few other edge paths the body
+  `/v1/paths`, mkdir, upload session create/commit, transfers). For segment
+  duplicate-content conflicts and a few other edge paths the body
   is just `{ "error": "conflict" }` without diagnostics. Code defensively.
 
 ## Health & stats
@@ -97,44 +97,50 @@ directories  "true" to include directories (default false)
 }
 ```
 
-## Chunked uploads
+## Upload sessions
 
 ```
-POST /v1/uploads/chunked/start
+POST /v1/uploads/sessions
 body: {
-  "parentId": "...",
-  "filename": "...",
+  "path": "data/uploads/video.mp4",
   "size": 12345,
   "checksum": "sha256:<hex>",
-  "chunkSize": 8388608,
+  "segmentSize": 8388608,
   "ownership": { ... },                            // optional
-  "onConflict": "error" | "overwrite" | "rename"   // default "error"
+  "onConflict": "error" | "overwrite",  // default "error"
+  "direct": { "expiresInSeconds": 900, "allow": ["putSegment", "status", "commit", "abort"] }
 }
 → {
-  "uploadId": "...",
-  "chunkSize": ...,
-  "totalChunks": ...,
-  "uploadedChunks": [...],
-  "completed": false
+  "id": "...",
+  "segmentSize": ...,
+  "totalSegments": ...,
+  "segments": [{ "index": 0, "offset": 0, "size": 8388608 }],
+  "uploadedSegments": [],
+  "phase": "in_progress",
+  "direct": { ... }                                 // only when requested
 }
 → may return 409 (optimistic conflict check) or 507 (storage guard)
 
-GET /v1/uploads/chunked/{uploadId}                 → status (same shape as above)
+POST /v1/uploads/sessions:batch                    → create many independent sessions
 
-PUT /v1/uploads/chunked/{uploadId}/chunks/{index}
-    X-Chunk-Checksum: sha256:<hex>                 // recommended
-    Body: <chunk bytes>
+GET /v1/uploads/sessions/{sessionId}               → status (same shape as create response)
+
+PUT /v1/uploads/sessions/{sessionId}/segments/{index}
+    X-Segment-Checksum: sha256:<hex>               // recommended
+    Body: <segment bytes>
 → {
-    "chunkIndex": N,
-    "uploadedChunks": [...],
-    "completed": false
+    "sessionId": "...",
+    "index": N,
+    "uploadedSegments": [...]
   }
-  -- OR (if this was the closing chunk) --
+
+POST /v1/uploads/sessions/{sessionId}/commit
 → {
-    "completed": true,
-    "file": { ...full Node metadata... }
+    "node": { ...full Node metadata... },
+    "checksum": "sha256:<hex>"
   }
-→ may return 409 (authoritative conflict check at finalize)
+
+DELETE /v1/uploads/sessions/{sessionId}            → abort in-progress session
 ```
 
 ## Direct upload URLs
@@ -236,13 +242,12 @@ body: one of:
 | 415  | Unsupported Media Type (thumbnail of unsupported source format)          |
 | 500  | Internal server error (something went wrong on the daemon)               |
 | 503  | Service Unavailable (e.g. thumbnail scheduler queue full)                |
-| 507  | Insufficient Storage — daemon's free-space guard would be violated (chunked upload start) |
+| 507  | Insufficient Storage — daemon's free-space guard would be violated |
 
-For chunked uploads, oversized `size`/`chunkSize` at `start` returns **400**
-(not 413) with `"invalid size"` / `"invalid chunkSize"`. For one-shot PUT,
-the daemon limits the body via `MaxBytesReader` — exceeding the limit
-typically surfaces as a connection-level error (`MaxBytesError`) rather
-than a clean HTTP status. Pick chunked upload if you might hit the limit.
+For upload sessions, invalid `size`/`segmentSize` returns **400**. An
+oversized segment body returns **413**. For one-shot PUT, the daemon limits
+the body via `MaxBytesReader`; exceeding the limit may surface as a
+connection-level error. Pick upload sessions if you might hit the limit.
 
 ## curl examples
 

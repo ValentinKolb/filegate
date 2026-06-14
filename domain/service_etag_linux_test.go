@@ -4,6 +4,7 @@ package domain_test
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ func TestWriteContentByVirtualPathPopulatesETag(t *testing.T) {
 	rootName := svc.ListRoot()[0].Name
 	body := []byte("hello, etag")
 	want := md5sum(body)
+	wantSHA := sha256sum(body)
 
 	meta, _, err := svc.WriteContentByVirtualPath(
 		"/"+rootName+"/etag-test.txt",
@@ -37,6 +39,9 @@ func TestWriteContentByVirtualPathPopulatesETag(t *testing.T) {
 	if meta.ETag != want {
 		t.Fatalf("ETag=%q, want %q", meta.ETag, want)
 	}
+	if meta.SHA256 != wantSHA {
+		t.Fatalf("SHA256=%q, want %q", meta.SHA256, wantSHA)
+	}
 
 	// Round-trip: GetFile after restart-equivalent (re-fetch) must see
 	// the same ETag.
@@ -46,6 +51,9 @@ func TestWriteContentByVirtualPathPopulatesETag(t *testing.T) {
 	}
 	if again.ETag != want {
 		t.Fatalf("re-fetch ETag=%q, want %q", again.ETag, want)
+	}
+	if again.SHA256 != wantSHA {
+		t.Fatalf("re-fetch SHA256=%q, want %q", again.SHA256, wantSHA)
 	}
 }
 
@@ -86,6 +94,49 @@ func TestWriteContentOverwritePopulatesNewETag(t *testing.T) {
 	}
 }
 
+func TestEnsureFileSHA256BackfillsMissingFingerprint(t *testing.T) {
+	svc, idx, cleanup := newServiceWithIndex(t)
+	defer cleanup()
+
+	rootName := svc.ListRoot()[0].Name
+	body := []byte("legacy sha backfill")
+	meta, _, err := svc.WriteContentByVirtualPath(
+		"/"+rootName+"/legacy-sha.txt",
+		strings.NewReader(string(body)),
+		domain.ConflictError,
+	)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	entity, err := idx.GetEntity(meta.ID)
+	if err != nil {
+		t.Fatalf("get entity: %v", err)
+	}
+	entity.SHA256 = ""
+	if err := idx.Batch(func(b domain.Batch) error {
+		b.PutEntity(*entity)
+		return nil
+	}); err != nil {
+		t.Fatalf("clear sha: %v", err)
+	}
+
+	ensured, err := svc.EnsureFileSHA256(meta.ID)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if ensured.SHA256 != sha256sum(body) {
+		t.Fatalf("ensured SHA256=%q, want %q", ensured.SHA256, sha256sum(body))
+	}
+	persisted, err := svc.GetFile(meta.ID)
+	if err != nil {
+		t.Fatalf("refetch: %v", err)
+	}
+	if persisted.SHA256 != sha256sum(body) {
+		t.Fatalf("persisted SHA256=%q, want %q", persisted.SHA256, sha256sum(body))
+	}
+}
+
 // TestRescanPopulatesETagForLegacyFiles simulates the upgrade scenario:
 // a file exists in the index with no ETag (as if written before the
 // schema bump). Rescan must walk the filesystem and populate ETagMD5
@@ -117,6 +168,9 @@ func TestRescanRecomputesETagOnContentChange(t *testing.T) {
 	if meta.ETag != md5sum(original) {
 		t.Fatalf("initial ETag=%q, want %q", meta.ETag, md5sum(original))
 	}
+	if meta.SHA256 != sha256sum(original) {
+		t.Fatalf("initial SHA256=%q, want %q", meta.SHA256, sha256sum(original))
+	}
 
 	mountAbs, err := svc.ResolveAbsPath(root.ID)
 	if err != nil {
@@ -141,6 +195,9 @@ func TestRescanRecomputesETagOnContentChange(t *testing.T) {
 	if after.ETag != md5sum(mutated) {
 		t.Fatalf("post-rescan ETag=%q, want %q (rescan failed to recompute)",
 			after.ETag, md5sum(mutated))
+	}
+	if after.SHA256 != sha256sum(mutated) {
+		t.Fatalf("post-rescan SHA256=%q, want %q", after.SHA256, sha256sum(mutated))
 	}
 }
 
@@ -191,6 +248,11 @@ func TestRescanPreservesETagWhenUnchanged(t *testing.T) {
 func md5sum(b []byte) string {
 	sum := md5.Sum(b)
 	return hex.EncodeToString(sum[:])
+}
+
+func sha256sum(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func writeRawFileForTest(path string, body []byte) error {

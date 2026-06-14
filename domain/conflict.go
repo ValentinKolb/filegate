@@ -35,7 +35,9 @@ type ConflictAllowed struct {
 }
 
 // FileConflictModes is the allowed set for endpoints that write file content
-// (PUT /v1/paths, chunked upload start, ReplaceFile, Transfer).
+// (PUT /v1/paths, ReplaceFile, Transfer). Upload sessions parse this set and
+// reject rename separately because resumable commit recovery needs one stable
+// target path.
 var FileConflictModes = ConflictAllowed{allowOverwrite: true, allowSkip: false}
 
 // MkdirConflictModes is the allowed set for mkdir endpoints. Overwrite is

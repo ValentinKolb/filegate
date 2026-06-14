@@ -27,6 +27,8 @@ export interface Node {
   mtime: number;
   ownership: OwnershipView;
   mimeType?: string;
+  etag?: string;
+  sha256?: string;
   exif: Record<string, string>;
   children?: Node[];
   pageSize?: number;
@@ -53,9 +55,11 @@ export interface ErrorResponse {
   existingPath?: string;
 }
 
-/** Conflict mode accepted by file-write endpoints (PUT /v1/paths,
- * chunked upload start). `"skip"` is mkdir-only and not allowed here. */
+/** Conflict mode accepted by file-write endpoints. `"skip"` is mkdir-only and
+ * not allowed here. Upload sessions narrow this to `"error" | "overwrite"`. */
 export type FileConflictMode = "error" | "overwrite" | "rename";
+export type UploadSessionConflictMode = Exclude<FileConflictMode, "rename">;
+export type FingerprintMode = "none" | "cached" | "ensure";
 
 /** Conflict mode accepted by mkdir. `"overwrite"` is forbidden — replacing
  * a directory subtree is a Transfer operation, not a mkdir one. */
@@ -98,6 +102,19 @@ export interface StatsResponse {
   cache: StatsCache;
   mounts: StatsMount[];
   disks: StatsDisk[];
+}
+
+// --- Capabilities ---
+
+export interface CapabilitiesResponse {
+  uploads: UploadCapabilities;
+}
+
+export interface UploadCapabilities {
+  maxChunkBytes: number;
+  maxUploadBytes: number;
+  maxSessionUploadBytes: number;
+  maxConcurrentSegmentWrites: number;
 }
 
 // --- Mkdir ---
@@ -164,54 +181,14 @@ export interface GlobSearchResponse {
   paths: GlobSearchPath[];
 }
 
-// --- Chunked uploads ---
-
-export interface ChunkedStartRequest {
-  parentId: string;
-  filename: string;
-  size: number;
-  checksum: string;
-  chunkSize: number;
-  ownership?: Ownership;
-  /** Default `"error"`. The check is performed both at start (optimistic,
-   * saves bandwidth) and at finalize (race-safe). The chosen mode is
-   * persisted in the upload manifest and survives Resume — in fact, a
-   * resumed start may upgrade the mode (e.g. retry with `"overwrite"`
-   * after the first attempt collided at finalize). */
-  onConflict?: FileConflictMode;
-}
-
-export interface ChunkedStatusResponse {
-  uploadId: string;
-  chunkSize: number;
-  totalChunks: number;
-  uploadedChunks: number[];
-  completed: boolean;
-}
-
-export interface ChunkedProgressResponse {
-  chunkIndex: number;
-  uploadedChunks: number[];
-  completed: boolean;
-}
-
-export interface NodeWithChecksum extends Node {
-  checksum: string;
-}
-
-export interface ChunkedCompleteResponse {
-  completed: boolean;
-  file: NodeWithChecksum;
-}
-
 // --- Direct uploads ---
 
 export interface DirectUploadURLRequest {
-  path: string;
-  expiresInSeconds?: number;
-  contentType?: string;
-  onConflict?: FileConflictMode;
-  maxBytes?: number;
+	path: string;
+	expiresInSeconds?: number;
+	contentType?: string;
+	onConflict?: FileConflictMode;
+	maxBytes?: number;
 }
 
 export interface DirectUploadURLResponse {
@@ -220,6 +197,71 @@ export interface DirectUploadURLResponse {
   path: string;
   expiresAt: number;
   maxBytes: number;
+}
+
+// --- Upload sessions ---
+
+export interface UploadSessionDirectRequest {
+  expiresInSeconds?: number;
+  allow?: Array<"putSegment" | "status" | "commit" | "abort">;
+}
+
+export interface UploadSessionCreateRequest {
+	path: string;
+	size: number;
+	checksum: string;
+	segmentSize?: number;
+	contentType?: string;
+	ownership?: Ownership;
+	onConflict?: UploadSessionConflictMode;
+	direct?: UploadSessionDirectRequest;
+}
+
+export interface UploadSessionBatchCreateRequest {
+  uploads: UploadSessionCreateRequest[];
+  segmentSize?: number;
+  direct?: UploadSessionDirectRequest;
+}
+
+export interface UploadSessionSegment {
+  index: number;
+  offset: number;
+  size: number;
+}
+
+export interface UploadSessionDirect {
+  baseUrl: string;
+  token: string;
+  expiresAt: number;
+  allow: Array<"putSegment" | "status" | "commit" | "abort">;
+}
+
+export interface UploadSessionResponse {
+  id: string;
+  path: string;
+  size: number;
+  checksum: string;
+  segmentSize: number;
+  totalSegments: number;
+  segments: UploadSessionSegment[];
+  uploadedSegments: number[];
+  phase: "in_progress" | "committing" | "committed" | "aborted";
+  direct?: UploadSessionDirect;
+}
+
+export interface UploadSessionBatchCreateResponse {
+  sessions: UploadSessionResponse[];
+}
+
+export interface UploadSegmentResponse {
+  sessionId: string;
+  index: number;
+  uploadedSegments: number[];
+}
+
+export interface UploadSessionCommitResponse {
+  node: Node;
+  checksum: string;
 }
 
 // --- Index resolve ---

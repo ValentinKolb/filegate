@@ -78,17 +78,15 @@ Use these to render meaningful prompts ("File X already exists, would you like t
 | 403  | Forbidden                                                                  | Path traversal attempt, symlink escape, root mutation         |
 | 404  | Not Found                                                                  | Node ID doesn't exist; path doesn't resolve                   |
 | 409  | Conflict                                                                   | Name already exists with `onConflict: error`; cross-type collision |
-| 413  | Payload Too Large                                                          | Image source > `ThumbnailMaxSourceBytes` (chunked size violations are 400, not 413 — see below) |
+| 413  | Payload Too Large                                                          | Image source too large, segment body too large, or capped direct upload exceeded |
 | 415  | Unsupported Media Type                                                     | Thumbnail of an unsupported image format                      |
 | 503  | Service Unavailable                                                        | Thumbnail scheduler queue is full                             |
 | 500  | Internal Server Error                                                      | Unexpected daemon failure (look at daemon logs)               |
 | 507  | Insufficient Storage                                                       | Free-space guard (`UploadMinFreeBytes`) would be violated     |
 
-For chunked uploads, the daemon validates `size` and `chunkSize` at
-`/start` and rejects oversized requests with **400 Bad Request** (not
-413), with messages like `"invalid size"` or `"invalid chunkSize"`. Bad
-chunk bodies during PUT also surface as 400 with `"invalid chunk data"`.
-413 in this codebase is reserved for thumbnail source-size limits.
+For upload sessions, the daemon validates `size` and `segmentSize` at
+create time and rejects invalid requests with **400 Bad Request**. A segment
+body larger than the planned segment size returns **413 Payload Too Large**.
 
 ## SDK error handling
 

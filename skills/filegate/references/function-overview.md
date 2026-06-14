@@ -9,7 +9,7 @@ This is the canonical "what can Filegate do?" reference. Read top to bottom the 
 3. [Stable file IDs](#stable-file-ids)
 4. [Browse: paths and nodes](#browse-paths-and-nodes)
 5. [Upload: one-shot](#upload-one-shot)
-6. [Upload: chunked / resumable](#upload-chunked--resumable)
+6. [Upload: sessions / resumable](#upload-sessions--resumable)
 7. [Download](#download)
 8. [Mkdir](#mkdir)
 9. [Update: rename, ownership](#update-rename-ownership)
@@ -139,29 +139,30 @@ Body: <binary stream>
 
 Intermediate directories (`data/uploads/`) are created automatically (`mkdir -p` style, always reuse-if-dir).
 
-**Limits:** Daemon-configured `MaxUploadBytes` (default 500 MiB). Larger files must use chunked upload.
+**Limits:** Daemon-configured `MaxUploadBytes` (default 500 MiB). Larger files should use upload sessions.
 
 **Conflict handling:** `?onConflict=error|overwrite|rename`, default `error`. See [conflict-handling.md](conflict-handling.md).
 
-## Upload: chunked / resumable
+## Upload: sessions / resumable
 
-For large files, parallel chunk uploads, resumable transfers across network interruptions, and out-of-order chunk delivery:
+For large files, parallel segment uploads, resumable transfers across network
+interruptions, and out-of-order delivery:
 
 ```
-1. POST /v1/uploads/chunked/start   → returns deterministic uploadId
-2. PUT  /v1/uploads/chunked/{uploadId}/chunks/{index}   ← repeat for each chunk
-3. (server auto-finalizes when last chunk arrives)
+1. POST /v1/uploads/sessions                     → returns session id + segment plan
+2. PUT  /v1/uploads/sessions/{id}/segments/{n}   ← repeat for each segment
+3. POST /v1/uploads/sessions/{id}/commit         → verify checksum + publish atomically
 ```
 
 Key properties:
 
-- **Deterministic upload ID**: `hex( sha256(parentID + ":" + filename + ":" + checksum)[0:8] )`. The same client retrying with the same params reattaches to the same session — that's how Resume works. The exact formula matters only if you're computing IDs client-side outside the SDK; see [`chunked-uploads.md`](chunked-uploads.md) for the canonical version.
-- **Out-of-order**: chunks can arrive in any order.
-- **Duplicate-safe**: re-uploading the same chunk with the same content is a no-op (returns 200). Re-uploading with DIFFERENT content returns 409.
-- **Auto-finalize**: when the bitset of received chunks is full, the server finalizes immediately on the closing chunk's request. No explicit "complete" call.
-- **Conflict-aware**: `onConflict` is checked at start (optimistic, saves bandwidth) and at finalize (race-safe).
+- **Durable session ID**: persist `session.id` and resume with status.
+- **Out-of-order**: segments can arrive in any order.
+- **Duplicate-safe**: re-uploading the same segment with the same content is a no-op.
+- **Explicit commit**: the server verifies the assembled checksum before publishing.
+- **Conflict-aware**: `onConflict` is checked at create (optimistic, saves bandwidth) and at commit (race-safe).
 
-See [chunked-uploads.md](chunked-uploads.md) for the full state machine and resume patterns.
+See [upload-sessions.md](upload-sessions.md) for the full state machine and resume patterns.
 
 ## Download
 
@@ -343,13 +344,13 @@ Every write surface that can hit a name collision uses the same vocabulary, with
 |----------------------------------|---------|------------------------|
 | `PUT /v1/paths`                  | error   | error/overwrite/rename |
 | `POST /v1/nodes/{id}/mkdir`      | error   | error/skip/rename      |
-| `POST /v1/uploads/chunked/start` | error   | error/overwrite/rename |
+| `POST /v1/uploads/sessions`      | error   | error/overwrite        |
 | `POST /v1/transfers`             | error   | error/overwrite/rename |
 
 On 409 the response body **may** carry `existingId` and `existingPath` for
 diagnostic UIs — populated whenever the daemon could resolve the colliding
-node (path-PUT, mkdir, chunked start, transfers). A few generic conflict
-paths (chunked duplicate-content rejects, fallback envelope) return only
+node (path-PUT, mkdir, upload session create/commit, transfers). A few generic conflict
+paths (segment duplicate-content rejects, fallback envelope) return only
 `{"error": "conflict"}`. See [`conflict-handling.md`](conflict-handling.md).
 
 ## Authentication
@@ -364,7 +365,7 @@ That's it — there is no per-user auth, no scopes, no OAuth. Filegate is a back
 
 ## Free-space safety
 
-Filegate has a configurable `min_free_bytes` guard. The chunked-upload
+Filegate has a configurable `min_free_bytes` guard. The upload-session
 `/start` endpoint checks it explicitly and returns `507 Insufficient
 Storage` upfront — saves bandwidth on rejected uploads. The one-shot `PUT
 /v1/paths` endpoint does not pre-check the guard, but actual ENOSPC errors

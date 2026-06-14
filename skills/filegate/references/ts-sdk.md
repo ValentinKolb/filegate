@@ -79,7 +79,7 @@ The backend uses the SDK normally; the browser talks to your backend
 endpoints with whatever auth you already have (sessions, JWT, OAuth, etc.)
 or to the single-purpose direct upload URL. See
 [`relay-patterns.md`](relay-patterns.md) for full upload/download patterns.
-For purely-client-side helpers like file hashing or chunk math (no Filegate
+For purely-client-side helpers like file hashing or segment math (no Filegate
 connection needed), import from `@valentinkolb/filegate/utils` — those are
 pure functions and ship without the HTTP client.
 
@@ -88,7 +88,7 @@ pure functions and ship without the HTTP client.
 ```ts
 fg.paths        // PathsClient    — virtual paths (PUT, GET listings)
 fg.nodes        // NodesClient    — ID-based ops
-fg.uploads      // UploadsClient  — chunked uploads only (.chunked sub-namespace)
+fg.uploads      // UploadsClient  — direct URLs and resumable sessions
 fg.transfers    // TransfersClient — move / copy
 fg.search       // SearchClient   — glob
 fg.index        // IndexClient    — rescan, resolve
@@ -98,15 +98,15 @@ fg.baseUrl      // string         — the configured base URL
 ```
 
 One-shot uploads live under `fg.paths.put()`, **not** under `fg.uploads`.
-`fg.uploads` only contains the chunked upload sub-client.
+`fg.uploads` contains direct URL minting and upload sessions.
 
 Pure helpers ship under `@valentinkolb/filegate/utils`:
 
 ```ts
-import { chunks } from "@valentinkolb/filegate/utils";
-chunks.totalChunks(size, chunkSize);
-chunks.bounds(index, size, chunkSize);
-await chunks.sha256Bytes(uint8Array);
+import { uploads } from "@valentinkolb/filegate/utils";
+uploads.segments.count({ size, segmentSize });
+uploads.segments.bounds(index, size, segmentSize);
+await uploads.checksum.sha256(uint8Array);
 ```
 
 ## Common operations
@@ -164,7 +164,7 @@ return new Response(resp.body, { status: resp.status, headers: resp.headers });
 
 For directory IDs the body is a tar stream (`Content-Type: application/x-tar`).
 
-`contentRaw`, `putRaw`, `thumbnailRaw`, and `uploads.chunked.sendChunkRaw`
+`contentRaw`, `putRaw`, `thumbnailRaw`, and `uploads.sessions.segments.putRaw`
 return the raw `Response` **without throwing on 4xx/5xx**. That's what makes
 them usable for relay handlers — the upstream status reaches the downstream
 client unchanged. The non-`Raw` variants throw `FilegateError` on non-2xx.
@@ -263,7 +263,7 @@ Fields:
 import type {
   Node, NodeListResponse,
   Ownership, OwnershipView,
-  MkdirRequest, UpdateNodeRequest, TransferRequest, ChunkedStartRequest,
+  MkdirRequest, UpdateNodeRequest, TransferRequest, UploadSessionCreateRequest,
   GlobSearchResponse,
   ErrorResponse,
   FileConflictMode,    // "error" | "overwrite" | "rename"
@@ -285,10 +285,9 @@ await fg.nodes.mkdir(parentId, { path: "x", onConflict: "skip" });   // idempote
 await fg.nodes.mkdir(parentId, { path: "x", onConflict: "rename" }); // → "x-01"
 // "overwrite" is REJECTED for mkdir — use Transfer with overwrite to replace dirs.
 
-// Chunked
-await fg.uploads.chunked.start({ ..., onConflict: "error" });
-await fg.uploads.chunked.start({ ..., onConflict: "overwrite" });
-await fg.uploads.chunked.start({ ..., onConflict: "rename" });
+// Upload sessions
+await fg.uploads.sessions.create({ ..., onConflict: "error" });
+await fg.uploads.sessions.create({ ..., onConflict: "overwrite" });
 
 // Transfer
 await fg.transfers.create({ ..., onConflict: "error" });

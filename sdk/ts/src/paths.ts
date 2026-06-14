@@ -1,11 +1,12 @@
 import { ClientCore } from "./core.js";
 import { ensureSuccess } from "./errors.js";
-import type { Node, NodeListResponse } from "./types.js";
+import type { FingerprintMode, Node, NodeListResponse } from "./types.js";
 
 export interface GetPathOptions {
   pageSize?: number;
   cursor?: string;
   computeRecursiveSizes?: boolean;
+  fingerprint?: FingerprintMode;
 }
 
 /**
@@ -37,6 +38,7 @@ function getQuery(opts?: GetPathOptions): Record<string, string> {
   if (opts?.pageSize) q["pageSize"] = String(opts.pageSize);
   if (opts?.cursor) q["cursor"] = opts.cursor;
   if (opts?.computeRecursiveSizes) q["computeRecursiveSizes"] = "true";
+  if (opts?.fingerprint) q["fingerprint"] = opts.fingerprint;
   return q;
 }
 

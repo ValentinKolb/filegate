@@ -104,7 +104,6 @@ func newDaemonServeCmd() *cobra.Command {
 					return err
 				}
 			}
-
 			idx, svc, err := buildCore(cfg)
 			if err != nil {
 				return err
@@ -160,30 +159,30 @@ func newDaemonServeCmd() *cobra.Command {
 			}
 
 			router := httpadapter.NewRouter(svc, httpadapter.RouterOptions{
-				BearerToken:              cfg.Auth.BearerToken,
-				AccessLogEnabled:         cfg.Server.AccessLogEnabled,
-				PublicURL:                cfg.Server.PublicURL,
-				TrustedProxies:           trustedProxies,
-				CORS:                     cfg.Server.CORS,
-				IndexPath:                cfg.Storage.IndexPath,
-				JobWorkers:               cfg.Jobs.Workers,
-				JobQueueSize:             cfg.Jobs.QueueSize,
-				ThumbnailJobWorkers:      cfg.Jobs.ThumbnailWorkers,
-				ThumbnailJobQueueSize:    cfg.Jobs.ThumbnailQueueSize,
-				UploadExpiry:             cfg.Upload.Expiry,
-				UploadCleanupInterval:    cfg.Upload.CleanupInterval,
-				MaxChunkBytes:            cfg.Upload.MaxChunkBytes,
-				MaxUploadBytes:           cfg.Upload.MaxUploadBytes,
-				MaxChunkedUploadBytes:    cfg.Upload.MaxChunkedUploadBytes,
-				MaxConcurrentChunkWrites: cfg.Upload.MaxConcurrentChunkWrites,
-				UploadMinFreeBytes:       cfg.Upload.MinFreeBytes,
-				ThumbnailLRUCacheSize:    cfg.Thumbnail.LRUCacheSize,
-				ThumbnailMaxSourceBytes:  cfg.Thumbnail.MaxSourceBytes,
-				ThumbnailMaxPixels:       cfg.Thumbnail.MaxPixels,
-				Rescan:                   svc.Rescan,
-				MetricsHandler:           metricsRESTHandler(cfg, metricsReg),
-				MetricsPath:              cfg.Metrics.Path,
-				MetricsToken:             cfg.Metrics.Token,
+				BearerToken:                cfg.Auth.BearerToken,
+				AccessLogEnabled:           cfg.Server.AccessLogEnabled,
+				PublicURL:                  cfg.Server.PublicURL,
+				TrustedProxies:             trustedProxies,
+				CORS:                       cfg.Server.CORS,
+				IndexPath:                  cfg.Storage.IndexPath,
+				JobWorkers:                 cfg.Jobs.Workers,
+				JobQueueSize:               cfg.Jobs.QueueSize,
+				ThumbnailJobWorkers:        cfg.Jobs.ThumbnailWorkers,
+				ThumbnailJobQueueSize:      cfg.Jobs.ThumbnailQueueSize,
+				UploadExpiry:               cfg.Upload.Expiry,
+				UploadCleanupInterval:      cfg.Upload.CleanupInterval,
+				MaxChunkBytes:              cfg.Upload.MaxChunkBytes,
+				MaxUploadBytes:             cfg.Upload.MaxUploadBytes,
+				MaxSessionUploadBytes:      cfg.Upload.MaxSessionUploadBytes,
+				MaxConcurrentSegmentWrites: cfg.Upload.MaxConcurrentSegmentWrites,
+				UploadMinFreeBytes:         cfg.Upload.MinFreeBytes,
+				ThumbnailLRUCacheSize:      cfg.Thumbnail.LRUCacheSize,
+				ThumbnailMaxSourceBytes:    cfg.Thumbnail.MaxSourceBytes,
+				ThumbnailMaxPixels:         cfg.Thumbnail.MaxPixels,
+				Rescan:                     svc.Rescan,
+				MetricsHandler:             metricsRESTHandler(cfg, metricsReg),
+				MetricsPath:                cfg.Metrics.Path,
+				MetricsToken:               cfg.Metrics.Token,
 			})
 			var routerCloser interface{ Close() error }
 			if closer, ok := router.(interface{ Close() error }); ok {

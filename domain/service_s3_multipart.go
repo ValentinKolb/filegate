@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -246,12 +247,12 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 	// rename is atomic and we hold the path-lock — no other writer
 	// can mutate the file between rename and hash.
 	hashStart := time.Now()
-	wholeBodyMD5, hashErr := s.hashLocalFile(destAbs)
+	wholeBodyHashes, hashErr := s.hashLocalFileHashes(destAbs)
 	timings.Hash = time.Since(hashStart)
 	if hashErr != nil {
 		// Best-effort — leave etag_md5 empty; the rescan will
 		// populate it later.
-		wholeBodyMD5 = ""
+		wholeBodyHashes = ContentHashes{}
 	}
 
 	// Build the entity record from the rebuild stat + composite ETag
@@ -259,7 +260,8 @@ func (s *Service) CompleteMultipartUpload(args MultipartCompleteArgs) (Multipart
 	// via buildEntityMetadata, plus the S3-specific fields the
 	// adapter passed in.
 	entity := buildEntityMetadata(id, parentID, fileName, destAbs, info)
-	entity.ETagMD5 = wholeBodyMD5
+	entity.ETagMD5 = wholeBodyHashes.MD5Hex
+	entity.SHA256 = wholeBodyHashes.SHA256
 	entity.MultipartETag = args.CompositeETag
 	entity.ContentType = args.Opts.ContentType
 	entity.ContentEncoding = args.Opts.ContentEncoding
@@ -395,17 +397,25 @@ func (s *Service) DeleteActiveMultipartUpload(uploadID string) error {
 	})
 }
 
-// hashLocalFile is a tiny helper to whole-body-MD5-hash a file on
-// disk. Matches the format used elsewhere (lowercase hex).
-func (s *Service) hashLocalFile(absPath string) (string, error) {
+// hashLocalFileHashes fingerprints a local file in one read pass.
+func (s *Service) hashLocalFileHashes(absPath string) (ContentHashes, error) {
 	f, err := os.Open(absPath)
 	if err != nil {
-		return "", err
+		return ContentHashes{}, err
 	}
 	defer f.Close()
-	h := md5.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	md5Hash := md5.New()
+	shaHash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(md5Hash, shaHash), f); err != nil {
+		return ContentHashes{}, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return ContentHashes{
+		MD5Hex: hex.EncodeToString(md5Hash.Sum(nil)),
+		SHA256: "sha256:" + hex.EncodeToString(shaHash.Sum(nil)),
+	}, nil
+}
+
+func (s *Service) hashLocalFile(absPath string) (string, error) {
+	hashes, err := s.hashLocalFileHashes(absPath)
+	return hashes.MD5Hex, err
 }

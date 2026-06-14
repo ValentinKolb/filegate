@@ -5,14 +5,14 @@
 // The package focuses on:
 //   - RESTful routing for paths, nodes, uploads, transfers, search, and index endpoints.
 //   - Bearer-token authentication middleware.
-//   - Chunked upload lifecycle management with concurrent write control.
+//   - Upload-session lifecycle management with concurrent write control.
 //   - On-demand thumbnail generation with LRU caching.
 //
 // Key Components:
 //
 //   - NewRouter: constructs the HTTP handler tree with all middleware and routes.
 //   - RouterOptions: configuration struct for router initialization.
-//   - chunkedManager: manages resumable chunked upload sessions.
+//   - uploadSessionManager: manages resumable upload sessions.
 //   - thumbnailer: generates and caches image thumbnails via a job scheduler.
 //
 // Related Packages:

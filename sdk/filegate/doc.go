@@ -5,14 +5,14 @@
 // The package focuses on:
 //   - Typed JSON responses for metadata, search, and upload operations.
 //   - Raw HTTP responses for streaming content and relay scenarios.
-//   - Chunked upload helpers with progress and completion tracking.
+//   - Resumable upload sessions with direct-token and relay-friendly paths.
 //
 // Key Components:
 //
 //   - Filegate: top-level client with scoped namespace fields.
 //   - PathsClient: virtual path operations (get, put, putRaw).
 //   - NodesClient: ID-oriented CRUD, content streaming, thumbnails.
-//   - ChunkedUploadClient: resumable chunked upload lifecycle.
+//   - UploadSessionsClient: resumable upload session lifecycle.
 //   - SearchClient: glob-based file search.
 //   - IndexClient: index maintenance and path/ID resolution.
 //   - StatsClient: runtime statistics retrieval.
@@ -20,7 +20,7 @@
 // Pure helpers live in dedicated subpackages so callers without an HTTP
 // client can use them:
 //
-//   - sdk/filegate/chunks: chunk math + sha256 in Filegate's checksum format.
+//   - sdk/filegate/segments: segment math + sha256 in Filegate's checksum format.
 //   - sdk/filegate/relay: HTTP response passthrough for proxy handlers.
 //
 // Related Packages:

@@ -164,3 +164,19 @@ func (f *fakeIndex) ListActiveMultipartUploads(string) ([]ActiveMultipartUpload,
 func (f *fakeIndex) ListActiveMultipartParts(string) ([]ActiveMultipartPart, error) {
 	return nil, nil
 }
+
+func (f *fakeIndex) LookupUploadSession(string) (*UploadSession, error) {
+	return nil, ErrNotFound
+}
+
+func (f *fakeIndex) ListUploadSessions(UploadSessionPhase) ([]UploadSession, error) {
+	return nil, nil
+}
+
+func (f *fakeIndex) ListUploadSegments(string) ([]UploadSegment, error) {
+	return nil, nil
+}
+
+func (f *fakeIndex) LookupUploadCommitRecord(string) (*UploadCommitRecord, error) {
+	return nil, ErrNotFound
+}

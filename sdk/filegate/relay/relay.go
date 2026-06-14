@@ -1,7 +1,7 @@
 // Package relay provides HTTP passthrough helpers for backends that proxy
 // Filegate responses to their own clients without re-buffering bodies.
 //
-// Like the chunks helpers, these functions do not depend on the SDK
+// Like the segment helpers, these functions do not depend on the SDK
 // client.
 package relay
 

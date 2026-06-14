@@ -27,12 +27,12 @@ func TestLoadConfigJobDefaults(t *testing.T) {
 	if cfg.Jobs.QueueSize != 8192 {
 		t.Fatalf("jobs.queue_size=%d, want 8192", cfg.Jobs.QueueSize)
 	}
-	if cfg.Upload.MaxChunkedUploadBytes != int64(50*1024*1024*1024) {
-		t.Fatalf("upload.max_chunked_upload_bytes=%d, want %d",
-			cfg.Upload.MaxChunkedUploadBytes, int64(50*1024*1024*1024))
+	if cfg.Upload.MaxSessionUploadBytes != int64(50*1024*1024*1024) {
+		t.Fatalf("upload.max_session_upload_bytes=%d, want %d",
+			cfg.Upload.MaxSessionUploadBytes, int64(50*1024*1024*1024))
 	}
-	if cfg.Upload.MaxConcurrentChunkWrites <= 0 {
-		t.Fatalf("upload.max_concurrent_chunk_writes=%d, want > 0", cfg.Upload.MaxConcurrentChunkWrites)
+	if cfg.Upload.MaxConcurrentSegmentWrites <= 0 {
+		t.Fatalf("upload.max_concurrent_segment_writes=%d, want > 0", cfg.Upload.MaxConcurrentSegmentWrites)
 	}
 	if cfg.Upload.MinFreeBytes != int64(64*1024*1024) {
 		t.Fatalf("upload.min_free_bytes=%d, want %d", cfg.Upload.MinFreeBytes, int64(64*1024*1024))
@@ -65,7 +65,7 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 		"  thumbnail_workers: 90\n" +
 		"  thumbnail_queue_size: 32000\n" +
 		"upload:\n" +
-		"  max_concurrent_chunk_writes: 77\n" +
+		"  max_concurrent_segment_writes: 77\n" +
 		"  min_free_bytes: 123456\n" +
 		"s3:\n" +
 		"  max_concurrent_writes: 9\n"
@@ -83,8 +83,8 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 	if cfg.Jobs.ThumbnailWorkers != 90 || cfg.Jobs.ThumbnailQueueSize != 32000 {
 		t.Fatalf("thumbnail jobs mismatch: workers=%d queue=%d", cfg.Jobs.ThumbnailWorkers, cfg.Jobs.ThumbnailQueueSize)
 	}
-	if cfg.Upload.MaxConcurrentChunkWrites != 77 {
-		t.Fatalf("upload.max_concurrent_chunk_writes=%d, want 77", cfg.Upload.MaxConcurrentChunkWrites)
+	if cfg.Upload.MaxConcurrentSegmentWrites != 77 {
+		t.Fatalf("upload.max_concurrent_segment_writes=%d, want 77", cfg.Upload.MaxConcurrentSegmentWrites)
 	}
 	if cfg.Upload.MinFreeBytes != 123456 {
 		t.Fatalf("upload.min_free_bytes=%d, want 123456", cfg.Upload.MinFreeBytes)
@@ -94,7 +94,7 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsChunkedUploadLimitBelowChunkSize(t *testing.T) {
+func TestLoadConfigRejectsSessionUploadLimitBelowSegmentSize(t *testing.T) {
 	base := t.TempDir()
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	content := "" +
@@ -105,7 +105,7 @@ func TestLoadConfigRejectsChunkedUploadLimitBelowChunkSize(t *testing.T) {
 		"    - " + base + "\n" +
 		"upload:\n" +
 		"  max_chunk_bytes: 10485760\n" +
-		"  max_chunked_upload_bytes: 1048576\n"
+		"  max_session_upload_bytes: 1048576\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestLoadConfigRejectsChunkedUploadLimitBelowChunkSize(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected config validation error")
 	}
-	if want := "upload.max_chunked_upload_bytes must be >= upload.max_chunk_bytes"; err.Error() != want {
+	if want := "upload.max_session_upload_bytes must be >= upload.max_chunk_bytes"; err.Error() != want {
 		t.Fatalf("error=%q, want %q", err.Error(), want)
 	}
 }
@@ -341,9 +341,9 @@ func TestLoadConfigPackagedExamplesParse(t *testing.T) {
 				if cfg.Server.ShutdownTimeout != 60*time.Second {
 					t.Fatalf("shutdown_timeout=%s, want 60s", cfg.Server.ShutdownTimeout)
 				}
-				if cfg.Upload.MaxChunkedUploadBytes < cfg.Upload.MaxChunkBytes {
-					t.Fatalf("max_chunked_upload_bytes=%d below max_chunk_bytes=%d",
-						cfg.Upload.MaxChunkedUploadBytes, cfg.Upload.MaxChunkBytes)
+				if cfg.Upload.MaxSessionUploadBytes < cfg.Upload.MaxChunkBytes {
+					t.Fatalf("max_session_upload_bytes=%d below max_chunk_bytes=%d",
+						cfg.Upload.MaxSessionUploadBytes, cfg.Upload.MaxChunkBytes)
 				}
 			},
 		},

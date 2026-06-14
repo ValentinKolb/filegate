@@ -392,19 +392,19 @@ func TestDownloadHeaderSanitizesFilename(t *testing.T) {
 	}
 }
 
-func TestChunkedUploadEndpointsRejectInvalidUploadID(t *testing.T) {
+func TestUploadSessionEndpointsRejectInvalidSessionID(t *testing.T) {
 	r, _, cleanup := newTestRouter(t)
 	defer cleanup()
 
 	w1 := httptest.NewRecorder()
-	r.ServeHTTP(w1, authedRequest(http.MethodGet, "/v1/uploads/chunked/not-valid"))
+	r.ServeHTTP(w1, authedRequest(http.MethodGet, "/v1/uploads/sessions/not-valid"))
 	if w1.Result().StatusCode != http.StatusBadRequest {
 		t.Fatalf("status=%d, want=%d", w1.Result().StatusCode, http.StatusBadRequest)
 	}
 
 	req := httptest.NewRequest(
 		http.MethodPut,
-		"/v1/uploads/chunked/not-valid/chunks/0",
+		"/v1/uploads/sessions/not-valid/segments/0",
 		bytes.NewReader([]byte("x")),
 	)
 	req.Header.Set("Authorization", "Bearer test-token")

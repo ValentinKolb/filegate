@@ -184,11 +184,11 @@ func (s *Service) WriteObjectS3(virtualPath string, body io.Reader, opts S3Write
 			return nil, false, err
 		}
 		preserveID := targetID
-		md5Hex, err := s.writeFileAtomic(targetAbs, body, os.FileMode(curMeta.Mode), ownershipFromFileMeta(curMeta), &preserveID, false)
+		hashes, err := s.writeFileAtomic(targetAbs, body, os.FileMode(curMeta.Mode), ownershipFromFileMeta(curMeta), &preserveID, false)
 		if err != nil {
 			return nil, false, err
 		}
-		if err := s.syncSingleAfterS3Write(targetAbs, md5Hex, opts); err != nil {
+		if err := s.syncSingleAfterS3Write(targetAbs, hashes, opts); err != nil {
 			return nil, false, err
 		}
 		s.bus.Publish(Event{Type: EventUpdated, ID: targetID, Path: targetAbs, At: time.Now()})
@@ -210,11 +210,11 @@ func (s *Service) WriteObjectS3(virtualPath string, body io.Reader, opts S3Write
 	if err != nil {
 		return nil, false, err
 	}
-	md5Hex, err := s.writeFileAtomic(targetAbs, body, 0o644, effectiveOwnership, &newID, true)
+	hashes, err := s.writeFileAtomic(targetAbs, body, 0o644, effectiveOwnership, &newID, true)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := s.syncSingleAfterS3Write(targetAbs, md5Hex, opts); err != nil {
+	if err := s.syncSingleAfterS3Write(targetAbs, hashes, opts); err != nil {
 		return nil, false, err
 	}
 	id, err := s.store.GetID(targetAbs)
@@ -367,7 +367,7 @@ func (s *Service) IterateFlatKeysForS3(mountName, prefix, after string, limit in
 // because single-PUT writes are not multipart-uploaded; M2's
 // CompleteMultipartUpload sets multipart_etag through a different
 // path that doesn't go through this helper.
-func (s *Service) syncSingleAfterS3Write(absPath string, md5Hex string, opts S3WriteOptions) error {
+func (s *Service) syncSingleAfterS3Write(absPath string, hashes ContentHashes, opts S3WriteOptions) error {
 	if err := s.syncSingle(absPath); err != nil {
 		return err
 	}
@@ -385,7 +385,8 @@ func (s *Service) syncSingleAfterS3Write(absPath string, md5Hex string, opts S3W
 		}
 		return err
 	}
-	entity.ETagMD5 = md5Hex
+	entity.ETagMD5 = hashes.MD5Hex
+	entity.SHA256 = hashes.SHA256
 	entity.MultipartETag = ""
 	entity.ContentType = opts.ContentType
 	entity.ContentEncoding = opts.ContentEncoding

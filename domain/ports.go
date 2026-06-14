@@ -45,6 +45,10 @@ type Index interface {
 	LookupActiveMultipartUpload(uploadID string) (*ActiveMultipartUpload, error)
 	ListActiveMultipartUploads(bucket string) ([]ActiveMultipartUpload, error)
 	ListActiveMultipartParts(uploadID string) ([]ActiveMultipartPart, error)
+	LookupUploadSession(sessionID string) (*UploadSession, error)
+	ListUploadSessions(phase UploadSessionPhase) ([]UploadSession, error)
+	ListUploadSegments(sessionID string) ([]UploadSegment, error)
+	LookupUploadCommitRecord(sessionID string) (*UploadCommitRecord, error)
 	Batch(fn func(Batch) error) error
 	Close() error
 }
@@ -90,6 +94,13 @@ type Batch interface {
 	PutActiveMultipartPart(part ActiveMultipartPart)
 	DelActiveMultipartPart(uploadID string, partNumber int)
 	DelActiveMultipartParts(uploadID string)
+	PutUploadSession(session UploadSession)
+	DelUploadSession(sessionID string)
+	PutUploadSegment(segment UploadSegment)
+	DelUploadSegment(sessionID string, index int)
+	DelUploadSegments(sessionID string)
+	PutUploadCommitRecord(record UploadCommitRecord)
+	DelUploadCommitRecord(sessionID string)
 }
 
 // Store is the port interface for filesystem I/O operations.

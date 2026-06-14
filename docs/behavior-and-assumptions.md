@@ -50,12 +50,12 @@ Detector cost model:
 - Metadata update: `PATCH /v1/nodes/{id}`
 - Delete subtree: `DELETE /v1/nodes/{id}`
 
-## Chunked Upload Semantics
+## Upload Session Semantics
 
-- Deterministic upload id per file target/checksum tuple
-- Chunks may arrive out-of-order
-- Duplicate chunk sends are accepted if content matches
-- Auto-finalize when all required chunks are present
+- Session metadata is durable in Pebble
+- Segments may arrive out-of-order
+- Duplicate segment sends are accepted if content matches
+- Commit is explicit and verifies the final checksum before publish
 - Staging is mount-local in `.fg-uploads`
 
 ## Ownership Semantics
@@ -67,7 +67,7 @@ Detector cost model:
 ## Safety and Limits
 
 - JSON body size limits are enforced
-- Upload size/chunk limits are enforced
+- Upload size/segment limits are enforced
 - Uploads may return `507 insufficient storage` when free space falls below configured safety threshold
 - Path traversal and root escape are rejected
 - Symlink escape protections are part of security tests

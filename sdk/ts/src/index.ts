@@ -1,15 +1,34 @@
 export { Filegate, filegate, type FilegateConfig } from "./client.js";
+export { CapabilitiesClient } from "./capabilities.js";
 export { FilegateError } from "./errors.js";
 export type { FetchImpl } from "./core.js";
 
 export type { GetPathOptions, PathPutResponse, PutPathOptions } from "./paths.js";
 export type { ThumbnailOptions } from "./nodes.js";
 export {
+  directUploads,
+  upload,
   uploadDirect,
-  type ChunkedSendResult,
+  type BrowserUploadAllowItem,
+  type BrowserUploadAllowRequest,
+  type BrowserUploadAllowResponse,
+  type BrowserUploadAllowResult,
+  type BrowserUploadConfig,
+  type BrowserUploadConflictMode,
+  type BrowserUploadEvent,
+  type BrowserUploadFile,
+  type BrowserUploadRequest,
+  type BrowserUploadResult,
+  type BrowserUploadSegment,
   type DirectUploadFinish,
   type DirectUploadOptions,
   type DirectUploadResult,
+  type DirectUploadSegmentRequest,
+  type DirectUploadSessionRequest,
+  type UploadSessionAbortRequest,
+  type UploadSessionCommitRequest,
+  type UploadSessionPutSegmentRequest,
+  type UploadSessionStatusRequest,
 } from "./uploads.js";
 export type { GlobOptions } from "./search.js";
 export type {
@@ -23,19 +42,16 @@ export type {
   VersionSnapshotRequest,
 } from "./versions.js";
 
-export type { FileConflictMode, MkdirConflictMode } from "./types.js";
+export type { FileConflictMode, FingerprintMode, MkdirConflictMode, UploadSessionConflictMode } from "./types.js";
 
 // Pure helpers are intentionally NOT re-exported here. Import them from the
 // dedicated entrypoint to keep tree-shaking honest:
-//   import { chunks } from "@valentinkolb/filegate/utils";
+//   import { uploads } from "@valentinkolb/filegate/utils";
 
 export type {
-  ChunkedCompleteResponse,
-  ChunkedProgressResponse,
-  ChunkedStartRequest,
-  ChunkedStatusResponse,
   DirectUploadURLRequest,
   DirectUploadURLResponse,
+  CapabilitiesResponse,
   ErrorResponse,
   GlobSearchError,
   GlobSearchMeta,
@@ -47,7 +63,6 @@ export type {
   MkdirRequest,
   Node,
   NodeListResponse,
-  NodeWithChecksum,
   OKResponse,
   Ownership,
   OwnershipView,
@@ -58,5 +73,15 @@ export type {
   StatsResponse,
   TransferRequest,
   TransferResponse,
+  UploadSegmentResponse,
+  UploadCapabilities,
+  UploadSessionBatchCreateRequest,
+  UploadSessionBatchCreateResponse,
+  UploadSessionCommitResponse,
+  UploadSessionCreateRequest,
+  UploadSessionDirect,
+  UploadSessionDirectRequest,
+  UploadSessionResponse,
+  UploadSessionSegment,
   UpdateNodeRequest,
 } from "./types.js";

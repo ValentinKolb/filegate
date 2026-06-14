@@ -20,7 +20,7 @@ infra/fgbin/                  → binary record codec for index values
 infra/cache/                  → small LRU wrapper
 api/v1/                       → JSON request/response types (the wire contract)
 sdk/filegate/                 → Go client SDK
-sdk/filegate/chunks           → pure helpers (chunk math + sha256)
+sdk/filegate/segments         → pure helpers (segment planning + sha256)
 sdk/filegate/relay            → pure HTTP relay helper
 sdk/ts/                       → TypeScript client SDK
 ```
@@ -71,7 +71,7 @@ go list -f '{{ .ImportPath }}: {{ .Imports }}' ./domain | tr ' ' '\n' | grep "va
 | `infra/fgbin`    | (no `domain` import — pure binary codec)               |
 | `api/v1`         | nothing under `filegate/*`                             |
 | `sdk/filegate`   | `api/v1` (type aliases)                                |
-| `sdk/filegate/chunks`, `sdk/filegate/relay` | nothing under `filegate/*` |
+| `sdk/filegate/segments`, `sdk/filegate/relay` | nothing under `filegate/*` |
 
 ## What must NEVER happen
 
@@ -96,8 +96,8 @@ layer. Re-think where the logic belongs.
 | Pebble key/value layout change                         | `infra/pebble/index.go` + bump `currentIndexFormatVersion` |
 | New binary record field                                | `infra/fgbin/record.go` + extension list           |
 | New CLI subcommand                                     | `cli/`                                             |
-| New chunked-upload semantics                           | `adapter/http/upload_chunked.go` (handler) + `domain/service.go ReplaceFile` (storage) |
-| New SDK helper that doesn't need a connection          | `sdk/filegate/<subpkg>` (e.g. `chunks/`, `relay/`) |
+| New upload-session semantics                           | `adapter/http/upload_sessions.go` (handler) + `domain/service.go ReplaceFile` (storage) |
+| New SDK helper that doesn't need a connection          | `sdk/filegate/<subpkg>` (e.g. `segments/`, `relay/`) |
 | New SDK method that calls Filegate over HTTP           | `sdk/filegate/<area>.go` and `sdk/ts/src/<area>.ts` |
 
 ## Big files worth knowing
@@ -106,7 +106,7 @@ layer. Re-think where the logic belongs.
   orchestrator. Use grep, not full reads.
 - [`adapter/http/router.go`](../../../adapter/http/router.go) — ~1200 lines,
   all routes + middleware.
-- [`adapter/http/upload_chunked.go`](../../../adapter/http/upload_chunked.go)
-  — ~1100 lines, chunked upload state machine.
+- [`adapter/http/upload_sessions.go`](../../../adapter/http/upload_sessions.go)
+  — resumable upload-session state machine.
 - [`infra/pebble/index.go`](../../../infra/pebble/index.go) — Pebble wrapper
   with format-version guard.

@@ -46,6 +46,8 @@ type Node struct {
 	Mtime      int64             `json:"mtime"`
 	Ownership  OwnershipView     `json:"ownership"`
 	MimeType   string            `json:"mimeType,omitempty"`
+	ETag       string            `json:"etag,omitempty"`
+	SHA256     string            `json:"sha256,omitempty"`
 	Exif       map[string]string `json:"exif"`
 	Children   []Node            `json:"children,omitempty"`
 	PageSize   *int              `json:"pageSize,omitempty"`
@@ -98,6 +100,21 @@ type StatsResponse struct {
 	Cache       StatsCache   `json:"cache"`
 	Mounts      []StatsMount `json:"mounts"`
 	Disks       []StatsDisk  `json:"disks"`
+}
+
+// CapabilitiesResponse describes server-enforced limits clients can use to
+// choose request sizes without guessing from defaults.
+type CapabilitiesResponse struct {
+	Uploads UploadCapabilities `json:"uploads"`
+}
+
+// UploadCapabilities describes upload-related limits from the running server
+// configuration.
+type UploadCapabilities struct {
+	MaxChunkBytes              int64 `json:"maxChunkBytes"`
+	MaxUploadBytes             int64 `json:"maxUploadBytes"`
+	MaxSessionUploadBytes      int64 `json:"maxSessionUploadBytes"`
+	MaxConcurrentSegmentWrites int   `json:"maxConcurrentSegmentWrites"`
 }
 
 // MkdirRequest is the body for POST /v1/nodes/{id}/mkdir.
@@ -216,50 +233,6 @@ type GlobSearchResponse struct {
 	Paths   []GlobSearchPath  `json:"paths"`
 }
 
-// ChunkedStartRequest is the body for POST /v1/uploads/chunked/start.
-//
-// OnConflict accepts "error" (default), "overwrite", or "rename". The check
-// runs both at start (optimistic, saves bandwidth on the common case) and
-// again at finalize (race-safe). The chosen mode is persisted in the upload
-// manifest and survives Resume.
-type ChunkedStartRequest struct {
-	ParentID   string     `json:"parentId"`
-	Filename   string     `json:"filename"`
-	Size       int64      `json:"size"`
-	Checksum   string     `json:"checksum"`
-	ChunkSize  int64      `json:"chunkSize"`
-	Ownership  *Ownership `json:"ownership,omitempty"`
-	OnConflict string     `json:"onConflict,omitempty"`
-}
-
-// ChunkedStatusResponse describes the current state of a chunked upload session.
-type ChunkedStatusResponse struct {
-	UploadID       string `json:"uploadId"`
-	ChunkSize      int64  `json:"chunkSize"`
-	TotalChunks    int    `json:"totalChunks"`
-	UploadedChunks []int  `json:"uploadedChunks"`
-	Completed      bool   `json:"completed"`
-}
-
-// ChunkedProgressResponse is returned after a chunk is accepted but the upload is not yet complete.
-type ChunkedProgressResponse struct {
-	ChunkIndex     int   `json:"chunkIndex"`
-	UploadedChunks []int `json:"uploadedChunks"`
-	Completed      bool  `json:"completed"`
-}
-
-// NodeWithChecksum extends Node with a checksum field for completed uploads.
-type NodeWithChecksum struct {
-	Node
-	Checksum string `json:"checksum"`
-}
-
-// ChunkedCompleteResponse is returned when the final chunk completes the upload.
-type ChunkedCompleteResponse struct {
-	Completed bool             `json:"completed"`
-	File      NodeWithChecksum `json:"file"`
-}
-
 // DirectUploadURLRequest is the body for POST /v1/uploads/direct.
 //
 // Filegate returns a short-lived unauthenticated PUT URL scoped to exactly
@@ -280,6 +253,80 @@ type DirectUploadURLResponse struct {
 	Path      string `json:"path"`
 	ExpiresAt int64  `json:"expiresAt"`
 	MaxBytes  int64  `json:"maxBytes"`
+}
+
+// UploadSessionDirectRequest asks Filegate to mint a scoped direct session token.
+type UploadSessionDirectRequest struct {
+	ExpiresInSeconds int64    `json:"expiresInSeconds,omitempty"`
+	Allow            []string `json:"allow,omitempty"`
+}
+
+// UploadSessionCreateRequest creates one resumable upload session for one file.
+// OnConflict accepts "error" (default) or "overwrite"; "rename" is rejected so
+// crash recovery can always reason about one stable target path.
+type UploadSessionCreateRequest struct {
+	Path        string                      `json:"path"`
+	Size        int64                       `json:"size"`
+	Checksum    string                      `json:"checksum"`
+	SegmentSize int64                       `json:"segmentSize"`
+	ContentType string                      `json:"contentType,omitempty"`
+	Ownership   *Ownership                  `json:"ownership,omitempty"`
+	OnConflict  string                      `json:"onConflict,omitempty"`
+	Direct      *UploadSessionDirectRequest `json:"direct,omitempty"`
+}
+
+// UploadSessionBatchCreateRequest creates independent one-file upload sessions.
+type UploadSessionBatchCreateRequest struct {
+	Uploads     []UploadSessionCreateRequest `json:"uploads"`
+	SegmentSize int64                        `json:"segmentSize,omitempty"`
+	Direct      *UploadSessionDirectRequest  `json:"direct,omitempty"`
+}
+
+// UploadSessionSegment describes one segment in the upload plan.
+type UploadSessionSegment struct {
+	Index  int   `json:"index"`
+	Offset int64 `json:"offset"`
+	Size   int64 `json:"size"`
+}
+
+// UploadSessionDirect describes the scoped token usable by public clients.
+type UploadSessionDirect struct {
+	BaseURL   string   `json:"baseUrl"`
+	Token     string   `json:"token"`
+	ExpiresAt int64    `json:"expiresAt"`
+	Allow     []string `json:"allow"`
+}
+
+// UploadSessionResponse describes the upload session and its current progress.
+type UploadSessionResponse struct {
+	ID               string                 `json:"id"`
+	Path             string                 `json:"path"`
+	Size             int64                  `json:"size"`
+	Checksum         string                 `json:"checksum"`
+	SegmentSize      int64                  `json:"segmentSize"`
+	TotalSegments    int                    `json:"totalSegments"`
+	Segments         []UploadSessionSegment `json:"segments"`
+	UploadedSegments []int                  `json:"uploadedSegments"`
+	Phase            string                 `json:"phase"`
+	Direct           *UploadSessionDirect   `json:"direct,omitempty"`
+}
+
+// UploadSessionBatchCreateResponse contains the created sessions.
+type UploadSessionBatchCreateResponse struct {
+	Sessions []UploadSessionResponse `json:"sessions"`
+}
+
+// UploadSegmentResponse is returned after an idempotent segment PUT.
+type UploadSegmentResponse struct {
+	SessionID        string `json:"sessionId"`
+	Index            int    `json:"index"`
+	UploadedSegments []int  `json:"uploadedSegments"`
+}
+
+// UploadSessionCommitResponse is returned after a session commit.
+type UploadSessionCommitResponse struct {
+	Node     Node   `json:"node"`
+	Checksum string `json:"checksum"`
 }
 
 // IndexResolveRequest is the body for POST /v1/index/resolve.

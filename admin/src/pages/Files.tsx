@@ -5,6 +5,7 @@ import { NodeTable } from "../components/Table";
 import { formatBytes, formatUnix } from "../lib/format";
 
 type Crumb = { name: string; path?: string };
+const folderPickerAttrs = { webkitdirectory: "", directory: "" } as Record<string, string>;
 
 export function Files(props: {
   stats: StatsResponse;
@@ -46,6 +47,17 @@ export function Files(props: {
                 <input class="input" name="name" placeholder="New folder name" aria-label="New folder name" />
                 <button class="btn">Create folder</button>
               </form>
+              <form class="tb-group tb-right" data-upload-form>
+                <input type="hidden" name="parentPath" value={props.current.path} />
+                <input id="admin-file-upload" type="file" multiple data-upload-input hidden />
+                <input id="admin-folder-upload" type="file" multiple data-upload-input hidden {...folderPickerAttrs} />
+                <button class="btn primary" type="button" data-upload-trigger="file">
+                  Upload file
+                </button>
+                <button class="btn" type="button" data-upload-trigger="folder">
+                  Upload folder
+                </button>
+              </form>
             </div>
           )}
           <NodeTable
@@ -59,7 +71,41 @@ export function Files(props: {
           {props.selected ? <Detail node={props.selected} /> : <EmptyDetail />}
         </aside>
       </section>
+      <UploadPanel />
+      <script src="/uploads.js" defer />
     </Layout>
+  );
+}
+
+function UploadPanel() {
+  return (
+    <div id="fg-uploads" class="uploads" hidden>
+      <div class="uploads-head">
+        <span class="uploads-title">Uploading...</span>
+        <button type="button" class="uploads-close" aria-label="Close">
+          ×
+        </button>
+      </div>
+      <div class="uploads-list" />
+      <div class="uploads-stats" aria-label="Upload statistics">
+        <div>
+          <span>Throughput</span>
+          <strong data-upload-rate>—</strong>
+        </div>
+        <div>
+          <span>Remaining</span>
+          <strong data-upload-eta>—</strong>
+        </div>
+        <div>
+          <span>Elapsed</span>
+          <strong data-upload-elapsed>0s</strong>
+        </div>
+        <div>
+          <span>Transferred</span>
+          <strong data-upload-bytes>0 B</strong>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -146,7 +192,7 @@ function Detail(props: { node: Node }) {
             <strong>Delete resource</strong>
             <span class="muted">This action cannot be undone.</span>
           </div>
-          <form method="post" action="/files/delete">
+          <form method="post" action="/files/delete" data-confirm-delete={node.path}>
             <input type="hidden" name="id" value={node.id} />
             <button class="btn danger">Delete</button>
           </form>

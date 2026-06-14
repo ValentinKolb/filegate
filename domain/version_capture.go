@@ -18,6 +18,7 @@ import (
 // Reflinks must stay within a filesystem; placing versions inside the
 // owning mount is what makes the per-mount FICLONE call cheap on btrfs.
 const versionsDirName = ".fg-versions"
+const uploadsDirName = ".fg-uploads"
 
 // EnableVersioning wires the versioning subsystem from operator config.
 // Called by cli.serve after NewService. Until invoked the capture helpers

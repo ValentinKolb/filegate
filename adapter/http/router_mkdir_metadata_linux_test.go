@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func authedJSONRequest(method, target string, body []byte) *http.Request {
@@ -205,6 +206,47 @@ func TestStatsEndpointReturnsIndexCacheAndMounts(t *testing.T) {
 	roots, ok := firstDisk["roots"].([]any)
 	if !ok || len(roots) == 0 {
 		t.Fatalf("disk roots missing: %#v", firstDisk["roots"])
+	}
+}
+
+func TestCapabilitiesEndpointReturnsUploadLimits(t *testing.T) {
+	r, _, cleanup := newTestRouterWithCustomLimits(t, t.TempDir(), t.TempDir(), RouterOptions{
+		BearerToken:                "test-token",
+		JobWorkers:                 2,
+		JobQueueSize:               64,
+		UploadExpiry:               time.Hour,
+		UploadCleanupInterval:      time.Hour,
+		MaxChunkBytes:              32 << 20,
+		MaxUploadBytes:             500 << 20,
+		MaxSessionUploadBytes:      50 << 30,
+		MaxConcurrentSegmentWrites: 7,
+		ThumbnailJobWorkers:        1,
+		ThumbnailJobQueueSize:      4,
+		ThumbnailLRUCacheSize:      8,
+		ThumbnailMaxSourceBytes:    16 << 20,
+		ThumbnailMaxPixels:         10 << 20,
+	})
+	defer cleanup()
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, authedRequest(http.MethodGet, "/v1/capabilities"))
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", w.Result().StatusCode)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(w.Result().Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	uploads, ok := body["uploads"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing uploads capabilities: %#v", body)
+	}
+	if got := int64(uploads["maxChunkBytes"].(float64)); got != 32<<20 {
+		t.Fatalf("maxChunkBytes=%d", got)
+	}
+	if got := int(uploads["maxConcurrentSegmentWrites"].(float64)); got != 7 {
+		t.Fatalf("maxConcurrentSegmentWrites=%d", got)
 	}
 }
 

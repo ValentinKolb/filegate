@@ -165,7 +165,7 @@ func TestConfigInvalidWriteKeepsOriginal(t *testing.T) {
 	base := mustMkdir(t, t.TempDir(), "data")
 	cfgPath := writeCLIConfig(t, base)
 
-	out, err := executeCLI("config", "--config", cfgPath, "set", "--upload-max-chunked-upload-bytes", "1")
+	out, err := executeCLI("config", "--config", cfgPath, "set", "--upload-max-session-upload-bytes", "1")
 	if err == nil {
 		t.Fatalf("invalid config set succeeded: %s", out)
 	}
@@ -173,7 +173,7 @@ func TestConfigInvalidWriteKeepsOriginal(t *testing.T) {
 	if loadErr != nil {
 		t.Fatalf("load original config: %v", loadErr)
 	}
-	if cfg.Upload.MaxChunkedUploadBytes == 1 {
+	if cfg.Upload.MaxSessionUploadBytes == 1 {
 		t.Fatalf("invalid value was written")
 	}
 	if backups := matchingFiles(t, filepath.Dir(cfgPath), filepath.Base(cfgPath)+".bak."); len(backups) != 0 {

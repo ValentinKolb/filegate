@@ -343,13 +343,18 @@ func (s *Service) CopyObjectS3(args CopyObjectArgs) (*CopyObjectResult, error) {
 	// single-PUT and multipart Complete paths; the legacy-empty
 	// case falls back to a fresh hash of the destination bytes.
 	dstETagMD5 := srcEntity.ETagMD5
-	if dstETagMD5 == "" {
-		hashed, hashErr := s.hashLocalFile(dstAbs)
+	dstSHA256 := srcEntity.SHA256
+	if dstETagMD5 == "" || dstSHA256 == "" {
+		hashed, hashErr := s.hashLocalFileHashes(dstAbs)
 		if hashErr == nil {
-			dstETagMD5 = hashed
+			if dstETagMD5 == "" {
+				dstETagMD5 = hashed.MD5Hex
+			}
+			dstSHA256 = hashed.SHA256
 		}
 	}
 	dstEntity.ETagMD5 = dstETagMD5
+	dstEntity.SHA256 = dstSHA256
 	dstEntity.MultipartETag = "" // single-copy never preserves composite
 
 	switch directive {

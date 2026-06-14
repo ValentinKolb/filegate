@@ -41,7 +41,7 @@ live-version pruning and have planned for the storage growth.
 
 **Auto-capture on write.** Every HTTP write to an existing file
 (`PUT /v1/paths/...`, `PUT /v1/nodes/{id}/content`, ReplaceFile via
-chunked upload finalize) snapshots the existing bytes first — but only
+upload-session commit) snapshots the existing bytes first — but only
 if the last captured version is older than `cooldown`. Within the
 cooldown window the write proceeds without producing a new version.
 

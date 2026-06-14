@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -76,11 +77,11 @@ func (s *Service) createAndWriteContent(parentID FileID, fileName string, body i
 	if err != nil {
 		return nil, err
 	}
-	md5Hex, err := s.writeFileAtomic(targetAbs, body, filePerm, effectiveOwnership, &newID, true)
+	hashes, err := s.writeFileAtomic(targetAbs, body, filePerm, effectiveOwnership, &newID, true)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.syncSingleAfterLocalWrite(targetAbs, md5Hex); err != nil {
+	if err := s.syncSingleAfterLocalWrite(targetAbs, hashes); err != nil {
 		return nil, err
 	}
 	id, err := s.store.GetID(targetAbs)
@@ -124,40 +125,33 @@ func commitNoReplace(tmpPath, absPath string) error {
 	return nil
 }
 
-// writeFileAtomic writes body to absPath via the standard tmp+rename
-// pattern, computes MD5 of the body during the copy, and returns it as
-// lowercase hex. Caller-side responsibilities (xattr ID, ownership,
-// dirsync) are unchanged.
-//
-// The MD5 is computed once during the single body→disk copy by tee'ing
-// through hash.Hash, so there is no second read pass. Cost is ~5% CPU
-// vs the unhashed write — gained: cross-protocol ETag consistency
-// (REST and S3 produce identical ETags for the same bytes).
-func (s *Service) writeFileAtomic(absPath string, body io.Reader, filePerm os.FileMode, ownership *Ownership, preserveID *FileID, mustNotExist bool) (string, error) {
+// writeFileAtomic writes body to absPath via the standard tmp+rename pattern
+// and computes content hashes during the same body→disk copy.
+func (s *Service) writeFileAtomic(absPath string, body io.Reader, filePerm os.FileMode, ownership *Ownership, preserveID *FileID, mustNotExist bool) (ContentHashes, error) {
 	absPath = filepath.Clean(strings.TrimSpace(absPath))
 	if absPath == "" {
-		return "", ErrInvalidArgument
+		return ContentHashes{}, ErrInvalidArgument
 	}
 
 	linfo, err := os.Lstat(absPath)
 	if err == nil {
 		if linfo.Mode()&os.ModeSymlink != 0 {
-			return "", ErrForbidden
+			return ContentHashes{}, ErrForbidden
 		}
 		if linfo.IsDir() {
-			return "", ErrInvalidArgument
+			return ContentHashes{}, ErrInvalidArgument
 		}
 		if mustNotExist {
-			return "", ErrConflict
+			return ContentHashes{}, ErrConflict
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
+		return ContentHashes{}, err
 	}
 
 	parentDir := filepath.Dir(absPath)
 	tmpFile, err := os.CreateTemp(parentDir, "."+filepath.Base(absPath)+".filegate-tmp-*")
 	if err != nil {
-		return "", err
+		return ContentHashes{}, err
 	}
 	tmpPath := tmpFile.Name()
 	cleanupTmp := true
@@ -172,73 +166,76 @@ func (s *Service) writeFileAtomic(absPath string, body io.Reader, filePerm os.Fi
 	}
 	if err := tmpFile.Chmod(filePerm); err != nil {
 		_ = tmpFile.Close()
-		return "", err
+		return ContentHashes{}, err
 	}
 
-	// Tee the body through MD5 while copying to disk. io.MultiWriter
-	// fans out each Write call to both the file and the hash, so we
-	// never re-read the body to hash it.
-	hasher := md5.New()
-	dst := io.MultiWriter(tmpFile, hash.Hash(hasher))
+	// io.MultiWriter fans each Write to the file and both hashes, so we
+	// never re-read the body to fingerprint it.
+	md5Hash := md5.New()
+	shaHash := sha256.New()
+	dst := io.MultiWriter(tmpFile, hash.Hash(md5Hash), hash.Hash(shaHash))
 	buf := make([]byte, 128*1024)
 	if _, err := io.CopyBuffer(dst, body, buf); err != nil {
 		_ = tmpFile.Close()
-		return "", err
+		return ContentHashes{}, err
 	}
-	md5Hex := hex.EncodeToString(hasher.Sum(nil))
+	hashes := ContentHashes{
+		MD5Hex: hex.EncodeToString(md5Hash.Sum(nil)),
+		SHA256: "sha256:" + hex.EncodeToString(shaHash.Sum(nil)),
+	}
 
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
-		return "", err
+		return ContentHashes{}, err
 	}
 	if err := tmpFile.Close(); err != nil {
-		return "", err
+		return ContentHashes{}, err
 	}
 
 	if preserveID != nil && !preserveID.IsZero() {
 		if err := s.store.SetID(tmpPath, *preserveID); err != nil {
-			return "", err
+			return ContentHashes{}, err
 		}
 	}
 	if err := s.applyOwnership(tmpPath, ownership, false); err != nil {
-		return "", err
+		return ContentHashes{}, err
 	}
 	if err := syncFilePath(tmpPath); err != nil {
-		return "", err
+		return ContentHashes{}, err
 	}
 
 	if mustNotExist {
 		if err := commitNoReplace(tmpPath, absPath); err != nil {
-			return "", err
+			return ContentHashes{}, err
 		}
 	} else {
 		if err := s.store.Rename(tmpPath, absPath); err != nil {
-			return "", err
+			return ContentHashes{}, err
 		}
 	}
 	finfo, err := os.Lstat(absPath)
 	if err != nil {
-		return "", err
+		return ContentHashes{}, err
 	}
 	if finfo.Mode()&os.ModeSymlink != 0 || !finfo.Mode().IsRegular() {
-		return "", ErrForbidden
+		return ContentHashes{}, ErrForbidden
 	}
 	if preserveID != nil && !preserveID.IsZero() {
 		got, err := s.store.GetID(absPath)
 		if err != nil || got != *preserveID {
 			if err := s.store.SetID(absPath, *preserveID); err != nil {
-				return "", err
+				return ContentHashes{}, err
 			}
 		}
 	}
 	if s.dirSync != nil {
 		if err := s.dirSync.Sync(parentDir); err != nil {
-			return "", err
+			return ContentHashes{}, err
 		}
 	} else if err := syncDirPath(parentDir); err != nil {
-		return "", err
+		return ContentHashes{}, err
 	}
 
 	cleanupTmp = false
-	return md5Hex, nil
+	return hashes, nil
 }

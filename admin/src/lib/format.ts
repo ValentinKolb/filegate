@@ -1,13 +1,8 @@
+import { text } from "@valentinkolb/stdlib";
+
 export function formatBytes(value: number): string {
   if (!value) return "-";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let n = value;
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  return i === 0 ? `${value} B` : `${n.toFixed(1)} ${units[i]}`;
+  return text.pprintBytes(value);
 }
 
 export function formatUnix(value: number): string {

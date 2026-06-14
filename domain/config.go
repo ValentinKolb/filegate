@@ -193,15 +193,15 @@ type JobsConfig struct {
 	ThumbnailQueueSize int `mapstructure:"thumbnail_queue_size"`
 }
 
-// UploadConfig controls chunked upload lifecycle and limits.
+// UploadConfig controls one-shot upload and upload-session lifecycle limits.
 type UploadConfig struct {
-	Expiry                   time.Duration `mapstructure:"expiry"`
-	CleanupInterval          time.Duration `mapstructure:"cleanup_interval"`
-	MaxChunkBytes            int64         `mapstructure:"max_chunk_bytes"`
-	MaxUploadBytes           int64         `mapstructure:"max_upload_bytes"`
-	MaxChunkedUploadBytes    int64         `mapstructure:"max_chunked_upload_bytes"`
-	MaxConcurrentChunkWrites int           `mapstructure:"max_concurrent_chunk_writes"`
-	MinFreeBytes             int64         `mapstructure:"min_free_bytes"`
+	Expiry                     time.Duration `mapstructure:"expiry"`
+	CleanupInterval            time.Duration `mapstructure:"cleanup_interval"`
+	MaxChunkBytes              int64         `mapstructure:"max_chunk_bytes"`
+	MaxUploadBytes             int64         `mapstructure:"max_upload_bytes"`
+	MaxSessionUploadBytes      int64         `mapstructure:"max_session_upload_bytes"`
+	MaxConcurrentSegmentWrites int           `mapstructure:"max_concurrent_segment_writes"`
+	MinFreeBytes               int64         `mapstructure:"min_free_bytes"`
 }
 
 // ThumbnailConfig controls on-demand thumbnail generation behavior.

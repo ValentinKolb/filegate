@@ -43,8 +43,8 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v.SetDefault("upload.cleanup_interval", "6h")
 	v.SetDefault("upload.max_chunk_bytes", int64(50*1024*1024))
 	v.SetDefault("upload.max_upload_bytes", int64(500*1024*1024))
-	v.SetDefault("upload.max_chunked_upload_bytes", int64(50*1024*1024*1024))
-	v.SetDefault("upload.max_concurrent_chunk_writes", defaultChunkWriteConcurrency())
+	v.SetDefault("upload.max_session_upload_bytes", int64(50*1024*1024*1024))
+	v.SetDefault("upload.max_concurrent_segment_writes", defaultChunkWriteConcurrency())
 	v.SetDefault("upload.min_free_bytes", int64(64*1024*1024))
 	v.SetDefault("thumbnail.lru_cache_size", 1024)
 	v.SetDefault("thumbnail.max_source_bytes", int64(64*1024*1024))
@@ -223,14 +223,14 @@ func loadConfig(configFile string) (domain.Config, error) {
 	if cfg.Upload.MaxUploadBytes <= 0 {
 		cfg.Upload.MaxUploadBytes = int64(500 * 1024 * 1024)
 	}
-	if cfg.Upload.MaxChunkedUploadBytes <= 0 {
-		cfg.Upload.MaxChunkedUploadBytes = int64(50 * 1024 * 1024 * 1024)
+	if cfg.Upload.MaxSessionUploadBytes <= 0 {
+		cfg.Upload.MaxSessionUploadBytes = int64(50 * 1024 * 1024 * 1024)
 	}
-	if cfg.Upload.MaxChunkedUploadBytes < cfg.Upload.MaxChunkBytes {
-		return cfg, fmt.Errorf("upload.max_chunked_upload_bytes must be >= upload.max_chunk_bytes")
+	if cfg.Upload.MaxSessionUploadBytes < cfg.Upload.MaxChunkBytes {
+		return cfg, fmt.Errorf("upload.max_session_upload_bytes must be >= upload.max_chunk_bytes")
 	}
-	if cfg.Upload.MaxConcurrentChunkWrites <= 0 {
-		cfg.Upload.MaxConcurrentChunkWrites = defaultChunkWriteConcurrency()
+	if cfg.Upload.MaxConcurrentSegmentWrites <= 0 {
+		cfg.Upload.MaxConcurrentSegmentWrites = defaultChunkWriteConcurrency()
 	}
 	if cfg.Upload.MinFreeBytes < 0 {
 		cfg.Upload.MinFreeBytes = 0
@@ -280,7 +280,6 @@ func loadConfig(configFile string) (domain.Config, error) {
 	if cfg.Versioning.MinSizeForAutoV1 < 0 {
 		cfg.Versioning.MinSizeForAutoV1 = 0
 	}
-
 	return cfg, nil
 }
 

@@ -43,6 +43,13 @@ const (
 	//
 	// Part bytes stay on the filesystem; Pebble only tracks small state rows.
 	familyActiveMultipart byte = 0x08
+	// familyUploadSession is the REST resumable upload-session state:
+	//   0x09 + 's' + sessionId → JSON UploadSession
+	//   0x09 + 'g' + sessionId + 0x00 + segmentIndex_u32 → JSON UploadSegment
+	//   0x09 + 'c' + sessionId → JSON UploadCommitRecord
+	//
+	// Segment bytes stay on the filesystem; Pebble is the metadata source of truth.
+	familyUploadSession byte = 0x09
 
 	// familyFlatKey is the bucket+relpath → fileID secondary index,
 	// added at format version 9. Keyed as
@@ -54,11 +61,9 @@ const (
 	// glob-search a free speedup as a bonus.
 	familyFlatKey byte = 0x06
 
-	// currentIndexFormatVersion was bumped from 8 to 9 when the
-	// secondary flat-key index was added under familyFlatKey. Existing
-	// rows lose nothing on the bump — the new keyspace is empty after
-	// a rebuild and gets populated as files are written or via rescan.
-	currentIndexFormatVersion uint16 = 9
+	// currentIndexFormatVersion was bumped from 10 to 11 when the
+	// canonical SHA-256 fingerprint extension was added to entity rows.
+	currentIndexFormatVersion uint16 = 11
 )
 
 // ErrUnsupportedIndexFormat is returned when the on-disk index version is incompatible.
@@ -288,6 +293,41 @@ func activeMultipartPartKey(uploadID string, partNumber int) []byte {
 	return out
 }
 
+func uploadSessionPrefix() []byte {
+	return []byte{familyUploadSession, 's'}
+}
+
+func uploadSessionKey(sessionID string) []byte {
+	prefix := uploadSessionPrefix()
+	out := make([]byte, len(prefix)+len(sessionID))
+	copy(out, prefix)
+	copy(out[len(prefix):], sessionID)
+	return out
+}
+
+func uploadSegmentPrefix(sessionID string) []byte {
+	out := make([]byte, 0, 1+1+len(sessionID)+1)
+	out = append(out, familyUploadSession, 'g')
+	out = append(out, []byte(sessionID)...)
+	out = append(out, 0)
+	return out
+}
+
+func uploadSegmentKey(sessionID string, index int) []byte {
+	prefix := uploadSegmentPrefix(sessionID)
+	out := make([]byte, len(prefix)+4)
+	copy(out, prefix)
+	binary.BigEndian.PutUint32(out[len(prefix):], uint32(index))
+	return out
+}
+
+func uploadCommitRecordKey(sessionID string) []byte {
+	out := make([]byte, 0, 1+1+len(sessionID))
+	out = append(out, familyUploadSession, 'c')
+	out = append(out, []byte(sessionID)...)
+	return out
+}
+
 // flatKeyMountPrefix returns the byte prefix that bounds all flat-key
 // entries under the named mount: 0x06 + mountName + 0x00.
 func flatKeyMountPrefix(mountName string) []byte {
@@ -376,6 +416,12 @@ func encodeEntity(e domain.Entity) ([]byte, error) {
 			Value:   []byte(e.ETagMD5),
 		})
 	}
+	if e.SHA256 != "" {
+		rec.Extensions = append(rec.Extensions, fgbin.Extension{
+			FieldID: fgbin.FieldSHA256,
+			Value:   []byte(e.SHA256),
+		})
+	}
 	if e.MultipartETag != "" {
 		rec.Extensions = append(rec.Extensions, fgbin.Extension{
 			FieldID: fgbin.FieldMultipartETag,
@@ -431,9 +477,12 @@ func decodeEntity(id domain.FileID, value []byte) (domain.Entity, error) {
 	// Optional S3-related fields. ExtensionByID returns (nil, false) for
 	// missing IDs, so legacy rows decode with empty strings/slices for
 	// all of these — semantically the same as "never set".
-	var etagMD5, multipartETag, contentType, contentEncoding, contentDisposition string
+	var etagMD5, sha256, multipartETag, contentType, contentEncoding, contentDisposition string
 	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldETagMD5); ok {
 		etagMD5 = string(raw)
+	}
+	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldSHA256); ok {
+		sha256 = string(raw)
 	}
 	if raw, ok := fgbin.ExtensionByID(rec.Extensions, fgbin.FieldMultipartETag); ok {
 		multipartETag = string(raw)
@@ -468,6 +517,7 @@ func decodeEntity(id domain.FileID, value []byte) (domain.Entity, error) {
 		MimeType:           rec.MimeType,
 		Exif:               exif,
 		ETagMD5:            etagMD5,
+		SHA256:             sha256,
 		MultipartETag:      multipartETag,
 		ContentType:        contentType,
 		ContentEncoding:    contentEncoding,
@@ -786,6 +836,123 @@ func (i *Index) ListActiveMultipartParts(uploadID string) (parts []domain.Active
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
 	return parts, nil
+}
+
+func (i *Index) LookupUploadSession(sessionID string) (out *domain.UploadSession, err error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	defer i.recoverIntoError(&err)
+	v, closer, err := i.db.Get(uploadSessionKey(sessionID))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, domain.ErrNotFound
+		}
+		return nil, normalizeIndexErr(err)
+	}
+	defer closer.Close()
+	var session domain.UploadSession
+	if err := json.Unmarshal(v, &session); err != nil {
+		return nil, fmt.Errorf("decode upload session: %w", err)
+	}
+	return &session, nil
+}
+
+func (i *Index) ListUploadSessions(phase domain.UploadSessionPhase) (sessions []domain.UploadSession, err error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	defer i.recoverIntoError(&err)
+
+	prefix := uploadSessionPrefix()
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := i.db.NewIter(iterOpts)
+	if err != nil {
+		return nil, normalizeIndexErr(err)
+	}
+	defer iter.Close()
+
+	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefix) {
+			break
+		}
+		var session domain.UploadSession
+		if err := json.Unmarshal(iter.Value(), &session); err != nil {
+			continue
+		}
+		if phase == "" || session.Phase == phase {
+			sessions = append(sessions, session)
+		}
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].CreatedAt == sessions[j].CreatedAt {
+			return sessions[i].ID < sessions[j].ID
+		}
+		return sessions[i].CreatedAt < sessions[j].CreatedAt
+	})
+	return sessions, nil
+}
+
+func (i *Index) ListUploadSegments(sessionID string) (segments []domain.UploadSegment, err error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	defer i.recoverIntoError(&err)
+
+	prefix := uploadSegmentPrefix(sessionID)
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := i.db.NewIter(iterOpts)
+	if err != nil {
+		return nil, normalizeIndexErr(err)
+	}
+	defer iter.Close()
+
+	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefix) {
+			break
+		}
+		var segment domain.UploadSegment
+		if err := json.Unmarshal(iter.Value(), &segment); err != nil {
+			continue
+		}
+		segments = append(segments, segment)
+	}
+	sort.Slice(segments, func(i, j int) bool { return segments[i].Index < segments[j].Index })
+	return segments, nil
+}
+
+func (i *Index) LookupUploadCommitRecord(sessionID string) (out *domain.UploadCommitRecord, err error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if stateErr := i.currentStateLocked(); stateErr != nil {
+		return nil, normalizeIndexErr(stateErr)
+	}
+	defer i.recoverIntoError(&err)
+	v, closer, err := i.db.Get(uploadCommitRecordKey(sessionID))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, domain.ErrNotFound
+		}
+		return nil, normalizeIndexErr(err)
+	}
+	defer closer.Close()
+	var record domain.UploadCommitRecord
+	if err := json.Unmarshal(v, &record); err != nil {
+		return nil, fmt.Errorf("decode upload commit record: %w", err)
+	}
+	return &record, nil
 }
 
 func (i *Index) LookupByFlatKey(mountName, relPath string) (id domain.FileID, err error) {
@@ -1573,6 +1740,107 @@ func (b *batch) DelActiveMultipartParts(uploadID string) {
 			return
 		}
 	}
+}
+
+func (b *batch) PutUploadSession(session domain.UploadSession) {
+	if b.err != nil {
+		return
+	}
+	if session.ID == "" {
+		b.setErr(domain.ErrInvalidArgument)
+		return
+	}
+	payload, err := json.Marshal(session)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(uploadSessionKey(session.ID), payload, nil))
+}
+
+func (b *batch) DelUploadSession(sessionID string) {
+	if b.err != nil {
+		return
+	}
+	b.setErr(b.b.Delete(uploadSessionKey(sessionID), nil))
+}
+
+func (b *batch) PutUploadSegment(segment domain.UploadSegment) {
+	if b.err != nil {
+		return
+	}
+	if segment.SessionID == "" || segment.Index < 0 {
+		b.setErr(domain.ErrInvalidArgument)
+		return
+	}
+	payload, err := json.Marshal(segment)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(uploadSegmentKey(segment.SessionID, segment.Index), payload, nil))
+}
+
+func (b *batch) DelUploadSegment(sessionID string, index int) {
+	if b.err != nil {
+		return
+	}
+	b.setErr(b.b.Delete(uploadSegmentKey(sessionID, index), nil))
+}
+
+func (b *batch) DelUploadSegments(sessionID string) {
+	if b.err != nil {
+		return
+	}
+	iterable, ok := b.b.(pebbleBatchIterable)
+	if !ok {
+		b.setErr(fmt.Errorf("batch does not support iteration"))
+		return
+	}
+	prefix := uploadSegmentPrefix(sessionID)
+	iterOpts := &pebble.IterOptions{LowerBound: prefix}
+	if upper := prefixUpperBound(prefix); upper != nil {
+		iterOpts.UpperBound = upper
+	}
+	iter, err := iterable.NewIter(iterOpts)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	defer iter.Close()
+	for ok := iter.SeekGE(prefix); ok && iter.Valid(); ok = iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefix) {
+			break
+		}
+		key := append([]byte(nil), iter.Key()...)
+		if err := b.b.Delete(key, nil); err != nil {
+			b.setErr(err)
+			return
+		}
+	}
+}
+
+func (b *batch) PutUploadCommitRecord(record domain.UploadCommitRecord) {
+	if b.err != nil {
+		return
+	}
+	if record.SessionID == "" {
+		b.setErr(domain.ErrInvalidArgument)
+		return
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		b.setErr(err)
+		return
+	}
+	b.setErr(b.b.Set(uploadCommitRecordKey(record.SessionID), payload, nil))
+}
+
+func (b *batch) DelUploadCommitRecord(sessionID string) {
+	if b.err != nil {
+		return
+	}
+	b.setErr(b.b.Delete(uploadCommitRecordKey(sessionID), nil))
 }
 
 func (b *batch) PutFlatKey(mountName, relPath string, id domain.FileID) {

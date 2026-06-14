@@ -7,4 +7,10 @@ await Bun.build({
   plugins: [plugin()],
 });
 
+await Bun.build({
+  entrypoints: ["src/uploads.ts"],
+  outdir: "dist",
+  target: "browser",
+});
+
 await Bun.write("dist/styles.css", Bun.file("src/styles.css"));

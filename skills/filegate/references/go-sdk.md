@@ -27,7 +27,7 @@ fg = filegate.MustNew(filegate.Config{BaseURL: "...", Token: "..."})
 ```go
 fg.Paths      // PathsClient
 fg.Nodes      // NodesClient
-fg.Uploads    // UploadsClient (has .Chunked)
+fg.Uploads    // UploadsClient (has .Sessions)
 fg.Transfers  // TransfersClient
 fg.Search     // SearchClient
 fg.Index      // IndexClient
@@ -40,13 +40,13 @@ a client:
 
 ```go
 import (
-    "github.com/valentinkolb/filegate/sdk/filegate/chunks"
+    "github.com/valentinkolb/filegate/sdk/filegate/segments"
     "github.com/valentinkolb/filegate/sdk/filegate/relay"
 )
 
-sum := chunks.SHA256Bytes(data)
-total := chunks.TotalChunks(size, chunkSize)
-start, end, err := chunks.Bounds(index, size, chunkSize)
+sum := segments.SHA256Bytes(data)
+total := segments.Count(size, segmentSize)
+start, end, err := segments.Bounds(index, size, segmentSize)
 
 // HTTP relay (proxying upstream Filegate response to your own ResponseWriter)
 n, err := relay.CopyResponse(w, upstreamResp)
@@ -118,7 +118,7 @@ relay.CopyResponse(w, resp)        // mirrors status + headers + body
 The same `*Raw` / non-raw split applies to:
 - `Paths.Put` (non-raw, throws) vs `Paths.PutRaw` (raw, returns response).
 - `Nodes.ThumbnailRaw` (raw only — most callers want to relay the image bytes).
-- `Uploads.Chunked.SendChunk` (non-raw) vs `SendChunkRaw` (raw).
+- `Uploads.Sessions.PutSegment` (non-raw) vs `PutSegmentRaw` (raw).
 
 ### Mkdir
 
@@ -134,7 +134,7 @@ node, err := fg.Nodes.Mkdir(ctx, parentID, filegate.MkdirRequest{
 func ptrInt(i int) *int { return &i }
 ```
 
-`MkdirRequest`, `TransferRequest`, and `ChunkedStartRequest` all keep
+`MkdirRequest`, `TransferRequest`, and `UploadSessionCreateRequest` all keep
 their `OnConflict` field as a wire-level `string` (they're aliases of
 `api/v1` types). Cast the typed constants explicitly. `PutPathOptions`
 is the one Go-SDK-only type whose `OnConflict` is the typed
@@ -173,19 +173,19 @@ res, err := fg.Search.Glob(ctx, filegate.GlobOptions{
 })
 ```
 
-### Chunked upload — streaming, bandwidth-saving start check
+### Upload session — resumable, explicit commit
 
 The example below opens the file once, hashes it streaming, then reads each
-chunk via `io.SectionReader` — peak memory is bounded by
-`concurrency * chunkSize`, not the file size. See [`chunked-uploads.md`](chunked-uploads.md)
-for the full async/parallel variant. **Do not use `os.ReadFile` for large
-chunked uploads** — that defeats the purpose by buffering the whole file
+segment via `ReadAt` — peak memory is bounded by the segment size, not the
+file size. See [`upload-sessions.md`](upload-sessions.md) for the full
+parallel variant. **Do not use `os.ReadFile` for large uploads** — that
+defeats the purpose by buffering the whole file
 in memory.
 
 ```go
 import (
     "io"
-    "github.com/valentinkolb/filegate/sdk/filegate/chunks"
+    "github.com/valentinkolb/filegate/sdk/filegate/segments"
 )
 
 f, err := os.Open(srcPath)
@@ -194,19 +194,18 @@ defer f.Close()
 info, err := f.Stat()
 if err != nil { return err }
 size := info.Size()
-const chunkSize = int64(8 << 20)
+const segmentSize = int64(8 << 20)
 
 // Streaming whole-file hash — no memory blow-up.
-checksum, err := chunks.SHA256Reader(f)
+checksum, err := segments.SHA256Reader(f)
 if err != nil { return err }
 if _, err := f.Seek(0, io.SeekStart); err != nil { return err }
 
-start, err := fg.Uploads.Chunked.Start(ctx, filegate.ChunkedStartRequest{
-    ParentID:   parentID,
-    Filename:   filepath.Base(srcPath),
-    Size:       size,
-    Checksum:   checksum,
-    ChunkSize:  chunkSize,
+session, err := fg.Uploads.Sessions.Create(ctx, filegate.UploadSessionCreateRequest{
+    Path:        "data/uploads/" + filepath.Base(srcPath),
+    Size:        size,
+    Checksum:    checksum,
+    SegmentSize: segmentSize,
     OnConflict: string(filegate.ConflictError), // 409 immediately if exists
 })
 if err != nil {
@@ -217,19 +216,23 @@ if err != nil {
     return err
 }
 
-total := chunks.TotalChunks(size, chunkSize)
-for i := 0; i < total; i++ {
-    s, e, _ := chunks.Bounds(i, size, chunkSize)
-    section := io.NewSectionReader(f, s, e-s)
-    buf := make([]byte, e-s)
-    if _, err := io.ReadFull(section, buf); err != nil { return err }
-    res, err := fg.Uploads.Chunked.SendChunk(ctx, start.UploadID, i,
-        bytes.NewReader(buf), chunks.SHA256Bytes(buf))
+for _, segment := range session.Segments {
+    buf := make([]byte, segment.Size)
+    if _, err := f.ReadAt(buf, segment.Offset); err != nil { return err }
+    _, err := fg.Uploads.Sessions.PutSegment(ctx, filegate.UploadSessionPutSegmentRequest{
+        SessionID: session.ID,
+        Index:     segment.Index,
+        Body:      bytes.NewReader(buf),
+        Checksum:  segments.SHA256Bytes(buf),
+    })
     if err != nil { return err }
-    if res.Completed {
-        fmt.Println("done:", res.Complete.File.ID)
-    }
 }
+
+out, err := fg.Uploads.Sessions.Commit(ctx, filegate.UploadSessionCommitRequest{
+    SessionID: session.ID,
+})
+if err != nil { return err }
+fmt.Println("done:", out.Node.ID)
 ```
 
 ## Error model

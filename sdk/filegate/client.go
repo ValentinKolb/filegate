@@ -28,23 +28,24 @@ type Config struct {
 
 // Filegate is a stateless, scoped API client.
 //
-// Pure helpers (chunk math + sha256 in Filegate's checksum format, HTTP
+// Pure helpers (segment math + sha256 in Filegate's checksum format, HTTP
 // response relaying) live in dedicated subpackages so callers can use them
 // without constructing a Filegate:
 //
-//	import "github.com/valentinkolb/filegate/sdk/filegate/chunks"
+//	import "github.com/valentinkolb/filegate/sdk/filegate/segments"
 //	import "github.com/valentinkolb/filegate/sdk/filegate/relay"
 type Filegate struct {
 	core *clientCore
 
-	Paths     PathsClient
-	Nodes     NodesClient
-	Uploads   UploadsClient
-	Transfers TransfersClient
-	Search    SearchClient
-	Index     IndexClient
-	Stats     StatsClient
-	Versions  VersionsClient
+	Paths        PathsClient
+	Nodes        NodesClient
+	Uploads      UploadsClient
+	Transfers    TransfersClient
+	Search       SearchClient
+	Index        IndexClient
+	Stats        StatsClient
+	Capabilities CapabilitiesClient
+	Versions     VersionsClient
 }
 
 type clientCore struct {
@@ -85,13 +86,14 @@ func New(cfg Config) (*Filegate, error) {
 	client.Paths = PathsClient{core: core}
 	client.Nodes = NodesClient{core: core}
 	client.Uploads = UploadsClient{
-		core:    core,
-		Chunked: ChunkedUploadClient{core: core},
+		core:     core,
+		Sessions: UploadSessionsClient{core: core},
 	}
 	client.Transfers = TransfersClient{core: core}
 	client.Search = SearchClient{core: core}
 	client.Index = IndexClient{core: core}
 	client.Stats = StatsClient{core: core}
+	client.Capabilities = CapabilitiesClient{core: core}
 	client.Versions = VersionsClient{core: core}
 	return client, nil
 }

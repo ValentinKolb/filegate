@@ -22,10 +22,11 @@ type GetNodeOptions struct {
 	PageSize              int
 	Cursor                string
 	ComputeRecursiveSizes bool
+	Fingerprint           FingerprintMode
 }
 
 // FileConflictMode mirrors the server's onConflict vocabulary for file-write
-// endpoints (PUT /v1/paths, chunked upload start, transfers). The empty
+// endpoints (PUT /v1/paths, upload session create, transfers). The empty
 // string is treated as the server default ("error").
 type FileConflictMode string
 
@@ -33,6 +34,14 @@ const (
 	ConflictError     FileConflictMode = "error"
 	ConflictOverwrite FileConflictMode = "overwrite"
 	ConflictRename    FileConflictMode = "rename"
+)
+
+type FingerprintMode string
+
+const (
+	FingerprintNone   FingerprintMode = "none"
+	FingerprintCached FingerprintMode = "cached"
+	FingerprintEnsure FingerprintMode = "ensure"
 )
 
 // MkdirConflictMode mirrors the server's onConflict vocabulary for mkdir.
@@ -71,6 +80,9 @@ func (o GetNodeOptions) toQuery() url.Values {
 	}
 	if o.ComputeRecursiveSizes {
 		query.Set("computeRecursiveSizes", "true")
+	}
+	if o.Fingerprint != "" {
+		query.Set("fingerprint", string(o.Fingerprint))
 	}
 	return query
 }

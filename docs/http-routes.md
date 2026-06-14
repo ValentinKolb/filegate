@@ -3,8 +3,8 @@
 Base requirements:
 
 - API prefix: `/v1`
-- Auth: `Authorization: Bearer <token>` on `/v1/*` routes, except the final
-  `PUT /v1/uploads/direct/{token}` request
+- Auth: `Authorization: Bearer <token>` on `/v1/*` routes, except scoped direct
+  upload requests that use their own upload token
 - Health route without auth: `GET /health`
 - JSON errors: `{ "error": "..." }`. On `409 Conflict`, the body also
   carries `"existingId"` and `"existingPath"` so clients can render a
@@ -30,8 +30,15 @@ server:
 
 `allowed_methods` and `allowed_headers` are optional. When omitted, Filegate
 uses REST-safe defaults for common methods plus `Authorization`,
-`Content-Type`, and `X-Chunk-Checksum`. `allow_credentials: true` is rejected
-with wildcard origin `*`.
+`Content-Type`, `Filegate-Upload-Session`, and `X-Segment-Checksum`.
+`allow_credentials: true` is rejected with wildcard origin `*`.
+
+## Admin UI
+
+The browser admin UI is a standalone SSR app in `admin/`. Filegate itself only
+serves the REST API. The admin app keeps the Filegate bearer token server-side;
+browser uploads use upload sessions with scoped direct session tokens.
+
 
 ## Conflict Handling
 
@@ -42,8 +49,8 @@ never silently overwrites or drops data.
 | Mode        | Semantics                                                    | Allowed at                                       |
 |-------------|--------------------------------------------------------------|--------------------------------------------------|
 | `error`     | 409 Conflict if the target already exists. **Default.**       | All endpoints                                    |
-| `overwrite` | Replace the existing file in place; node id preserved.       | `PUT /v1/paths`, `POST /v1/uploads/chunked/start`, `POST /v1/transfers` |
-| `rename`    | Pick a unique sibling name (`foo.jpg` → `foo-01.jpg` → `foo-02.jpg` …) and create a new node there. The response reflects the actually-used name. | All endpoints                                    |
+| `overwrite` | Replace the existing file in place; node id preserved.       | `PUT /v1/paths`, `POST /v1/uploads/sessions`, `POST /v1/transfers` |
+| `rename`    | Pick a unique sibling name (`foo.jpg` → `foo-01.jpg` → `foo-02.jpg` …) and create a new node there. The response reflects the actually-used name. | `PUT /v1/paths`, `POST /v1/nodes/{id}/mkdir`, `POST /v1/transfers`, direct one-shot uploads |
 | `skip`      | If a directory with the same name exists, return it unchanged. A name conflict with a *file* still fails — we cannot turn a file into a directory. | **Only** `POST /v1/nodes/{id}/mkdir`             |
 
 A directory can never be replaced by a file PUT (any mode), and `mkdir` can
@@ -56,6 +63,10 @@ mkdir). For directory replacement use `POST /v1/transfers` with `overwrite`.
   - Returns `200 OK` + `OK`
 - `GET /v1/stats`
   - Runtime stats for index/cache/mounts/disks
+- `GET /v1/capabilities`
+  - Runtime capability limits for adaptive clients
+  - Upload fields include `maxChunkBytes`, `maxUploadBytes`,
+    `maxSessionUploadBytes`, and `maxConcurrentSegmentWrites`
 
 ## Paths API (Virtual Filesystem)
 
@@ -160,30 +171,47 @@ notes.
     - `files`
     - `directories`
 
-## Chunked Uploads
+## Upload Sessions
 
-- `POST /v1/uploads/chunked/start`
-  - Body: `ChunkedStartRequest` — `onConflict` accepts `error|overwrite|rename`
-  - Initializes or resumes deterministic upload session
-  - **Optimistic conflict check**: returns `409` immediately when the name
-    already exists and mode is `error`, before the client uploads any chunk
-  - Resume can upgrade the persisted mode (e.g. retry with `overwrite`
-    after the first attempt collided at finalize)
-- `GET /v1/uploads/chunked/{uploadId}`
-  - Status + uploaded chunk list
-- `PUT /v1/uploads/chunked/{uploadId}/chunks/{index}`
-  - Upload one chunk
-  - Header: `X-Chunk-Checksum: sha256:<hex>` (optional but recommended)
-  - Supports out-of-order and duplicate chunk uploads
-  - Auto-finalizes when all chunks are present
-  - **Authoritative conflict check** at finalize: if a concurrent writer
-    created the target between start and finalize, the persisted
-    `onConflict` mode decides — `error` returns 409 (chunks remain in
-    staging, the client can retry start with a different mode), while
-    `overwrite` and `rename` proceed
-  - May return `507` when storage free-space guard rejects new writes
+Upload sessions are the resumable path for large uploads, parallel segment
+delivery, and browser direct uploads. A session is explicit: create, PUT
+segments in any order, then commit.
 
-Chunk staging location is mount-local: `<mount>/.fg-uploads/<uploadId>/`.
+- `POST /v1/uploads/sessions`
+  - Body: `UploadSessionCreateRequest`
+    - `path` (required): virtual target path
+    - `size` (required): final file size
+    - `checksum` (required): final `sha256:<hex>`
+    - `segmentSize` (optional): defaults to `upload.max_chunk_bytes`; clients
+      can read `GET /v1/capabilities` to choose a compatible value
+    - `contentType`, `ownership` (optional)
+    - `onConflict` (optional): `error|overwrite`, default `error`
+    - `direct` (optional): mint a scoped direct-session token
+  - Returns `201` with session id, segment plan, uploaded segments, phase,
+    and optional direct token
+  - Returns `409` immediately on target conflict when `onConflict=error`
+  - Returns `507` when the storage free-space guard rejects the upload
+- `POST /v1/uploads/sessions:batch`
+  - Body: `{ "uploads": [...], "segmentSize"?: n, "direct"?: {...} }`
+  - Creates independent sessions in one request. On failure, no partial
+    sessions are kept.
+- `GET /v1/uploads/sessions/{sessionId}`
+  - Returns current status and uploaded segment indexes
+- `PUT /v1/uploads/sessions/{sessionId}/segments/{index}`
+  - Body: segment bytes
+  - Header: `X-Segment-Checksum: sha256:<hex>` (optional but recommended)
+  - Supports out-of-order and duplicate segment uploads when content matches
+  - Returns `413` when the segment body exceeds the planned segment size
+- `POST /v1/uploads/sessions/{sessionId}/commit`
+  - Verifies all segments and the final checksum, then atomically replaces or
+    creates the target according to `onConflict`
+  - Safe to retry after success; ambiguous post-replace crashes return `409`
+    instead of overwriting newer data
+- `DELETE /v1/uploads/sessions/{sessionId}`
+  - Aborts an in-progress session and removes staged bytes
+
+Session staging is mount-local under `.fg-uploads`, which is reserved and not
+visible through normal path, node, search, or rescan APIs.
 
 ## Direct Upload URLs
 

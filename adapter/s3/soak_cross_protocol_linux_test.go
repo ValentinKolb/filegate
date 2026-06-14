@@ -93,7 +93,7 @@ func TestCrossProtocolSoak(t *testing.T) {
 		UploadCleanupInterval: time.Hour,
 		MaxChunkBytes:         int64(50 * 1024 * 1024),
 		MaxUploadBytes:        int64(50 * 1024 * 1024),
-		MaxChunkedUploadBytes: int64(50 * 1024 * 1024),
+		MaxSessionUploadBytes: int64(50 * 1024 * 1024),
 		UploadMinFreeBytes:    int64(64 * 1024 * 1024),
 		Rescan:                svc.Rescan,
 	})

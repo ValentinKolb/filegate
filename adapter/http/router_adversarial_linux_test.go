@@ -102,65 +102,36 @@ func TestDirectoryTarTerminatesOnSymlinkCycle(t *testing.T) {
 	}
 }
 
-// TestChunkedUploadRejectsChunkAfterAutoComplete proves that once an upload
-// has been finalized, replaying a chunk with altered content cannot corrupt
-// the persisted file. The server must either echo the completed file (for
-// idempotent retries) or reject the change — but never re-write the file.
-func TestChunkedUploadRejectsChunkAfterAutoComplete(t *testing.T) {
+// TestUploadSessionRejectsSegmentAfterCommit proves that once an upload has
+// been committed, replaying a segment with altered content cannot corrupt the
+// persisted file.
+func TestUploadSessionRejectsSegmentAfterCommit(t *testing.T) {
 	r, svc, cleanup := newTestRouter(t)
 	defer cleanup()
 
 	root := svc.ListRoot()[0]
 	content := []byte("ABCDEFGH")
-	checksum := sha256Prefixed(content)
-
-	start := chunkedStart(t, r, root.ID.String(), "auto.bin", int64(len(content)), 4, checksum)
-	uploadID, _ := start["uploadId"].(string)
-	if uploadID == "" {
-		t.Fatalf("missing uploadId")
-	}
+	session := createUploadSession(t, r, root.Name+"/auto.bin", content, 4, false)
 
 	for i := 0; i < 2; i++ {
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPut,
-			"/v1/uploads/chunked/"+uploadID+"/chunks/"+itoa(i),
-			bytes.NewReader(content[i*4:(i+1)*4]),
-		)
-		req.Header.Set("Authorization", "Bearer test-token")
-		r.ServeHTTP(w, req)
+		w := putSessionSegment(t, r, session.ID, i, content[i*4:(i+1)*4])
 		if w.Result().StatusCode != http.StatusOK {
-			t.Fatalf("seed chunk %d status=%d body=%s", i, w.Result().StatusCode, w.Body.String())
+			t.Fatalf("seed segment %d status=%d body=%s", i, w.Result().StatusCode, w.Body.String())
 		}
 	}
 
-	statusW := httptest.NewRecorder()
-	r.ServeHTTP(statusW, authedRequest(http.MethodGet, "/v1/uploads/chunked/"+uploadID))
-	if statusW.Result().StatusCode != http.StatusOK {
-		t.Fatalf("status before replay=%d", statusW.Result().StatusCode)
-	}
-	var complete map[string]any
-	if err := json.NewDecoder(statusW.Result().Body).Decode(&complete); err != nil {
-		t.Fatalf("decode status: %v", err)
-	}
-	if done, _ := complete["completed"].(bool); !done {
-		t.Fatalf("expected completed=true before replay, got %#v", complete)
+	commit := httptest.NewRecorder()
+	r.ServeHTTP(commit, authedJSONRequest(http.MethodPost, "/v1/uploads/sessions/"+session.ID+"/commit", nil))
+	if commit.Result().StatusCode != http.StatusOK {
+		t.Fatalf("commit status=%d body=%s", commit.Result().StatusCode, commit.Body.String())
 	}
 
-	// Try to replay chunk 0 with completely different content. The upload is
+	// Try to replay segment 0 with completely different content. The upload is
 	// already finalized; the server must not allow this to mutate the file.
 	tampered := []byte("XXXX")
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut,
-		"/v1/uploads/chunked/"+uploadID+"/chunks/0",
-		bytes.NewReader(tampered),
-	)
-	req.Header.Set("Authorization", "Bearer test-token")
-	r.ServeHTTP(w, req)
-	// Two outcomes are acceptable: 200 (idempotent — server returns the
-	// already-completed file unchanged) or a 4xx rejection. What is NOT
-	// acceptable is the file content actually changing.
-	if w.Result().StatusCode >= 500 {
-		t.Fatalf("replay caused 5xx: %d body=%s", w.Result().StatusCode, w.Body.String())
+	w := putSessionSegment(t, r, session.ID, 0, tampered)
+	if w.Result().StatusCode != http.StatusConflict {
+		t.Fatalf("replay status=%d want=%d body=%s", w.Result().StatusCode, http.StatusConflict, w.Body.String())
 	}
 
 	// The on-disk file must still match the original content. Locate it via
@@ -179,19 +150,19 @@ func TestChunkedUploadRejectsChunkAfterAutoComplete(t *testing.T) {
 	}
 }
 
-// TestChunkedUploadEnforcesQuotaWhenStorageFull simulates a full filesystem
-// during chunked upload. The /start endpoint must return InsufficientStorage
+// TestUploadSessionEnforcesQuotaWhenStorageFull simulates a full filesystem
+// during resumable upload. The create endpoint must return InsufficientStorage
 // rather than accept an upload that cannot fit. We use a quota-enforcing
-// router built on top of a tmpfs-bound mount via the MaxChunkedUploadBytes
-// limit, which is the production knob for this safety property.
-func TestChunkedUploadEnforcesQuotaWhenStorageFull(t *testing.T) {
+// router built on top of a tmpfs-bound mount via UploadMinFreeBytes, which is
+// the production knob for this safety property.
+func TestUploadSessionEnforcesQuotaWhenStorageFull(t *testing.T) {
 	baseDir := t.TempDir()
 	indexDir := t.TempDir()
 	r, svc, cleanup := newTestRouterWithCustomLimits(t, baseDir, indexDir, RouterOptions{
 		BearerToken:           "test-token",
 		MaxChunkBytes:         1 << 20,
 		MaxUploadBytes:        4 << 20,
-		MaxChunkedUploadBytes: 4 << 20,
+		MaxSessionUploadBytes: 4 << 20,
 		// A very large min-free-bytes guarantees the start handler will
 		// believe storage is exhausted even on a roomy build host.
 		UploadMinFreeBytes:    1 << 62,
@@ -203,25 +174,22 @@ func TestChunkedUploadEnforcesQuotaWhenStorageFull(t *testing.T) {
 
 	root := svc.ListRoot()[0]
 	body, err := json.Marshal(map[string]any{
-		"parentId":  root.ID.String(),
-		"filename":  "huge.bin",
-		"size":      int64(1 << 20),
-		"checksum":  "sha256:" + strings.Repeat("0", 64),
-		"chunkSize": 1 << 20,
+		"path":        root.Name + "/huge.bin",
+		"size":        int64(1 << 20),
+		"checksum":    "sha256:" + strings.Repeat("0", 64),
+		"segmentSize": int64(1 << 20),
 	})
 	if err != nil {
 		t.Fatalf("marshal start body: %v", err)
 	}
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, authedJSONRequest(http.MethodPost, "/v1/uploads/chunked/start", body))
+	r.ServeHTTP(w, authedJSONRequest(http.MethodPost, "/v1/uploads/sessions", body))
 	if w.Result().StatusCode != http.StatusInsufficientStorage {
 		t.Fatalf("status=%d, want=%d body=%s", w.Result().StatusCode, http.StatusInsufficientStorage, w.Body.String())
 	}
-	// The .fg-uploads root may be created by handleStart before the quota
-	// check fires; that's fine. What is NOT fine is leaving a per-upload
-	// directory inside it after rejection, because that would leak quota
-	// across attempts.
-	staging := filepath.Join(baseDir, uploadStagingDirName)
+	// The stage root may be created before the quota check fires; that's fine.
+	// What is NOT fine is leaving per-session segment files after rejection.
+	staging := filepath.Join(baseDir, uploadSessionSegmentsDir, uploadSessionSegmentSubdir)
 	entries, err := os.ReadDir(staging)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat staging: %v", err)
@@ -231,18 +199,4 @@ func TestChunkedUploadEnforcesQuotaWhenStorageFull(t *testing.T) {
 			t.Fatalf("rejected upload should not leave a per-upload staging dir, found %q in %s", e.Name(), staging)
 		}
 	}
-}
-
-func itoa(i int) string {
-	switch i {
-	case 0:
-		return "0"
-	case 1:
-		return "1"
-	case 2:
-		return "2"
-	case 3:
-		return "3"
-	}
-	return "0"
 }

@@ -86,7 +86,7 @@ Current extension usage:
 - Path and reverse path caches in domain service
 - Bounded worker queues for expensive jobs (thumbnail generation)
 - Pooled copy buffers for stream endpoints
-- Chunked upload staging in mount-local `.fg-uploads`
+- Upload-session staging in mount-local `.fg-uploads`
 
 ## Failure/Repair Paths
 

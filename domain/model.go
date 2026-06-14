@@ -88,6 +88,11 @@ type Entity struct {
 	// rescan populates it for any file it walks. The S3 read path may
 	// also lazily compute and persist it on first access.
 	ETagMD5 string
+	// SHA256 is Filegate's canonical content fingerprint, formatted as
+	// "sha256:<lowercase-hex>". It is populated by writes and can be
+	// lazily backfilled for older rows via metadata reads with
+	// fingerprint=ensure.
+	SHA256 string
 	// MultipartETag is set on files uploaded via S3 multipart Complete:
 	// "<hex(MD5(concat-of-part-MD5-bytes))>-<N>". When non-empty, S3
 	// GET/HEAD return it (quoted) instead of the single-MD5 ETag. Cleared
@@ -134,7 +139,9 @@ type FileMeta struct {
 	// (REST + S3) and by index rescan. Empty for directories and for files
 	// that haven't been hashed yet (pre-schema legacy rows that never had
 	// a rescan or write since the upgrade).
-	ETag   string `json:"etag,omitempty"`
+	ETag string `json:"etag,omitempty"`
+	// SHA256 is the canonical content fingerprint for exact file identity.
+	SHA256 string `json:"sha256,omitempty"`
 	IsRoot bool   `json:"-"`
 }
 
@@ -188,6 +195,61 @@ type ActiveMultipartPart struct {
 	Size       int64
 	ETag       string
 	UpdatedAt  int64
+}
+
+// UploadSessionPhase is the REST resumable-upload state. Session metadata is
+// stored in Pebble; segment bytes live on disk under mount-local .fg-uploads.
+type UploadSessionPhase string
+
+const (
+	UploadSessionInProgress UploadSessionPhase = "in_progress"
+	UploadSessionCommitting UploadSessionPhase = "committing"
+	UploadSessionCommitted  UploadSessionPhase = "committed"
+	UploadSessionAborted    UploadSessionPhase = "aborted"
+)
+
+// UploadSession is one logical file upload. Folder uploads are SDK-level batch
+// orchestration over many sessions, not one backend transaction.
+type UploadSession struct {
+	ID            string
+	Path          string
+	ParentID      FileID
+	Filename      string
+	Size          int64
+	Checksum      string
+	SegmentSize   int64
+	TotalSegments int
+	ContentType   string
+	Ownership     *Ownership
+	OnConflict    ConflictMode
+	StageDir      string
+	Phase         UploadSessionPhase
+	CreatedAt     int64
+	UpdatedAt     int64
+	CompletedAt   int64
+	CompletedNode string
+}
+
+// UploadSegment records one durably-accepted segment.
+type UploadSegment struct {
+	SessionID string
+	Index     int
+	Offset    int64
+	Size      int64
+	Checksum  string
+	Path      string
+	UpdatedAt int64
+}
+
+// UploadCommitRecord is the durable idempotency witness for a committed upload
+// session. A present record means retrying commit must return the historical
+// result instead of re-installing bytes.
+type UploadCommitRecord struct {
+	SessionID   string
+	FileID      FileID
+	Path        string
+	Checksum    string
+	CompletedAt int64
 }
 
 // Ownership specifies optional permission overrides for file operations.

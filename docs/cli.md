@@ -122,8 +122,8 @@ Special host handling:
 --upload-cleanup-interval
 --upload-max-chunk-bytes
 --upload-max-upload-bytes
---upload-max-chunked-upload-bytes
---upload-max-concurrent-chunk-writes
+--upload-max-session-upload-bytes
+--upload-max-concurrent-segment-writes
 --upload-min-free-bytes
 --thumbnail-lru-cache-size
 --thumbnail-max-source-bytes

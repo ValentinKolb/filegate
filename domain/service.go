@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,6 +32,11 @@ type normalizedOwnership struct {
 	gid     *int
 	mode    *os.FileMode
 	dirMode *os.FileMode
+}
+
+type ContentHashes struct {
+	MD5Hex string
+	SHA256 string
 }
 
 // Service is the central orchestrator that manages mounts, caching, and all
@@ -256,13 +262,11 @@ func sanitizeRelativePath(relPath string) (string, error) {
 		if seg == "" || seg == "." || seg == ".." {
 			return "", ErrInvalidArgument
 		}
-		// .fg-versions is a reserved internal namespace inside every
-		// mount. Reject the name anywhere in the path — at the mount
-		// root it's where version blobs live, deeper down it would
-		// reflect a user accidentally using the same name. Both cases
-		// are safer to refuse outright than to allow a path that
-		// shadows the namespace.
-		if seg == versionsDirName || isFilegateInternalTempName(seg) {
+		// Filegate-owned namespaces are reserved inside every mount.
+		// Reject them anywhere in the path: at the mount root they are
+		// where internal blobs live, deeper down they would shadow the
+		// same names and make recovery/debugging ambiguous.
+		if isFilegateReservedName(seg) || isFilegateInternalTempName(seg) {
 			return "", ErrForbidden
 		}
 	}
@@ -553,6 +557,7 @@ func preserveS3Metadata(dst *Entity, src *Entity) {
 		return
 	}
 	dst.ETagMD5 = src.ETagMD5
+	dst.SHA256 = src.SHA256
 	dst.MultipartETag = src.MultipartETag
 	dst.ContentType = src.ContentType
 	dst.ContentEncoding = src.ContentEncoding
@@ -560,12 +565,31 @@ func preserveS3Metadata(dst *Entity, src *Entity) {
 	dst.S3UserMetadata = src.S3UserMetadata
 }
 
-// hashFileMD5 reads absPath and returns the lowercase hex MD5 of its
-// bytes. Returns "" with no error for non-regular files (callers
-// shouldn't compute ETags for directories, symlinks, or device files).
-// Used by the rescan path to populate ETagMD5 for files that pre-date
-// the schema or were created by external writes the detector picked up.
-func hashFileMD5(absPath string, info os.FileInfo) (string, error) {
+// hashFileContent reads absPath once and returns Filegate's persisted content
+// hashes. Returns zero values with no error for non-regular files.
+func hashFileContent(absPath string, info os.FileInfo) (ContentHashes, error) {
+	if info != nil && !info.Mode().IsRegular() {
+		return ContentHashes{}, nil
+	}
+	f, err := os.Open(absPath)
+	if err != nil {
+		return ContentHashes{}, err
+	}
+	defer f.Close()
+	md5Hash := md5.New()
+	shaHash := sha256.New()
+	dst := io.MultiWriter(md5Hash, shaHash)
+	buf := make([]byte, 128*1024)
+	if _, err := io.CopyBuffer(dst, f, buf); err != nil {
+		return ContentHashes{}, err
+	}
+	return ContentHashes{
+		MD5Hex: hex.EncodeToString(md5Hash.Sum(nil)),
+		SHA256: "sha256:" + hex.EncodeToString(shaHash.Sum(nil)),
+	}, nil
+}
+
+func hashFileSHA256(absPath string, info os.FileInfo) (string, error) {
 	if info != nil && !info.Mode().IsRegular() {
 		return "", nil
 	}
@@ -574,12 +598,12 @@ func hashFileMD5(absPath string, info os.FileInfo) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	h := md5.New()
+	h := sha256.New()
 	buf := make([]byte, 128*1024)
 	if _, err := io.CopyBuffer(h, f, buf); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func fileMetaFromEntity(entity *Entity, vp string) *FileMeta {
@@ -596,6 +620,7 @@ func fileMetaFromEntity(entity *Entity, vp string) *FileMeta {
 		MimeType: entity.MimeType,
 		Exif:     entity.Exif,
 		ETag:     entity.ETagMD5,
+		SHA256:   entity.SHA256,
 		IsRoot:   entity.ParentID.IsZero(),
 	}
 	if entity.IsDir {
@@ -606,6 +631,70 @@ func fileMetaFromEntity(entity *Entity, vp string) *FileMeta {
 		meta.MimeType = "application/octet-stream"
 	}
 	return meta
+}
+
+func sameFileSnapshot(before, after os.FileInfo) bool {
+	if before == nil || after == nil {
+		return false
+	}
+	beforeDev, beforeInode, _ := fileInodeIdentity(before)
+	afterDev, afterInode, _ := fileInodeIdentity(after)
+	return before.Size() == after.Size() &&
+		before.ModTime().UnixNano() == after.ModTime().UnixNano() &&
+		beforeDev == afterDev &&
+		beforeInode == afterInode
+}
+
+func (s *Service) EnsureFileSHA256(id FileID) (*FileMeta, error) {
+	entity, err := s.idx.GetEntity(id)
+	if err != nil {
+		return nil, err
+	}
+	vp, err := s.VirtualPath(id)
+	if err != nil {
+		return nil, err
+	}
+	if entity.IsDir || entity.SHA256 != "" {
+		return fileMetaFromEntity(entity, vp), nil
+	}
+	abs, err := s.ResolveAbsPath(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var sha string
+	for attempt := 0; attempt < 2; attempt++ {
+		before, err := os.Lstat(abs)
+		if err != nil {
+			return nil, err
+		}
+		if !before.Mode().IsRegular() {
+			return nil, ErrInvalidArgument
+		}
+		sha, err = hashFileSHA256(abs, before)
+		if err != nil {
+			return nil, err
+		}
+		after, err := os.Lstat(abs)
+		if err != nil {
+			return nil, err
+		}
+		if sameFileSnapshot(before, after) {
+			break
+		}
+		if attempt == 1 {
+			return nil, ErrConflict
+		}
+	}
+
+	entity.SHA256 = sha
+	if err := s.idx.Batch(func(b Batch) error {
+		b.PutEntity(*entity)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return fileMetaFromEntity(entity, vp), nil
 }
 
 func (s *Service) GetFileByVirtualPath(virtualPath string) (*FileMeta, error) {
@@ -714,6 +803,15 @@ func (s *Service) computeDirectorySizeByIDBudget(dirID FileID, remainingNodes *i
 	return total, true
 }
 
+const recursiveSizeNodeBudget = 10_000_000
+
+// RecursiveDirectorySize returns the sum of regular file sizes under dirID.
+func (s *Service) RecursiveDirectorySize(dirID FileID) (int64, bool) {
+	remainingNodes := recursiveSizeNodeBudget
+	deadline := time.Now().Add(10 * time.Second)
+	return s.computeDirectorySizeByIDBudget(dirID, &remainingNodes, deadline)
+}
+
 func (s *Service) ListNodeChildren(parentID FileID, cursor string, pageSize int, computeRecursiveSizes bool) (*ListedNodes, error) {
 	if pageSize <= 0 {
 		pageSize = 100
@@ -758,8 +856,8 @@ func (s *Service) ListNodeChildren(parentID FileID, cursor string, pageSize int,
 	}
 
 	items := make([]FileMeta, 0, pageSize)
-	remainingNodes := 300_000
-	deadline := time.Now().Add(2 * time.Second)
+	remainingNodes := recursiveSizeNodeBudget
+	deadline := time.Now().Add(10 * time.Second)
 	parentVP, parentVPErr := s.VirtualPath(parentID)
 	for _, entry := range entries {
 		childMeta, err := s.GetFile(entry.ID)
@@ -1166,11 +1264,11 @@ func (s *Service) WriteContent(id FileID, body io.Reader) error {
 		// the user's write — the worst-case is a missed version, not a
 		// missed mutation.
 		s.captureBeforeOverwrite(id, abs)
-		md5Hex, err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false)
+		hashes, err := s.writeFileAtomic(abs, body, os.FileMode(meta.Mode), ownershipFromFileMeta(meta), &preserveID, false)
 		if err != nil {
 			return err
 		}
-		if err := s.syncSingleAfterLocalWrite(abs, md5Hex); err != nil {
+		if err := s.syncSingleAfterLocalWrite(abs, hashes); err != nil {
 			return err
 		}
 		s.bus.Publish(Event{Type: EventUpdated, ID: id, Path: abs, At: time.Now()})
@@ -1182,6 +1280,14 @@ func (s *Service) WriteContent(id FileID, body io.Reader) error {
 // supplied ConflictMode. The returned FileMeta reflects the actually-used
 // final name, which may differ from `name` when mode is ConflictRename.
 func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, ownership *Ownership, mode ConflictMode) (*FileMeta, error) {
+	return s.replaceFile(parentID, name, srcPath, ownership, mode, ContentHashes{})
+}
+
+func (s *Service) ReplaceFileWithHashes(parentID FileID, name string, srcPath string, ownership *Ownership, mode ConflictMode, hashes ContentHashes) (*FileMeta, error) {
+	return s.replaceFile(parentID, name, srcPath, ownership, mode, hashes)
+}
+
+func (s *Service) replaceFile(parentID FileID, name string, srcPath string, ownership *Ownership, mode ConflictMode, hashes ContentHashes) (*FileMeta, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || strings.Contains(name, "/") {
 		return nil, ErrInvalidArgument
@@ -1197,7 +1303,7 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 	// Acquire the destination path-lock to serialize against any
 	// concurrent path-mutating op on the same target (S3 PutObject
 	// with the same key, REST PUT to the same virtual path, another
-	// chunked finalize that lost a race). Held for the entire body
+	// upload-session commit that lost a race). Held for the entire body
 	// of ReplaceFile.
 	parentVP, err := s.VirtualPath(parentID)
 	if err != nil {
@@ -1321,7 +1427,11 @@ func (s *Service) ReplaceFile(parentID FileID, name string, srcPath string, owne
 	if err := s.applyOwnership(targetPath, effectiveOwnership, false); err != nil {
 		return nil, err
 	}
-	if err := s.syncSingle(targetPath); err != nil {
+	if hashes.MD5Hex != "" || hashes.SHA256 != "" {
+		if err := s.syncSingleAfterLocalWrite(targetPath, hashes); err != nil {
+			return nil, err
+		}
+	} else if err := s.syncSingle(targetPath); err != nil {
 		return nil, err
 	}
 	id, err := s.store.GetID(targetPath)
@@ -1428,21 +1538,27 @@ func (s *Service) isMountRootAbsPath(absPath string) bool {
 	return false
 }
 
-// isPathInsideVersionsNamespace reports whether absPath sits inside
-// any mount's reserved .fg-versions subtree. Used by every code path
+func isFilegateReservedName(name string) bool {
+	return name == versionsDirName || name == uploadsDirName
+}
+
+// isPathInsideReservedNamespace reports whether absPath sits inside
+// any mount's reserved Filegate-owned subtree. Used by every code path
 // that might receive a filesystem-driven path the user shouldn't be
 // able to manipulate via the public API.
-func (s *Service) isPathInsideVersionsNamespace(absPath string) bool {
+func (s *Service) isPathInsideReservedNamespace(absPath string) bool {
 	cleaned := filepath.Clean(absPath)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, mountAbs := range s.mountByName {
-		nsRoot := filepath.Join(mountAbs, versionsDirName)
-		if cleaned == nsRoot {
-			return true
-		}
-		if strings.HasPrefix(cleaned, nsRoot+string(filepath.Separator)) {
-			return true
+		for _, name := range []string{versionsDirName, uploadsDirName} {
+			nsRoot := filepath.Join(mountAbs, name)
+			if cleaned == nsRoot {
+				return true
+			}
+			if strings.HasPrefix(cleaned, nsRoot+string(filepath.Separator)) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1751,6 +1867,7 @@ func (s *Service) CreateChild(parentID FileID, name string, isDir bool, ownershi
 	// against external writers; Mkdir / commitNoReplace (via
 	// writeFileAtomic mustNotExist) fail with EEXIST instead of
 	// truncating whatever appeared in between.
+	var hashes ContentHashes
 	if isDir {
 		if err := os.Mkdir(abs, dirPerm); err != nil {
 			if errors.Is(err, os.ErrExist) {
@@ -1762,18 +1879,26 @@ func (s *Service) CreateChild(parentID FileID, name string, isDir bool, ownershi
 			return nil, err
 		}
 	} else {
-		newFileID, err := newID()
-		if err != nil {
-			return nil, err
+		newFileID, idErr := newID()
+		if idErr != nil {
+			return nil, idErr
 		}
 		// writeFileAtomic applies ownership to the temp file before the
 		// atomic link, so no separate applyOwnership pass is needed.
-		if _, err := s.writeFileAtomic(abs, strings.NewReader(""), filePerm, effectiveOwnership, &newFileID, true); err != nil {
-			return nil, err
+		var writeErr error
+		hashes, writeErr = s.writeFileAtomic(abs, strings.NewReader(""), filePerm, effectiveOwnership, &newFileID, true)
+		if writeErr != nil {
+			return nil, writeErr
 		}
 	}
-	if err := s.syncSingle(abs); err != nil {
-		return nil, err
+	var syncErr error
+	if isDir {
+		syncErr = s.syncSingle(abs)
+	} else {
+		syncErr = s.syncSingleAfterLocalWrite(abs, hashes)
+	}
+	if syncErr != nil {
+		return nil, syncErr
 	}
 	id, err := s.store.GetID(abs)
 	if err != nil {
@@ -2533,13 +2658,12 @@ func (s *Service) claimedAbsPath(e *Entity) (string, error) {
 }
 
 func (s *Service) syncSingle(absPath string) error {
-	// .fg-versions is a reserved internal namespace. Detector-driven
+	// Filegate-owned namespaces are reserved. Detector-driven
 	// SyncAbsPath calls land here for any path the FS reports —
-	// including the version blobs we own. Without this guard, a
-	// freshly-written blob would get an entity record + child edge
-	// in the index, exposing it through the public path API. Same
-	// rationale as the rescan SkipDir.
-	if s.isPathInsideVersionsNamespace(absPath) {
+	// including internal blobs we own. Without this guard, a
+	// freshly-written blob would get an entity record + child edge in
+	// the index, exposing it through the public path API.
+	if s.isPathInsideReservedNamespace(absPath) {
 		return nil
 	}
 	if isFilegateInternalTempName(filepath.Base(absPath)) {
@@ -2607,13 +2731,14 @@ func (s *Service) syncSingle(absPath string) error {
 			existing.Inode == entity.Inode {
 			preserve := true
 			if existing.ETagMD5 != "" {
-				live, hashErr := s.hashLocalFile(absPath)
-				if hashErr != nil || live != existing.ETagMD5 {
+				live, hashErr := s.hashLocalFileHashes(absPath)
+				if hashErr != nil || live.MD5Hex != existing.ETagMD5 {
 					preserve = false
 				}
 			}
 			if preserve {
 				entity.ETagMD5 = existing.ETagMD5
+				entity.SHA256 = existing.SHA256
 				entity.MultipartETag = existing.MultipartETag
 				entity.ContentType = existing.ContentType
 				entity.ContentEncoding = existing.ContentEncoding
@@ -2654,8 +2779,8 @@ func (s *Service) syncSingle(absPath string) error {
 	return nil
 }
 
-// syncSingleAfterLocalWrite runs syncSingle, then persists the
-// caller-supplied md5Hex on the entity as ETagMD5 and clears all
+// syncSingleAfterLocalWrite runs syncSingle, then persists the caller-supplied
+// content hashes on the entity and clears all
 // S3-only metadata fields. Call this from REST/non-S3 write paths
 // immediately after writeFileAtomic so the entity row carries an ETag
 // and the S3-overwrite-clear-semantics from the plan are honoured.
@@ -2665,13 +2790,7 @@ func (s *Service) syncSingle(absPath string) error {
 // win (every local write produces an indexed ETag, and any prior
 // multipart_etag from an earlier S3 multipart upload is dropped — the
 // honest signal that the file changed via a non-S3 protocol).
-//
-// md5Hex must be the lowercase hex MD5 of the bytes that were just
-// written. Pass "" for directory writes or other paths where the
-// concept doesn't apply (the function then becomes a plain syncSingle
-// with the S3-field-clear still applied — useful when the file is
-// being recreated as a non-content event).
-func (s *Service) syncSingleAfterLocalWrite(absPath string, md5Hex string) error {
+func (s *Service) syncSingleAfterLocalWrite(absPath string, hashes ContentHashes) error {
 	if err := s.syncSingle(absPath); err != nil {
 		return err
 	}
@@ -2691,7 +2810,12 @@ func (s *Service) syncSingleAfterLocalWrite(absPath string, md5Hex string) error
 		}
 		return err
 	}
-	entity.ETagMD5 = md5Hex
+	if hashes.MD5Hex != "" {
+		entity.ETagMD5 = hashes.MD5Hex
+	}
+	if hashes.SHA256 != "" {
+		entity.SHA256 = hashes.SHA256
+	}
 	// REST/non-S3 overwrite semantics: clear all S3-only fields.
 	// See plan §7 rule 4. If a future S3 write wants to set them,
 	// it will use a different domain entry-point that preserves
@@ -2886,9 +3010,9 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 		return err
 	}
 	// Build a lookup of names that exist on disk. Symlinks are skipped to
-	// match Filegate's overall symlink-rejection policy. The reserved
-	// .fg-versions namespace is filtered at the mount root — the
-	// versioning subsystem owns it, public reconcile must not index it.
+	// match Filegate's overall symlink-rejection policy. Reserved
+	// Filegate namespaces are filtered at the mount root; public
+	// reconcile must not index them.
 	mountRoot := s.isMountRootAbsPath(parentAbsPath)
 	onDisk := make(map[string]struct{}, len(diskEntries))
 	for _, e := range diskEntries {
@@ -2898,7 +3022,7 @@ func (s *Service) ReconcileDirectory(parentAbsPath string) error {
 		if isFilegateInternalTempName(e.Name()) {
 			continue
 		}
-		if mountRoot && e.Name() == versionsDirName {
+		if mountRoot && isFilegateReservedName(e.Name()) {
 			continue
 		}
 		onDisk[e.Name()] = struct{}{}
@@ -3200,13 +3324,16 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 			if current == basePath {
 				return nil
 			}
-			// .fg-versions is a reserved internal namespace at the
-			// mount root. Exposing it through rescan would let users
-			// list/delete their own version blobs through the public
-			// path API and would index megabytes of binary data as
-			// regular files. SkipDir prunes the whole subtree.
-			if d.IsDir() && current == filepath.Join(basePath, versionsDirName) {
-				return filepath.SkipDir
+			// Filegate-owned namespaces are reserved at the mount root.
+			// Exposing them through rescan would let users list/delete
+			// internal blobs through the public path API. SkipDir
+			// prunes the whole subtree.
+			if d.IsDir() {
+				for _, name := range []string{versionsDirName, uploadsDirName} {
+					if current == filepath.Join(basePath, name) {
+						return filepath.SkipDir
+					}
+				}
 			}
 			if isFilegateInternalTempName(d.Name()) {
 				if d.IsDir() {
@@ -3260,11 +3387,12 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 				if prior != nil && prior.ETagMD5 != "" && prior.Size == info.Size() && prior.Mtime == info.ModTime().UnixMilli() {
 					preserveS3Metadata(&entity, prior)
 				} else {
-					md5Hex, hashErr := hashFileMD5(current, info)
+					hashes, hashErr := hashFileContent(current, info)
 					if hashErr != nil {
 						log.Printf("[filegate] rescan: hash failed for %s: %v", current, hashErr)
-					} else if md5Hex != "" {
-						entity.ETagMD5 = md5Hex
+					} else if hashes.MD5Hex != "" {
+						entity.ETagMD5 = hashes.MD5Hex
+						entity.SHA256 = hashes.SHA256
 					}
 					// Preserve S3-only fields if any prior row exists,
 					// even when we recomputed the ETag (the S3-set
@@ -3340,7 +3468,7 @@ func (s *Service) rescanWithScope(targetMounts map[string]struct{}) error {
 			isDir:    e.IsDir,
 		}
 		// Pre-compute the file's flat-key path NOW, while the entire
-		// stale subtree is still intact in the index. The chunked
+		// stale subtree is still intact in the index. The batched
 		// delete pass below may delete a parent before its child, in
 		// which case derivePath in DelEntity's auto-maintenance would
 		// fail to resolve. The explicit DelFlatKey call uses these

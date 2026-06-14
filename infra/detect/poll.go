@@ -12,10 +12,29 @@ import (
 	"time"
 )
 
+const (
+	filegateVersionsDirName = ".fg-versions"
+	filegateUploadsDirName  = ".fg-uploads"
+)
+
 type fileTrack struct {
 	size       int64
 	mtimeMS    int64
 	checkEvery uint8
+}
+
+func isFilegateReservedRoot(basePath, current string) bool {
+	if current == basePath {
+		return false
+	}
+	current = filepath.Clean(current)
+	for _, name := range []string{filegateVersionsDirName, filegateUploadsDirName} {
+		root := filepath.Join(basePath, name)
+		if current == root || strings.HasPrefix(current, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Poller detects filesystem changes by periodically scanning directories with readdir/lstat.
@@ -130,6 +149,9 @@ func (p *Poller) initialize() {
 		if err := filepath.WalkDir(basePath, func(current string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return nil
+			}
+			if d.IsDir() && isFilegateReservedRoot(basePath, current) {
+				return filepath.SkipDir
 			}
 			if d.Type()&os.ModeSymlink != 0 {
 				if d.IsDir() {
@@ -254,6 +276,10 @@ func (p *Poller) poll() []Event {
 }
 
 func (p *Poller) scanDirectory(absDir string) []Event {
+	if base := findBasePath(absDir, p.basePaths); base != "" && isFilegateReservedRoot(base, absDir) {
+		p.removeDirSubtree(absDir)
+		return nil
+	}
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
 		base := findBasePath(absDir, p.basePaths)
@@ -295,6 +321,13 @@ func (p *Poller) scanDirectory(absDir string) []Event {
 	for _, entry := range entries {
 		name := entry.Name()
 		absPath := filepath.Join(absDir, name)
+		if isFilegateReservedRoot(base, absPath) {
+			if entry.IsDir() {
+				p.removeDirSubtree(absPath)
+			}
+			delete(p.knownFiles, absPath)
+			continue
+		}
 		info, err := os.Lstat(absPath)
 		if err != nil {
 			continue
@@ -344,10 +377,17 @@ func (p *Poller) scanDirectory(absDir string) []Event {
 // descendant in the tracking maps, and returns Created events for
 // them. Caller must hold p.mu (poll/scanDirectory do).
 func (p *Poller) adoptSubtree(dirPath, base string) []Event {
+	if isFilegateReservedRoot(base, dirPath) {
+		p.removeDirSubtree(dirPath)
+		return nil
+	}
 	events := make([]Event, 0, 16)
 	_ = filepath.WalkDir(dirPath, func(current string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
+		}
+		if d.IsDir() && isFilegateReservedRoot(base, current) {
+			return filepath.SkipDir
 		}
 		if current == dirPath {
 			return nil

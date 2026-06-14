@@ -57,12 +57,12 @@ func allConfigFlagSpecs() []configFlagSpec {
 		{Name: "jobs-queue-size", Path: "jobs.queue_size", Kind: configFlagInt, Usage: "background job queue size"},
 		{Name: "jobs-thumbnail-workers", Path: "jobs.thumbnail_workers", Kind: configFlagInt, Usage: "thumbnail worker count"},
 		{Name: "jobs-thumbnail-queue-size", Path: "jobs.thumbnail_queue_size", Kind: configFlagInt, Usage: "thumbnail job queue size"},
-		{Name: "upload-expiry", Path: "upload.expiry", Kind: configFlagDuration, Usage: "chunked upload expiry"},
-		{Name: "upload-cleanup-interval", Path: "upload.cleanup_interval", Kind: configFlagDuration, Usage: "chunked upload cleanup interval"},
+		{Name: "upload-expiry", Path: "upload.expiry", Kind: configFlagDuration, Usage: "upload session expiry"},
+		{Name: "upload-cleanup-interval", Path: "upload.cleanup_interval", Kind: configFlagDuration, Usage: "upload session cleanup interval"},
 		{Name: "upload-max-chunk-bytes", Path: "upload.max_chunk_bytes", Kind: configFlagInt64, Usage: "maximum single chunk size in bytes"},
-		{Name: "upload-max-upload-bytes", Path: "upload.max_upload_bytes", Kind: configFlagInt64, Usage: "maximum non-chunked upload size in bytes"},
-		{Name: "upload-max-chunked-upload-bytes", Path: "upload.max_chunked_upload_bytes", Kind: configFlagInt64, Usage: "maximum chunked upload size in bytes"},
-		{Name: "upload-max-concurrent-chunk-writes", Path: "upload.max_concurrent_chunk_writes", Kind: configFlagInt, Usage: "maximum concurrent chunk writes"},
+		{Name: "upload-max-upload-bytes", Path: "upload.max_upload_bytes", Kind: configFlagInt64, Usage: "maximum one-shot upload size in bytes"},
+		{Name: "upload-max-session-upload-bytes", Path: "upload.max_session_upload_bytes", Kind: configFlagInt64, Usage: "maximum upload-session size in bytes"},
+		{Name: "upload-max-concurrent-segment-writes", Path: "upload.max_concurrent_segment_writes", Kind: configFlagInt, Usage: "maximum concurrent segment writes"},
 		{Name: "upload-min-free-bytes", Path: "upload.min_free_bytes", Kind: configFlagInt64, Usage: "minimum free bytes required before accepting uploads"},
 		{Name: "thumbnail-lru-cache-size", Path: "thumbnail.lru_cache_size", Kind: configFlagInt, Usage: "thumbnail LRU cache size"},
 		{Name: "thumbnail-max-source-bytes", Path: "thumbnail.max_source_bytes", Kind: configFlagInt64, Usage: "maximum source file size for thumbnails"},
@@ -192,10 +192,10 @@ func applyChangedConfigFlag(flags *pflag.FlagSet, spec configFlagSpec, cfg *doma
 		cfg.Upload.MaxChunkBytes = getFlagInt64(flags, spec.Name)
 	case "upload.max_upload_bytes":
 		cfg.Upload.MaxUploadBytes = getFlagInt64(flags, spec.Name)
-	case "upload.max_chunked_upload_bytes":
-		cfg.Upload.MaxChunkedUploadBytes = getFlagInt64(flags, spec.Name)
-	case "upload.max_concurrent_chunk_writes":
-		cfg.Upload.MaxConcurrentChunkWrites = getFlagInt(flags, spec.Name)
+	case "upload.max_session_upload_bytes":
+		cfg.Upload.MaxSessionUploadBytes = getFlagInt64(flags, spec.Name)
+	case "upload.max_concurrent_segment_writes":
+		cfg.Upload.MaxConcurrentSegmentWrites = getFlagInt(flags, spec.Name)
 	case "upload.min_free_bytes":
 		cfg.Upload.MinFreeBytes = getFlagInt64(flags, spec.Name)
 	case "thumbnail.lru_cache_size":
@@ -452,8 +452,8 @@ func validateResolvedConfig(cfg domain.Config) error {
 	default:
 		return fmt.Errorf("detection.backend must be one of: auto, poll, btrfs")
 	}
-	if cfg.Upload.MaxChunkedUploadBytes < cfg.Upload.MaxChunkBytes {
-		return fmt.Errorf("upload.max_chunked_upload_bytes must be >= upload.max_chunk_bytes")
+	if cfg.Upload.MaxSessionUploadBytes < cfg.Upload.MaxChunkBytes {
+		return fmt.Errorf("upload.max_session_upload_bytes must be >= upload.max_chunk_bytes")
 	}
 	versioningEnabled := strings.ToLower(strings.TrimSpace(cfg.Versioning.Enabled))
 	switch versioningEnabled {

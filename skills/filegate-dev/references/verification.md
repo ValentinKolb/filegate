@@ -88,7 +88,7 @@ make fuzz-smoke
 10 seconds per fuzz target × 4 targets. Required if your change touched:
 
 - `infra/fgbin/` (record codec)
-- `adapter/http/upload_chunked.go` (chunk hashing/writing)
+- `adapter/http/upload_sessions.go` (segment hashing/writing)
 - Anything else with explicit fuzz coverage
 
 If a target finds a new crasher, the input is saved under `testdata/fuzz/<FuncName>/` — commit it and fix the underlying bug.

@@ -91,3 +91,18 @@ For production, mount:
 - persistent logs (optional)
 
 and inject token/config through env vars or mounted config file.
+
+## Admin App
+
+The admin UI is shipped as a standalone SSR app in `admin/`, not as part of the
+Filegate REST binary. Run it next to Filegate and give it:
+
+- `FILEGATE_URL` — the REST API URL the admin server can reach
+- `FILEGATE_TOKEN` — the Filegate bearer token kept server-side
+- `ADMIN_TOKEN` — optional separate login token for browser users
+
+Uploads use Filegate upload sessions with direct session tokens, so large file
+and folder uploads go browser-to-Filegate after the admin app creates the
+sessions. If the browser reaches Filegate at a different URL than the admin
+server, set `server.public_url` in Filegate and configure CORS for the admin
+origin.
