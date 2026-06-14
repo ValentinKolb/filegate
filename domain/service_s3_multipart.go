@@ -414,8 +414,3 @@ func (s *Service) hashLocalFileHashes(absPath string) (ContentHashes, error) {
 		SHA256: "sha256:" + hex.EncodeToString(shaHash.Sum(nil)),
 	}, nil
 }
-
-func (s *Service) hashLocalFile(absPath string) (string, error) {
-	hashes, err := s.hashLocalFileHashes(absPath)
-	return hashes.MD5Hex, err
-}
