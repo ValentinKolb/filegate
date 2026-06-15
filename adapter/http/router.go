@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -217,6 +218,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 			},
 			Mounts: mounts,
 			Disks:  collectDiskUsage(stats.Mounts, svc),
+			System: collectSystemStats(),
 		})
 	})
 
@@ -904,6 +906,45 @@ func dirSizeBytes(root string) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+func collectSystemStats() apiv1.StatsSystem {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	return apiv1.StatsSystem{
+		Goroutines:     runtime.NumGoroutine(),
+		HeapAllocBytes: mem.HeapAlloc,
+		HeapSysBytes:   mem.HeapSys,
+		HeapObjects:    mem.HeapObjects,
+		NumGC:          mem.NumGC,
+		LastGCPauseNs:  lastGCPause(mem),
+		OpenFDs:        countOpenFDs(),
+		MaxFDs:         maxOpenFDs(),
+	}
+}
+
+func lastGCPause(mem runtime.MemStats) uint64 {
+	if mem.NumGC == 0 {
+		return 0
+	}
+	return mem.PauseNs[(mem.NumGC+255)%256]
+}
+
+func countOpenFDs() int {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return 0
+	}
+	return len(entries)
+}
+
+func maxOpenFDs() uint64 {
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim); err != nil {
+		return 0
+	}
+	return lim.Cur
 }
 
 type mountInfo struct {

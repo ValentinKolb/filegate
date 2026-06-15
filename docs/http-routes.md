@@ -62,7 +62,7 @@ mkdir). For directory replacement use `POST /v1/transfers` with `overwrite`.
 - `GET /health`
   - Returns `200 OK` + `OK`
 - `GET /v1/stats`
-  - Runtime stats for index/cache/mounts/disks
+  - Runtime stats for index/cache/mounts/disks and process-local system state
 - `GET /v1/capabilities`
   - Runtime capability limits for adaptive clients
   - Upload fields include `maxChunkBytes`, `maxUploadBytes`,

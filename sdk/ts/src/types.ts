@@ -96,12 +96,24 @@ export interface StatsDisk {
   roots: string[];
 }
 
+export interface StatsSystem {
+  goroutines: number;
+  heapAllocBytes: number;
+  heapSysBytes: number;
+  heapObjects: number;
+  numGC: number;
+  lastGCPauseNs: number;
+  openFDs: number;
+  maxFDs: number;
+}
+
 export interface StatsResponse {
   generatedAt: number;
   index: StatsIndex;
   cache: StatsCache;
   mounts: StatsMount[];
   disks: StatsDisk[];
+  system: StatsSystem;
 }
 
 // --- Activity ---

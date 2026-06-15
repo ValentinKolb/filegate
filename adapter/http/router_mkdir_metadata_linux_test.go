@@ -207,6 +207,20 @@ func TestStatsEndpointReturnsIndexCacheAndMounts(t *testing.T) {
 	if !ok || len(roots) == 0 {
 		t.Fatalf("disk roots missing: %#v", firstDisk["roots"])
 	}
+
+	systemPart, ok := body["system"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing system block")
+	}
+	if got, _ := systemPart["goroutines"].(float64); got <= 0 {
+		t.Fatalf("missing goroutine count: %#v", systemPart)
+	}
+	if got, _ := systemPart["heapSysBytes"].(float64); got <= 0 {
+		t.Fatalf("missing heap sys bytes: %#v", systemPart)
+	}
+	if systemPart["openFDs"] == nil || systemPart["maxFDs"] == nil {
+		t.Fatalf("missing fd counters: %#v", systemPart)
+	}
 }
 
 func TestCapabilitiesEndpointReturnsUploadLimits(t *testing.T) {

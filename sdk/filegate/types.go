@@ -12,6 +12,7 @@ type StatsIndex = apiv1.StatsIndex
 type StatsCache = apiv1.StatsCache
 type StatsMount = apiv1.StatsMount
 type StatsDisk = apiv1.StatsDisk
+type StatsSystem = apiv1.StatsSystem
 type StatsResponse = apiv1.StatsResponse
 type ActivityActor = apiv1.ActivityActor
 type ActivityTarget = apiv1.ActivityTarget

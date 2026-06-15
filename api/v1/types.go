@@ -93,6 +93,18 @@ type StatsDisk struct {
 	Roots    []string `json:"roots"`
 }
 
+// StatsSystem contains process-local runtime statistics.
+type StatsSystem struct {
+	Goroutines     int    `json:"goroutines"`
+	HeapAllocBytes uint64 `json:"heapAllocBytes"`
+	HeapSysBytes   uint64 `json:"heapSysBytes"`
+	HeapObjects    uint64 `json:"heapObjects"`
+	NumGC          uint32 `json:"numGC"`
+	LastGCPauseNs  uint64 `json:"lastGCPauseNs"`
+	OpenFDs        int    `json:"openFDs"`
+	MaxFDs         uint64 `json:"maxFDs"`
+}
+
 // StatsResponse is the complete runtime statistics snapshot.
 type StatsResponse struct {
 	GeneratedAt int64        `json:"generatedAt"`
@@ -100,6 +112,7 @@ type StatsResponse struct {
 	Cache       StatsCache   `json:"cache"`
 	Mounts      []StatsMount `json:"mounts"`
 	Disks       []StatsDisk  `json:"disks"`
+	System      StatsSystem  `json:"system"`
 }
 
 type ActivityActor struct {

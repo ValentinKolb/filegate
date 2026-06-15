@@ -37,6 +37,7 @@ const emptyStats: StatsResponse = {
   cache: { pathEntries: 0, pathCapacity: 0, pathUtilRatio: 0 },
   mounts: [],
   disks: [],
+  system: { goroutines: 0, heapAllocBytes: 0, heapSysBytes: 0, heapObjects: 0, numGC: 0, lastGCPauseNs: 0, openFDs: 0, maxFDs: 0 },
 };
 
 export const app = new Hono()

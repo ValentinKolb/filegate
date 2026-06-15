@@ -79,6 +79,7 @@ export type {
   StatsIndex,
   StatsMount,
   StatsResponse,
+  StatsSystem,
   TransferRequest,
   TransferResponse,
   UploadSegmentResponse,

@@ -1,4 +1,5 @@
 import type { ActivityEvent, ActivityListResponse, StatsResponse } from "@valentinkolb/filegate";
+import { charts } from "@valentinkolb/stdlib";
 import { Layout } from "../components/Layout";
 import { env } from "../lib/env";
 import { formatBytes, formatUnix } from "../lib/format";
@@ -15,79 +16,213 @@ export function System(props: {
   const cfg = env();
   const totalPages = Math.max(1, Math.ceil((props.activity?.total ?? 0) / props.activityQuery.pageSize));
   const page = Math.min(props.activityQuery.page, totalPages);
-  const sections = [
-    {
-      title: "Admin app",
-      rows: [
-        ["filegate_url", cfg.filegateUrl],
-        ["admin_token", "configured; secret redacted"],
-        ["session_secret", "configured; secret redacted"],
-      ],
-    },
-    {
-      title: "Filegate index",
-      rows: [
-        ["generated_at", formatUnix(props.stats.generatedAt)],
-        ["db_size", formatBytes(props.stats.index.dbSizeBytes)],
-        ["entities", String(props.stats.index.totalEntities)],
-      ],
-    },
-    {
-      title: "Cache",
-      rows: [
-        ["path_entries", String(props.stats.cache.pathEntries)],
-        ["path_capacity", String(props.stats.cache.pathCapacity)],
-        ["path_usage", `${Math.round(props.stats.cache.pathUtilRatio * 100)}%`],
-      ],
-    },
-  ];
+  const system = props.stats.system ?? emptySystemStats();
+  const heapUsage = ratio(system.heapAllocBytes, system.heapSysBytes);
+  const fdUsage = ratio(system.openFDs, system.maxFDs);
+  const storageUsed = props.stats.disks.reduce((sum, disk) => sum + disk.used, 0);
+  const storageSize = props.stats.disks.reduce((sum, disk) => sum + disk.size, 0);
+  const storageUsage = ratio(storageUsed, storageSize);
   return (
     <Layout
       active="system"
       title="System"
-      description="Read-only admin app configuration and Filegate runtime state."
+      description="Runtime health, index state, storage pressure, and recent activity."
       mounts={props.stats.mounts.length}
       error={props.error}
       notice={props.notice}
     >
-      <section class="grid">
-        <div class="config-grid">
-          {sections.map((section) => (
-            <section class="panel">
-              <div class="panel-head">
-                <h2>{section.title}</h2>
-              </div>
-              <div class="panel-body">
-                <dl class="cfg">
-                  {section.rows.map(([key, value]) => (
-                    <div class="cfg-row">
-                      <dt>{key}</dt>
-                      <dd class="mono">{value || "-"}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </div>
-            </section>
-          ))}
+      <section class="summary observability-summary">
+        <div>
+          <div class="label">Heap usage</div>
+          <div class="metric">{formatPercent(heapUsage)}</div>
+          <div class="label">{formatBytes(system.heapAllocBytes)} allocated</div>
         </div>
-        <aside class="panel">
+        <div>
+          <div class="label">Open file descriptors</div>
+          <div class="metric">{system.openFDs || "-"}</div>
+          <div class="label">{system.maxFDs ? `${formatPercent(fdUsage)} of limit` : "limit unavailable"}</div>
+        </div>
+        <div>
+          <div class="label">Index entities</div>
+          <div class="metric">{formatCount(props.stats.index.totalEntities)}</div>
+          <div class="label">
+            {formatCount(props.stats.index.totalFiles)} files · {formatCount(props.stats.index.totalDirs)} dirs
+          </div>
+        </div>
+        <div>
+          <div class="label">Storage used</div>
+          <div class="metric">{formatPercent(storageUsage)}</div>
+          <div class="label">
+            {formatBytes(storageUsed)} / {formatBytes(storageSize)}
+          </div>
+        </div>
+        <div>
+          <div class="label">Path cache</div>
+          <div class="metric">{formatPercent(props.stats.cache.pathUtilRatio)}</div>
+          <div class="label">
+            {formatCount(props.stats.cache.pathEntries)} / {formatCount(props.stats.cache.pathCapacity)}
+          </div>
+        </div>
+      </section>
+
+      <section class="metrics-grid">
+        <section class="panel">
           <div class="panel-head">
-            <h2>Mounts</h2>
+            <div>
+              <h2>Runtime pressure</h2>
+              <p>Memory and garbage collection state for the running Filegate process.</p>
+            </div>
           </div>
           <div class="panel-body">
+            <Chart svg={charts.gauge({ width: 300, height: 180, value: heapUsage * 100, min: 0, max: 100, label: "Heap allocated", unit: "%", format: formatChartNumber, thresholds: pressureThresholds(), showNeedle: true })} />
             <dl class="cfg">
-              {props.stats.mounts.map((mount) => (
-                <div class="cfg-row">
-                  <dt>{mount.name}</dt>
-                  <dd>
-                    {mount.files} files · {mount.dirs} dirs
-                  </dd>
-                </div>
+              <MetricRow label="goroutines" value={formatCount(system.goroutines)} />
+              <MetricRow label="heap_alloc" value={formatBytes(system.heapAllocBytes)} />
+              <MetricRow label="heap_sys" value={formatBytes(system.heapSysBytes)} />
+              <MetricRow label="heap_objects" value={formatCount(system.heapObjects)} />
+              <MetricRow label="gc_runs" value={formatCount(system.numGC)} />
+              <MetricRow label="last_gc_pause" value={formatNanoseconds(system.lastGCPauseNs)} />
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Process limits</h2>
+              <p>Descriptor headroom for concurrent uploads, downloads, and index work.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <Chart svg={charts.gauge({ width: 300, height: 180, value: fdUsage * 100, min: 0, max: 100, label: "FD usage", unit: "%", format: formatChartNumber, thresholds: pressureThresholds(), showNeedle: true })} />
+            <dl class="cfg">
+              <MetricRow label="open_fds" value={formatCount(system.openFDs)} />
+              <MetricRow label="fd_limit" value={system.maxFDs ? formatCount(system.maxFDs) : "-"} />
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Storage pressure</h2>
+              <p>Used space by backing filesystem. High values can block uploads and snapshots.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <Chart
+              svg={charts.barGauge({
+                width: 520,
+                data: props.stats.disks.map((disk) => ({ label: disk.diskName || "disk", value: ratio(disk.used, disk.size) * 100, min: 0, max: 100, unit: "%" })),
+                format: formatChartNumber,
+                thresholds: pressureThresholds(),
+              })}
+            />
+            <dl class="cfg">
+              {props.stats.disks.map((disk) => (
+                <MetricRow
+                  label={disk.diskName || "disk"}
+                  value={`${formatBytes(disk.used)} / ${formatBytes(disk.size)} · ${disk.fsType || "fs unknown"}`}
+                />
               ))}
             </dl>
           </div>
-        </aside>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Index shape</h2>
+              <p>Indexed files, directories, and Pebble database footprint.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <Chart
+              svg={charts.donut({
+                width: 360,
+                height: 220,
+                data: [
+                  { label: "Files", value: props.stats.index.totalFiles },
+                  { label: "Dirs", value: props.stats.index.totalDirs },
+                ],
+                legend: true,
+              })}
+            />
+            <dl class="cfg">
+              <MetricRow label="generated_at" value={formatUnix(props.stats.generatedAt)} mono />
+              <MetricRow label="entities" value={formatCount(props.stats.index.totalEntities)} />
+              <MetricRow label="files" value={formatCount(props.stats.index.totalFiles)} />
+              <MetricRow label="dirs" value={formatCount(props.stats.index.totalDirs)} />
+              <MetricRow label="db_size" value={formatBytes(props.stats.index.dbSizeBytes)} />
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Cache pressure</h2>
+              <p>Path cache occupancy. Sustained high usage points to an undersized cache.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <Chart
+              svg={charts.barGauge({
+                width: 520,
+                data: [{ label: "Path cache", value: props.stats.cache.pathUtilRatio * 100, min: 0, max: 100, unit: "%" }],
+                format: formatChartNumber,
+                thresholds: pressureThresholds(),
+              })}
+            />
+            <dl class="cfg">
+              <MetricRow label="path_entries" value={formatCount(props.stats.cache.pathEntries)} />
+              <MetricRow label="path_capacity" value={formatCount(props.stats.cache.pathCapacity)} />
+              <MetricRow label="path_usage" value={formatPercent(props.stats.cache.pathUtilRatio)} />
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Mount distribution</h2>
+              <p>Indexed entity distribution across configured mount roots.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <Chart
+              svg={charts.donut({
+                width: 360,
+                height: 220,
+                data: props.stats.mounts.map((mount) => ({ label: mount.name, value: mount.files + mount.dirs })),
+                legend: true,
+              })}
+            />
+            <dl class="cfg">
+              {props.stats.mounts.map((mount) => (
+                <MetricRow label={mount.name} value={`${formatCount(mount.files)} files · ${formatCount(mount.dirs)} dirs · ${mount.path}`} />
+              ))}
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Admin app</h2>
+              <p>Connection settings used by this SSR admin process.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <dl class="cfg">
+              <MetricRow label="filegate_url" value={cfg.filegateUrl} mono />
+              <MetricRow label="admin_token" value="configured; secret redacted" />
+              <MetricRow label="session_secret" value="configured; secret redacted" />
+            </dl>
+          </div>
+        </section>
       </section>
+
       <section id="activity" class="panel activity-panel">
         <div class="panel-head">
           <div>
@@ -176,6 +311,23 @@ export function System(props: {
   );
 }
 
+function Chart(props: { svg: string }) {
+  return <div class="metric-chart" innerHTML={props.svg} />;
+}
+
+function MetricRow(props: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div class="cfg-row">
+      <dt>{props.label}</dt>
+      <dd class={props.mono ? "mono" : undefined}>{props.value || "-"}</dd>
+    </div>
+  );
+}
+
+function emptySystemStats() {
+  return { goroutines: 0, heapAllocBytes: 0, heapSysBytes: 0, heapObjects: 0, numGC: 0, lastGCPauseNs: 0, openFDs: 0, maxFDs: 0 };
+}
+
 function actorName(event: ActivityEvent): string {
   return event.actor.delegatedActor || event.actor.label || event.actor.id || event.actor.kind;
 }
@@ -187,6 +339,40 @@ function targetName(event: ActivityEvent): string {
 function formatDuration(value?: number): string {
   if (!value) return "-";
   return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)} s`;
+}
+
+function ratio(value: number, total: number): number {
+  if (!Number.isFinite(value) || !Number.isFinite(total) || total <= 0) return 0;
+  return Math.max(0, Math.min(1, value / total));
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatCount(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  return new Intl.NumberFormat("en").format(value);
+}
+
+function formatChartNumber(value: number): string {
+  return String(Math.round(value));
+}
+
+function formatNanoseconds(value: number): string {
+  if (!value) return "-";
+  if (value < 1_000_000) return `${Math.round(value / 1_000)} us`;
+  if (value < 1_000_000_000) return `${(value / 1_000_000).toFixed(1)} ms`;
+  return `${(value / 1_000_000_000).toFixed(2)} s`;
+}
+
+function pressureThresholds() {
+  return [
+    { value: 70, color: "#037f0c" },
+    { value: 90, color: "#b35c00" },
+    { value: 100, color: "#d13212" },
+  ];
 }
 
 function activitySummary(activity: ActivityListResponse | undefined, query: ActivityQuery): string {
