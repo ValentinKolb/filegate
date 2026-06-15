@@ -62,7 +62,7 @@ export function Layout(props: LayoutProps) {
               <div class="desc">{props.description}</div>
             </div>
             {props.active === "system" && (
-              <form method="post" action="/system/rescan">
+              <form method="post" action="/system/rescan" data-confirm-rescan>
                 <button class="btn primary">Rescan index</button>
               </form>
             )}
@@ -70,6 +70,7 @@ export function Layout(props: LayoutProps) {
           {props.children}
         </main>
       </div>
+      <script src="/prompts.js" defer />
     </>
   );
 }

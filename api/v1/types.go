@@ -102,6 +102,42 @@ type StatsResponse struct {
 	Disks       []StatsDisk  `json:"disks"`
 }
 
+type ActivityActor struct {
+	Kind           string `json:"kind"`
+	ID             string `json:"id"`
+	Label          string `json:"label,omitempty"`
+	DelegatedActor string `json:"delegatedActor,omitempty"`
+}
+
+type ActivityTarget struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id,omitempty"`
+	Path string `json:"path,omitempty"`
+}
+
+type ActivityEvent struct {
+	ID         string          `json:"id"`
+	At         int64           `json:"at"`
+	Actor      ActivityActor   `json:"actor"`
+	Operation  string          `json:"operation"`
+	Outcome    string          `json:"outcome"`
+	Target     *ActivityTarget `json:"target,omitempty"`
+	DurationMS int64           `json:"durationMs,omitempty"`
+	RequestID  string          `json:"requestId,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	Meta       map[string]any  `json:"meta,omitempty"`
+}
+
+type ActivityListResponse struct {
+	Items      []ActivityEvent `json:"items"`
+	Total      int             `json:"total"`
+	Offset     int             `json:"offset"`
+	Limit      int             `json:"limit"`
+	Retained   int             `json:"retained"`
+	Capacity   int             `json:"capacity"`
+	Operations []string        `json:"operations"`
+}
+
 // CapabilitiesResponse describes server-enforced limits clients can use to
 // choose request sizes without guessing from defaults.
 type CapabilitiesResponse struct {

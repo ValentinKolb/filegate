@@ -150,6 +150,7 @@ Special host handling:
 --metrics-enabled
 --metrics-path
 --metrics-token
+--activity-ring-buffer-size
 ```
 
 List fields use repeatable flags:

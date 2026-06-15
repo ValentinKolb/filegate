@@ -8,7 +8,7 @@ await Bun.build({
 });
 
 await Bun.build({
-  entrypoints: ["src/uploads.ts"],
+  entrypoints: ["src/uploads.ts", "src/prompts.ts"],
   outdir: "dist",
   target: "browser",
 });

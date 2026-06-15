@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 
 	apiv1 "github.com/valentinkolb/filegate/api/v1"
 	"github.com/valentinkolb/filegate/domain"
+	"github.com/valentinkolb/filegate/infra/activity"
 	"github.com/valentinkolb/filegate/infra/jobs"
 )
 
@@ -66,6 +68,7 @@ type RouterOptions struct {
 	MetricsHandler http.Handler
 	MetricsPath    string
 	MetricsToken   string
+	ActivityLog    *activity.Ring
 }
 
 type closeableHandler struct {
@@ -77,6 +80,11 @@ type closeableHandler struct {
 type middlewareFunc func(http.Handler) http.Handler
 
 type requestIDKey struct{}
+type activityActorKey struct{}
+
+type activityActorHolder struct {
+	actor activity.Actor
+}
 
 var reqIDCounter uint64
 
@@ -210,6 +218,27 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 			Mounts: mounts,
 			Disks:  collectDiskUsage(stats.Mounts, svc),
 		})
+	})
+
+	handleV1("GET /v1/activity", func(w http.ResponseWriter, r *http.Request) {
+		limit := parseIntDefault(r.URL.Query().Get("limit"), 100)
+		if limit < 0 {
+			limit = 0
+		}
+		if limit > 1000 {
+			limit = 1000
+		}
+		offset := parseIntDefault(r.URL.Query().Get("offset"), 0)
+		if offset < 0 {
+			offset = 0
+		}
+		writeJSON(w, http.StatusOK, activityListResponse(opts.ActivityLog, activityListQuery{
+			limit:     limit,
+			offset:    offset,
+			q:         r.URL.Query().Get("q"),
+			operation: r.URL.Query().Get("operation"),
+			outcome:   r.URL.Query().Get("outcome"),
+		}))
 	})
 
 	handleV1("GET /v1/capabilities", func(w http.ResponseWriter, _ *http.Request) {
@@ -596,7 +625,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, apiv1.IndexResolveManyResponse{Items: items, Total: len(items)})
 	})
-	chain := []middlewareFunc{recoverMiddleware, requestIDMiddleware}
+	chain := []middlewareFunc{recoverMiddleware, requestIDMiddleware, activityMiddleware(opts.ActivityLog)}
 	if realIP := realIPMiddleware(opts.TrustedProxies); realIP != nil {
 		chain = append(chain, realIP)
 	}
@@ -1278,6 +1307,300 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func requestID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if id, ok := r.Context().Value(requestIDKey{}).(string); ok {
+		return id
+	}
+	return ""
+}
+
+func setActivityActor(r *http.Request, actor activity.Actor) {
+	if r == nil {
+		return
+	}
+	holder, _ := r.Context().Value(activityActorKey{}).(*activityActorHolder)
+	if holder == nil {
+		return
+	}
+	holder.actor = actor
+}
+
+func activityMiddleware(log *activity.Ring) middlewareFunc {
+	return func(next http.Handler) http.Handler {
+		if log == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			holder := &activityActorHolder{}
+			ctx := context.WithValue(r.Context(), activityActorKey{}, holder)
+			req := r.WithContext(ctx)
+			start := time.Now()
+			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+
+			next.ServeHTTP(sw, req)
+
+			spec, ok := activitySpecForRequest(req)
+			if !ok {
+				return
+			}
+			actor := holder.actor
+			if actor.Kind == "" {
+				actor = signedURLActor(req)
+			}
+			if actor.Kind == "" {
+				return
+			}
+			log.Record(activity.Event{
+				Actor:      actor,
+				Operation:  spec.operation,
+				Outcome:    outcomeForStatus(sw.status),
+				Target:     spec.target,
+				DurationMS: time.Since(start).Milliseconds(),
+				RequestID:  requestID(req),
+				Error:      errorForStatus(sw.status),
+			})
+		})
+	}
+}
+
+type activityRequestSpec struct {
+	operation string
+	target    *activity.Target
+}
+
+func activitySpecForRequest(r *http.Request) (activityRequestSpec, bool) {
+	path := strings.TrimRight(r.URL.Path, "/")
+	if path == "" {
+		path = "/"
+	}
+	if path == "/v1/activity" || !strings.HasPrefix(path, "/v1/") {
+		return activityRequestSpec{}, false
+	}
+	if strings.Contains(path, "/segments/") {
+		return activityRequestSpec{}, false
+	}
+	switch {
+	case strings.HasPrefix(path, "/v1/downloads/direct/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		return activityRequestSpec{operation: "direct_download.get", target: &activity.Target{Kind: "signed_url"}}, true
+	case strings.HasPrefix(path, "/v1/uploads/direct/") && r.Method == http.MethodPut:
+		return activityRequestSpec{operation: "direct_upload.put", target: &activity.Target{Kind: "signed_url"}}, true
+	case strings.HasSuffix(path, "/commit") && strings.HasPrefix(path, "/v1/uploads/sessions/") && r.Method == http.MethodPost:
+		return activityRequestSpec{operation: "upload_session.commit", target: &activity.Target{Kind: "upload_session", ID: uploadSessionIDFromPath(path)}}, true
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return activityRequestSpec{}, false
+	}
+	return activityRequestSpec{operation: restOperationName(r.Method, path), target: restTarget(path)}, true
+}
+
+func restOperationName(method, path string) string {
+	switch {
+	case method == http.MethodPost && path == "/v1/index/rescan":
+		return "index.rescan"
+	case method == http.MethodPost && path == "/v1/uploads/direct":
+		return "direct_upload.create_url"
+	case method == http.MethodPost && path == "/v1/downloads/direct":
+		return "direct_download.create_url"
+	case method == http.MethodPost && path == "/v1/uploads/sessions":
+		return "upload_session.create"
+	case method == http.MethodPost && path == "/v1/uploads/sessions:batch":
+		return "upload_session.create_batch"
+	case method == http.MethodPost && path == "/v1/transfers":
+		return "transfer.create"
+	case strings.HasPrefix(path, "/v1/nodes/") && strings.HasSuffix(path, "/mkdir"):
+		return "node.mkdir"
+	case strings.HasPrefix(path, "/v1/nodes/") && method == http.MethodPatch:
+		return "node.update"
+	case strings.HasPrefix(path, "/v1/nodes/") && method == http.MethodDelete:
+		return "node.delete"
+	case strings.HasPrefix(path, "/v1/paths/") && method == http.MethodPut:
+		return "path.put"
+	default:
+		return strings.ToLower(method) + " " + path
+	}
+}
+
+func restTarget(path string) *activity.Target {
+	switch {
+	case strings.HasPrefix(path, "/v1/nodes/"):
+		parts := strings.Split(strings.TrimPrefix(path, "/v1/nodes/"), "/")
+		if parts[0] != "" {
+			return &activity.Target{Kind: "node", ID: parts[0]}
+		}
+	case strings.HasPrefix(path, "/v1/paths/"):
+		return &activity.Target{Kind: "path", Path: strings.TrimPrefix(path, "/v1/paths/")}
+	case path == "/v1/index/rescan":
+		return &activity.Target{Kind: "index"}
+	}
+	return nil
+}
+
+func uploadSessionIDFromPath(path string) string {
+	rest := strings.TrimPrefix(path, "/v1/uploads/sessions/")
+	id, _, _ := strings.Cut(rest, "/")
+	return id
+}
+
+func signedURLActor(r *http.Request) activity.Actor {
+	token := ""
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/v1/uploads/direct/"), strings.HasPrefix(r.URL.Path, "/v1/downloads/direct/"):
+		token = path.Base(r.URL.Path)
+	case strings.HasPrefix(r.URL.Path, "/v1/uploads/sessions/"):
+		token = strings.TrimSpace(r.Header.Get("Filegate-Upload-Session"))
+		if token == "" {
+			token = strings.TrimSpace(r.URL.Query().Get("upload_token"))
+		}
+	}
+	if token == "" {
+		return activity.Actor{}
+	}
+	return activity.Actor{
+		Kind:           activity.ActorSignedURL,
+		ID:             activity.CredentialID("signed", token),
+		DelegatedActor: activity.CleanActorLabel(r.Header.Get("X-Filegate-Actor")),
+	}
+}
+
+func outcomeForStatus(status int) activity.Outcome {
+	if status >= 200 && status < 400 {
+		return activity.OutcomeSucceeded
+	}
+	return activity.OutcomeFailed
+}
+
+func errorForStatus(status int) string {
+	if status >= 400 {
+		return http.StatusText(status)
+	}
+	return ""
+}
+
+type activityListQuery struct {
+	limit     int
+	offset    int
+	q         string
+	operation string
+	outcome   string
+}
+
+func activityListResponse(log *activity.Ring, query activityListQuery) apiv1.ActivityListResponse {
+	events := log.Snapshot(0)
+	operations := activityOperations(events)
+	filtered := make([]activity.Event, 0, len(events))
+	for _, event := range events {
+		if activityMatches(event, query) {
+			filtered = append(filtered, event)
+		}
+	}
+
+	total := len(filtered)
+	limit := query.limit
+	if limit <= 0 || limit > total {
+		limit = total
+	}
+	start := query.offset
+	if start > total {
+		start = total
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+
+	page := filtered[start:end]
+	items := make([]apiv1.ActivityEvent, 0, len(page))
+	for _, event := range page {
+		items = append(items, activityEventResponse(event))
+	}
+	return apiv1.ActivityListResponse{
+		Items:      items,
+		Total:      total,
+		Offset:     start,
+		Limit:      limit,
+		Retained:   log.Len(),
+		Capacity:   log.Capacity(),
+		Operations: operations,
+	}
+}
+
+func activityEventResponse(event activity.Event) apiv1.ActivityEvent {
+	return apiv1.ActivityEvent{
+		ID: event.ID,
+		At: event.At.UnixMilli(),
+		Actor: apiv1.ActivityActor{
+			Kind:           string(event.Actor.Kind),
+			ID:             event.Actor.ID,
+			Label:          event.Actor.Label,
+			DelegatedActor: event.Actor.DelegatedActor,
+		},
+		Operation:  event.Operation,
+		Outcome:    string(event.Outcome),
+		Target:     activityTargetResponse(event.Target),
+		DurationMS: event.DurationMS,
+		RequestID:  event.RequestID,
+		Error:      event.Error,
+		Meta:       event.Meta,
+	}
+}
+
+func activityOperations(events []activity.Event) []string {
+	seen := make(map[string]struct{})
+	for _, event := range events {
+		if event.Operation != "" {
+			seen[event.Operation] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for op := range seen {
+		out = append(out, op)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func activityMatches(event activity.Event, query activityListQuery) bool {
+	if query.operation != "" && event.Operation != query.operation {
+		return false
+	}
+	if query.outcome != "" && string(event.Outcome) != query.outcome {
+		return false
+	}
+	q := strings.ToLower(strings.TrimSpace(query.q))
+	if q == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.Join(activitySearchFields(event), "\x00")), q)
+}
+
+func activitySearchFields(event activity.Event) []string {
+	fields := []string{
+		event.ID,
+		event.Operation,
+		string(event.Outcome),
+		event.Actor.ID,
+		string(event.Actor.Kind),
+		event.Actor.Label,
+		event.Actor.DelegatedActor,
+		event.RequestID,
+		event.Error,
+	}
+	if event.Target != nil {
+		fields = append(fields, event.Target.Kind, event.Target.ID, event.Target.Path)
+	}
+	return fields
+}
+
+func activityTargetResponse(target *activity.Target) *apiv1.ActivityTarget {
+	if target == nil {
+		return nil
+	}
+	return &apiv1.ActivityTarget{Kind: target.Kind, ID: target.ID, Path: target.Path}
+}
+
 // ParseTrustedProxies converts the configured server.trusted_proxies
 // entries (bare IPs or CIDRs) into prefixes. Returns an error on the
 // first malformed entry so startup fails loudly instead of silently
@@ -1506,6 +1829,11 @@ func authMiddleware(token string) func(http.Handler) http.Handler {
 				writeErr(w, http.StatusUnauthorized, "invalid bearer token")
 				return
 			}
+			setActivityActor(r, activity.Actor{
+				Kind:           activity.ActorBearer,
+				ID:             activity.CredentialID("bearer", token),
+				DelegatedActor: activity.CleanActorLabel(r.Header.Get("X-Filegate-Actor")),
+			})
 			next.ServeHTTP(w, r)
 		})
 	}

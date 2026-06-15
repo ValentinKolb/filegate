@@ -1,4 +1,5 @@
 export { Filegate, filegate, type FilegateConfig } from "./client.js";
+export { ActivityClient, type ActivityListConfig } from "./activity.js";
 export { CapabilitiesClient } from "./capabilities.js";
 export { DownloadsClient } from "./downloads.js";
 export { FilegateError } from "./errors.js";
@@ -50,6 +51,10 @@ export type { FileConflictMode, FingerprintMode, MkdirConflictMode, UploadSessio
 //   import { uploads } from "@valentinkolb/filegate/utils";
 
 export type {
+  ActivityActor,
+  ActivityEvent,
+  ActivityListResponse,
+  ActivityTarget,
   DirectUploadURLRequest,
   DirectUploadURLResponse,
   DirectDownloadURLRequest,

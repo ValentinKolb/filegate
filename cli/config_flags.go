@@ -89,6 +89,7 @@ func allConfigFlagSpecs() []configFlagSpec {
 		{Name: "metrics-enabled", Path: "metrics.enabled", Kind: configFlagBool, Usage: "enable Prometheus metrics endpoint"},
 		{Name: "metrics-path", Path: "metrics.path", Kind: configFlagString, Usage: "Prometheus metrics path"},
 		{Name: "metrics-token", Path: "metrics.token", Kind: configFlagString, Usage: "optional Prometheus metrics bearer token"},
+		{Name: "activity-ring-buffer-size", Path: "activity.ring_buffer_size", Kind: configFlagInt, Usage: "number of recent activity events kept in memory"},
 	}
 }
 
@@ -256,6 +257,8 @@ func applyChangedConfigFlag(flags *pflag.FlagSet, spec configFlagSpec, cfg *doma
 		cfg.Metrics.Path = getFlagString(flags, spec.Name)
 	case "metrics.token":
 		cfg.Metrics.Token = getFlagString(flags, spec.Name)
+	case "activity.ring_buffer_size":
+		cfg.Activity.RingBufferSize = getFlagInt(flags, spec.Name)
 	default:
 		return fmt.Errorf("unhandled config flag path %q", spec.Path)
 	}

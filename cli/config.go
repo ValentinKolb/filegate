@@ -93,6 +93,7 @@ func loadConfig(configFile string) (domain.Config, error) {
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.path", "/metrics")
 	v.SetDefault("metrics.token", "")
+	v.SetDefault("activity.ring_buffer_size", 500)
 
 	configFile = strings.TrimSpace(configFile)
 	if configFile == "" {
@@ -234,6 +235,12 @@ func loadConfig(configFile string) (domain.Config, error) {
 	}
 	if cfg.Upload.MinFreeBytes < 0 {
 		cfg.Upload.MinFreeBytes = 0
+	}
+	if cfg.Activity.RingBufferSize < 0 {
+		return cfg, fmt.Errorf("activity.ring_buffer_size must be >= 0")
+	}
+	if cfg.Activity.RingBufferSize == 0 {
+		cfg.Activity.RingBufferSize = 500
 	}
 	if cfg.S3.MaxConcurrentWrites <= 0 {
 		cfg.S3.MaxConcurrentWrites = defaultChunkWriteConcurrency()

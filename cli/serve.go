@@ -18,6 +18,7 @@ import (
 	httpadapter "github.com/valentinkolb/filegate/adapter/http"
 	s3adapter "github.com/valentinkolb/filegate/adapter/s3"
 	"github.com/valentinkolb/filegate/domain"
+	"github.com/valentinkolb/filegate/infra/activity"
 	"github.com/valentinkolb/filegate/infra/detect"
 	"github.com/valentinkolb/filegate/infra/eventbus"
 	"github.com/valentinkolb/filegate/infra/filesystem"
@@ -118,6 +119,7 @@ func newDaemonServeCmd() *cobra.Command {
 				metrics.BuildInfo{Version: buildVersion, Commit: buildCommit},
 				metricsStatsProvider{svc: svc, indexPath: cfg.Storage.IndexPath},
 			)
+			activityLog := activity.NewRing(cfg.Activity.RingBufferSize)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -183,6 +185,7 @@ func newDaemonServeCmd() *cobra.Command {
 				MetricsHandler:             metricsRESTHandler(cfg, metricsReg),
 				MetricsPath:                cfg.Metrics.Path,
 				MetricsToken:               cfg.Metrics.Token,
+				ActivityLog:                activityLog,
 			})
 			var routerCloser interface{ Close() error }
 			if closer, ok := router.(interface{ Close() error }); ok {
@@ -239,6 +242,7 @@ func newDaemonServeCmd() *cobra.Command {
 					AccessLogEnabled:    cfg.Server.AccessLogEnabled,
 					Metrics:             metricsReg,
 					MaxConcurrentWrites: cfg.S3.MaxConcurrentWrites,
+					ActivityLog:         activityLog,
 				})
 				if hErr != nil {
 					cancel()

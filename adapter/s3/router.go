@@ -9,8 +9,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/valentinkolb/filegate/domain"
+	"github.com/valentinkolb/filegate/infra/activity"
 	"github.com/valentinkolb/filegate/infra/metrics"
 )
 
@@ -44,6 +46,7 @@ type Options struct {
 	// 0 means use the default. The limiter protects file descriptors
 	// and multipart staging space when clients upload large folders.
 	MaxConcurrentWrites int
+	ActivityLog         *activity.Ring
 }
 
 // KeyEntry is the in-memory shape of one entry in the multi-tenant
@@ -150,6 +153,7 @@ func NewHandler(svc *domain.Service, opts Options) (http.Handler, error) {
 		limiter:    newRateLimiter(opts.Keys),
 		accessLog:  opts.AccessLogEnabled,
 		metrics:    opts.Metrics,
+		activity:   opts.ActivityLog,
 		writeSlots: make(chan struct{}, resolveMaxConcurrentWrites(opts.MaxConcurrentWrites)),
 	}
 	// Sweep any active multipart uploads left in phase=committing across
@@ -240,6 +244,7 @@ type router struct {
 	limiter     *rateLimiter // nil when no key has a configured limit
 	accessLog   bool
 	metrics     *metrics.Registry // nil-safe; receives the rate-limit reject counter
+	activity    *activity.Ring
 	writeSlots  chan struct{}
 	uploadLocks uploadLockSet
 	partLocks   uploadLockSet
@@ -351,6 +356,27 @@ func (r *router) authorizeBucket(w http.ResponseWriter, req *http.Request, verif
 }
 
 func (r *router) serve(w http.ResponseWriter, req *http.Request) {
+	start := time.Now()
+	sw := &s3StatusWriter{ResponseWriter: w, status: http.StatusOK}
+	w = sw
+	var actor activity.Actor
+	var activityOp string
+	var activityTarget *activity.Target
+	defer func() {
+		if r.activity == nil || actor.Kind == "" || !logS3Activity(activityOp) {
+			return
+		}
+		r.activity.Record(activity.Event{
+			Actor:      actor,
+			Operation:  "s3." + activityOp,
+			Outcome:    s3OutcomeForStatus(sw.status),
+			Target:     activityTarget,
+			DurationMS: time.Since(start).Milliseconds(),
+			RequestID:  strings.TrimSpace(req.Header.Get("X-Request-Id")),
+			Error:      s3ErrorForStatus(sw.status),
+		})
+	}()
+
 	// Rate-limit BEFORE verifyRequest. verifyRequest binds (and
 	// for hex-mode signed bodies, reads) the request body, which
 	// we don't want to do for a throttled key — a flooded key
@@ -374,8 +400,20 @@ func (r *router) serve(w http.ResponseWriter, req *http.Request) {
 		writeError(w, req, sigErr.Code, sigErr.Message)
 		return
 	}
+	actor = activity.Actor{
+		Kind:           activity.ActorS3Key,
+		ID:             verified.AccessKeyID,
+		DelegatedActor: activity.CleanActorLabel(req.Header.Get("X-Filegate-Actor")),
+	}
 
 	bucket, key := parsePathStyle(req.URL.Path)
+	activityOp = s3ActivityOperation(req, bucket, key)
+	if bucket != "" {
+		activityTarget = &activity.Target{Kind: "s3_object", Path: bucket}
+		if key != "" {
+			activityTarget.Path = bucket + "/" + key
+		}
+	}
 
 	switch {
 	case bucket == "":
@@ -395,6 +433,80 @@ func (r *router) serve(w http.ResponseWriter, req *http.Request) {
 	default:
 		// Object-level operations.
 		r.handleObjectOp(w, req, verified, bucket, key)
+	}
+}
+
+type s3StatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *s3StatusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func s3OutcomeForStatus(status int) activity.Outcome {
+	if status >= 200 && status < 400 {
+		return activity.OutcomeSucceeded
+	}
+	return activity.OutcomeFailed
+}
+
+func s3ErrorForStatus(status int) string {
+	if status >= 400 {
+		return http.StatusText(status)
+	}
+	return ""
+}
+
+func s3ActivityOperation(req *http.Request, bucket, key string) string {
+	q := req.URL.Query()
+	uploadID := q.Get("uploadId")
+	switch req.Method {
+	case http.MethodGet:
+		if key != "" && uploadID == "" {
+			return "GetObject"
+		}
+	case http.MethodPut:
+		if key != "" && uploadID == "" {
+			if strings.TrimSpace(req.Header.Get("x-amz-copy-source")) != "" {
+				return "CopyObject"
+			}
+			return "PutObject"
+		}
+	case http.MethodPost:
+		if key == "" {
+			if _, ok := q["delete"]; ok {
+				return "DeleteObjects"
+			}
+			return ""
+		}
+		if _, ok := q["uploads"]; ok {
+			return "CreateMultipartUpload"
+		}
+		if uploadID != "" {
+			return "CompleteMultipartUpload"
+		}
+	case http.MethodDelete:
+		if key != "" && uploadID != "" {
+			return "AbortMultipartUpload"
+		}
+		if key != "" {
+			return "DeleteObject"
+		}
+	}
+	_ = bucket
+	return ""
+}
+
+func logS3Activity(op string) bool {
+	switch op {
+	case "GetObject", "PutObject", "CopyObject", "DeleteObject", "DeleteObjects",
+		"CreateMultipartUpload", "CompleteMultipartUpload", "AbortMultipartUpload":
+		return true
+	default:
+		return false
 	}
 }
 

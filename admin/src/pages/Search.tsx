@@ -12,7 +12,7 @@ export function Search(props: { stats: StatsResponse; pattern: string; hidden: b
       error={props.error}
     >
       <section class="panel">
-        <form class="toolbar" method="get" action="/search">
+        <form class="toolbar search-toolbar" method="get" action="/search">
           <input class="input" name="pattern" value={props.pattern} placeholder="Glob pattern, e.g. **/*.jpg" aria-label="Glob pattern" />
           <select class="select" name="hidden">
             <option value="false" selected={!props.hidden}>

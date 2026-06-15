@@ -1,4 +1,5 @@
 import { ClientCore, type FetchImpl } from "./core.js";
+import { ActivityClient } from "./activity.js";
 import { CapabilitiesClient } from "./capabilities.js";
 import { DownloadsClient } from "./downloads.js";
 import { IndexClient } from "./index-client.js";
@@ -32,6 +33,7 @@ export class Filegate {
   readonly capabilities: CapabilitiesClient;
   readonly versions: VersionsClient;
   readonly downloads: DownloadsClient;
+  readonly activity: ActivityClient;
 
   readonly baseUrl: string;
 
@@ -58,6 +60,7 @@ export class Filegate {
     this.capabilities = new CapabilitiesClient(core);
     this.versions = new VersionsClient(core);
     this.downloads = new DownloadsClient(core);
+    this.activity = new ActivityClient(core);
   }
 }
 

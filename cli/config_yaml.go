@@ -319,6 +319,9 @@ func configDisplayMap(cfg domain.Config, showSecrets bool) map[string]any {
 			"path":    cfg.Metrics.Path,
 			"token":   maskSecret(cfg.Metrics.Token, showSecrets),
 		},
+		"activity": map[string]any{
+			"ring_buffer_size": cfg.Activity.RingBufferSize,
+		},
 	}
 }
 

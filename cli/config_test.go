@@ -40,6 +40,9 @@ func TestLoadConfigJobDefaults(t *testing.T) {
 	if cfg.S3.MaxConcurrentWrites <= 0 {
 		t.Fatalf("s3.max_concurrent_writes=%d, want > 0", cfg.S3.MaxConcurrentWrites)
 	}
+	if cfg.Activity.RingBufferSize != 500 {
+		t.Fatalf("activity.ring_buffer_size=%d, want 500", cfg.Activity.RingBufferSize)
+	}
 	if cfg.Thumbnail.MaxSourceBytes != int64(64*1024*1024) {
 		t.Fatalf("thumbnail.max_source_bytes=%d, want %d",
 			cfg.Thumbnail.MaxSourceBytes, int64(64*1024*1024))
@@ -68,7 +71,9 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 		"  max_concurrent_segment_writes: 77\n" +
 		"  min_free_bytes: 123456\n" +
 		"s3:\n" +
-		"  max_concurrent_writes: 9\n"
+		"  max_concurrent_writes: 9\n" +
+		"activity:\n" +
+		"  ring_buffer_size: 42\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -91,6 +96,47 @@ func TestLoadConfigJobOverrides(t *testing.T) {
 	}
 	if cfg.S3.MaxConcurrentWrites != 9 {
 		t.Fatalf("s3.max_concurrent_writes=%d, want 9", cfg.S3.MaxConcurrentWrites)
+	}
+	if cfg.Activity.RingBufferSize != 42 {
+		t.Fatalf("activity.ring_buffer_size=%d, want 42", cfg.Activity.RingBufferSize)
+	}
+}
+
+func TestLoadConfigActivityEnvOverride(t *testing.T) {
+	t.Setenv("FILEGATE_STORAGE_BASE_PATHS", t.TempDir())
+	t.Setenv("FILEGATE_AUTH_BEARER_TOKEN", "test-token")
+	t.Setenv("FILEGATE_ACTIVITY_RING_BUFFER_SIZE", "123")
+
+	cfg, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Activity.RingBufferSize != 123 {
+		t.Fatalf("activity.ring_buffer_size=%d, want 123", cfg.Activity.RingBufferSize)
+	}
+}
+
+func TestLoadConfigRejectsNegativeActivityRingBufferSize(t *testing.T) {
+	base := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "" +
+		"auth:\n" +
+		"  bearer_token: test-token\n" +
+		"storage:\n" +
+		"  base_paths:\n" +
+		"    - " + base + "\n" +
+		"activity:\n" +
+		"  ring_buffer_size: -1\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := loadConfig(cfgPath)
+	if err == nil {
+		t.Fatalf("expected config validation error")
+	}
+	if want := "activity.ring_buffer_size must be >= 0"; err.Error() != want {
+		t.Fatalf("error=%q, want %q", err.Error(), want)
 	}
 }
 

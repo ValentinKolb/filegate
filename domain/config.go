@@ -15,6 +15,14 @@ type Config struct {
 	Versioning VersioningConfig `mapstructure:"versioning"`
 	S3         S3Config         `mapstructure:"s3"`
 	Metrics    MetricsConfig    `mapstructure:"metrics"`
+	Activity   ActivityConfig   `mapstructure:"activity"`
+}
+
+// ActivityConfig controls the in-process activity log exposed through
+// /v1/activity. It is intentionally a bounded ring buffer: good for
+// operator introspection and admin UX, not durable audit retention.
+type ActivityConfig struct {
+	RingBufferSize int `mapstructure:"ring_buffer_size"`
 }
 
 // MetricsConfig controls the optional Prometheus /metrics endpoint.

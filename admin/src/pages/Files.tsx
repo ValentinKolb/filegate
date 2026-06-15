@@ -42,11 +42,9 @@ export function Files(props: {
           </div>
           {props.current?.type === "directory" && (
             <div class="toolbar">
-              <form class="tb-group" method="post" action="/files/mkdir">
-                <input type="hidden" name="parentPath" value={props.current.path} />
-                <input class="input" name="name" placeholder="New folder name" aria-label="New folder name" />
-                <button class="btn">Create folder</button>
-              </form>
+              <button class="btn" type="button" data-mkdir-open data-mkdir-parent={props.current.path}>
+                Create folder
+              </button>
               <form class="tb-group tb-right" data-upload-form>
                 <input type="hidden" name="parentPath" value={props.current.path} />
                 <input id="admin-file-upload" type="file" multiple data-upload-input hidden />
@@ -121,85 +119,108 @@ function Detail(props: { node: Node }) {
         <span class="tag">{node.type === "directory" ? "Folder" : "File"}</span>
       </div>
       <div class="panel-body">
-        <dl class="props">
-          <div class="prop">
-            <dt>Size</dt>
-            <dd>{formatBytes(node.size)}</dd>
-          </div>
-          <div class="prop">
-            <dt>Modified</dt>
-            <dd>{formatUnix(node.mtime)}</dd>
-          </div>
-          {node.type === "file" && (
+        <div class="detail-section">
+          <h3 class="section-title">Properties</h3>
+          <dl class="props detail-props">
             <div class="prop">
-              <dt>MIME type</dt>
-              <dd class="mono">{node.mimeType || "-"}</dd>
+              <dt>Size</dt>
+              <dd>{formatBytes(node.size)}</dd>
             </div>
-          )}
-          <div class="prop">
-            <dt>Owner</dt>
-            <dd>
-              {node.ownership.uid}:{node.ownership.gid} · mode {node.ownership.mode}
-            </dd>
-          </div>
-          <div class="prop">
-            <dt>Path</dt>
-            <dd class="mono">{node.path}</dd>
-          </div>
-          <div class="prop">
-            <dt>Node ID</dt>
-            <dd class="mono">{node.id}</dd>
-          </div>
-        </dl>
-        <div class="section-title">Rename</div>
-        <form method="post" action="/files/rename" class="form-grid">
-          <input type="hidden" name="id" value={node.id} />
-          <input class="input" name="name" value={node.name} aria-label="New name" />
-          <button class="btn">Rename</button>
-        </form>
-        <div class="section-title">Move or copy</div>
-        <form method="post" action="/files/transfer" class="form-stack">
-          <input type="hidden" name="id" value={node.id} />
-          <div class="field-row">
-            <div class="field">
-              <label>Operation</label>
-              <select class="select" name="op">
-                <option>move</option>
-                <option>copy</option>
-              </select>
+            <div class="prop">
+              <dt>Modified</dt>
+              <dd>{formatUnix(node.mtime)}</dd>
             </div>
-            <div class="field">
-              <label>On conflict</label>
-              <select class="select" name="onConflict">
-                <option>error</option>
-                <option>rename</option>
-                <option>overwrite</option>
-              </select>
+            {node.type === "file" && (
+              <div class="prop">
+                <dt>MIME type</dt>
+                <dd class="mono">{node.mimeType || "-"}</dd>
+              </div>
+            )}
+            <div class="prop">
+              <dt>Owner</dt>
+              <dd>
+                {node.ownership.uid}:{node.ownership.gid}
+              </dd>
+            </div>
+            <div class="prop">
+              <dt>Mode</dt>
+              <dd>{node.ownership.mode}</dd>
+            </div>
+            <div class="prop">
+              <dt>Path</dt>
+              <dd class="mono">{node.path}</dd>
+            </div>
+            <div class="prop">
+              <dt>Node ID</dt>
+              <dd class="mono">{node.id}</dd>
+            </div>
+          </dl>
+        </div>
+        <div class="detail-section">
+          <h3 class="section-title">Actions</h3>
+          <div class="action-list">
+            <div class="action-row">
+              <div>
+                <strong>Download</strong>
+                <span class="muted">{node.type === "directory" ? "Download as archive." : "Download directly."}</span>
+              </div>
+              <a class="btn" href={`/files/download?id=${encodeURIComponent(node.id)}`}>
+                Download
+              </a>
+            </div>
+            <div class="action-row">
+              <div>
+                <strong>Rename</strong>
+                <span class="muted">Change the name in this folder.</span>
+              </div>
+              <button class="btn" type="button" data-rename-open data-rename-id={node.id} data-rename-name={node.name} data-rename-path={node.path}>
+                Rename
+              </button>
+            </div>
+            <div class="action-row">
+              <div>
+                <strong>Move or copy</strong>
+                <span class="muted">Transfer to another folder.</span>
+              </div>
+              <button class="btn" type="button" data-transfer-open data-transfer-id={node.id} data-transfer-name={node.name} data-transfer-path={node.path}>
+                Transfer
+              </button>
+            </div>
+            <div class="action-row">
+              <div>
+                <strong>Metadata</strong>
+                <span class="muted">Edit owner, group, and mode.</span>
+              </div>
+              <button
+                class="btn"
+                type="button"
+                data-metadata-open
+                data-metadata-id={node.id}
+                data-metadata-path={node.path}
+                data-metadata-kind={node.type}
+                data-metadata-uid={String(node.ownership.uid)}
+                data-metadata-gid={String(node.ownership.gid)}
+                data-metadata-mode={node.ownership.mode}
+              >
+                Edit metadata
+              </button>
             </div>
           </div>
-          <div class="field">
-            <label>Target parent path</label>
-            <input class="input" name="targetParentPath" placeholder="backups/archive" />
+        </div>
+        <div class="detail-section">
+          <h3 class="section-title">Danger zone</h3>
+          <div class="action-list">
+            <div class="action-row action-row-danger">
+              <div>
+                <strong>Delete</strong>
+                <span class="muted">Remove this resource permanently.</span>
+              </div>
+              <form method="post" action="/files/delete" data-confirm-delete={node.path}>
+                <input type="hidden" name="id" value={node.id} />
+                <button class="btn danger">Delete</button>
+              </form>
+            </div>
           </div>
-          <div class="field">
-            <label>Target name</label>
-            <input class="input" name="targetName" value={node.name} />
-          </div>
-          <button class="btn">Apply transfer</button>
-        </form>
-        <div class="section-title">Download</div>
-        <a class="btn" href={`/files/download?id=${encodeURIComponent(node.id)}`}>
-          Download
-        </a>
-        <div class="danger-zone">
-          <div>
-            <strong>Delete resource</strong>
-            <span class="muted">This action cannot be undone.</span>
-          </div>
-          <form method="post" action="/files/delete" data-confirm-delete={node.path}>
-            <input type="hidden" name="id" value={node.id} />
-            <button class="btn danger">Delete</button>
-          </form>
         </div>
       </div>
     </section>

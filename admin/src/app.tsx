@@ -1,5 +1,6 @@
 import {
   FilegateError,
+  type ActivityListResponse,
   type BrowserUploadAllowItem,
   type BrowserUploadAllowRequest,
   type BrowserUploadAllowResult,
@@ -7,8 +8,10 @@ import {
   type CapabilitiesResponse,
   type DirectUploadURLResponse,
   type FileConflictMode,
+  type MkdirConflictMode,
   type Node,
   type NodeListResponse,
+  type Ownership,
   type StatsResponse,
   type UploadSessionCreateRequest,
   type UploadSessionDirectRequest,
@@ -26,6 +29,7 @@ import { Search } from "./pages/Search";
 import { System } from "./pages/System";
 
 type Crumb = { name: string; path?: string };
+type ActivityQuery = { q: string; operation: string; outcome: string; page: number; pageSize: number };
 
 const emptyStats: StatsResponse = {
   generatedAt: 0,
@@ -44,6 +48,10 @@ export const app = new Hono()
   .get("/uploads.js", (c) => {
     c.header("Content-Type", "text/javascript; charset=utf-8");
     return new Response(Bun.file(new URL("./uploads.js", import.meta.url)));
+  })
+  .get("/prompts.js", (c) => {
+    c.header("Content-Type", "text/javascript; charset=utf-8");
+    return new Response(Bun.file(new URL("./prompts.js", import.meta.url)));
   })
   .get("/health", (c) => c.text("OK"))
   .get(
@@ -79,7 +87,7 @@ export const app = new Hono()
     const path = field(body, "parentPath");
     try {
       const parent = await resolveDirectory(path);
-      await client().nodes.mkdir(parent.id, { path: field(body, "name"), recursive: true, onConflict: "error" });
+      await client().nodes.mkdir(parent.id, { path: field(body, "name"), recursive: true, onConflict: mkdirConflictMode(field(body, "onConflict")) });
       return c.redirect(redirectFiles(path), 303);
     } catch (err) {
       return c.redirect(redirectFiles(path, errorMessage(err)), 303);
@@ -129,7 +137,16 @@ export const app = new Hono()
   .post("/files/rename", async (c) => {
     const body = await c.req.parseBody();
     try {
-      const updated = await client().nodes.patch(field(body, "id"), { name: field(body, "name") }, true);
+      const updated = await client().nodes.patch(field(body, "id"), { name: field(body, "name") });
+      return c.redirect(selectedFiles(parentPath(updated.path), updated.id), 303);
+    } catch (err) {
+      return c.redirect(redirectFiles("", errorMessage(err)), 303);
+    }
+  })
+  .post("/files/metadata", async (c) => {
+    const body = await c.req.parseBody();
+    try {
+      const updated = await client().nodes.patch(field(body, "id"), { ownership: ownershipFromForm(body) }, field(body, "recursiveOwnership") === "true");
       return c.redirect(selectedFiles(parentPath(updated.path), updated.id), 303);
     } catch (err) {
       return c.redirect(redirectFiles("", errorMessage(err)), 303);
@@ -168,17 +185,21 @@ export const app = new Hono()
     "/system",
     ...ssr(async (c) => {
       c.get("page").title = "System";
-      const stats = await loadStats();
-      return () => <System stats={stats} error={c.req.query("error")} notice={c.req.query("notice")} />;
+      const activityQuery = parseActivityQuery({
+        q: c.req.query("q"),
+        operation: c.req.query("operation"),
+        outcome: c.req.query("outcome"),
+        page: c.req.query("page"),
+      });
+      const [stats, activity] = await Promise.all([loadStats(), loadActivity(activityQuery)]);
+      return () => <System stats={stats} activity={activity} activityQuery={activityQuery} error={c.req.query("error")} notice={c.req.query("notice")} />;
     }),
   )
   .post("/system/rescan", async (c) => {
-    try {
-      await client().index.rescan();
-      return c.redirect("/system?notice=rescan+queued", 303);
-    } catch (err) {
-      return c.redirect(`/system?error=${encodeURIComponent(errorMessage(err))}`, 303);
-    }
+    void client()
+      .index.rescan()
+      .catch((err) => console.error("index rescan failed:", errorMessage(err)));
+    return c.redirect("/system?notice=rescan+started", 303);
   });
 
 async function loadBase(): Promise<{ stats: StatsResponse; roots: Node[]; error?: string }> {
@@ -221,6 +242,31 @@ async function loadStats(): Promise<StatsResponse> {
   return client().stats.get();
 }
 
+async function loadActivity(query: ActivityQuery): Promise<ActivityListResponse | undefined> {
+  try {
+    return await client().activity.list({
+      limit: query.pageSize,
+      offset: (query.page - 1) * query.pageSize,
+      q: query.q,
+      operation: query.operation,
+      outcome: query.outcome,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function parseActivityQuery(raw: { q?: string; operation?: string; outcome?: string; page?: string }): ActivityQuery {
+  const page = Number.parseInt(raw.page || "1", 10);
+  return {
+    q: raw.q?.trim() || "",
+    operation: raw.operation?.trim() || "",
+    outcome: raw.outcome === "succeeded" || raw.outcome === "failed" || raw.outcome === "skipped" ? raw.outcome : "",
+    page: Number.isFinite(page) && page > 0 ? page : 1,
+    pageSize: 25,
+  };
+}
+
 async function loadRoots(): Promise<Node[]> {
   const roots = await client().paths.get("", { computeRecursiveSizes: true });
   return isList(roots) ? roots.items : [];
@@ -249,8 +295,32 @@ function field(body: Record<string, string | File>, key: string): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function intField(body: Record<string, string | File>, key: string): number | undefined {
+  const value = field(body, key);
+  if (!value) return undefined;
+  const out = Number(value);
+  if (!Number.isInteger(out) || out < 0) throw new Error(`${key} must be a non-negative integer`);
+  return out;
+}
+
+function ownershipFromForm(body: Record<string, string | File>): Ownership {
+  const uid = intField(body, "uid");
+  const gid = intField(body, "gid");
+  if ((uid === undefined) !== (gid === undefined)) throw new Error("uid and gid must be set together");
+  return {
+    uid,
+    gid,
+    mode: field(body, "mode") || undefined,
+    dirMode: field(body, "dirMode") || undefined,
+  };
+}
+
 function conflictMode(value: string): FileConflictMode {
   return value === "rename" || value === "overwrite" ? value : "error";
+}
+
+function mkdirConflictMode(value: string): MkdirConflictMode {
+  return value === "skip" || value === "rename" ? value : "error";
 }
 
 function queryError(query?: string, fallback?: string): string | undefined {

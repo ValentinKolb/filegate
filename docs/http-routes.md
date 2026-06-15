@@ -67,6 +67,12 @@ mkdir). For directory replacement use `POST /v1/transfers` with `overwrite`.
   - Runtime capability limits for adaptive clients
   - Upload fields include `maxChunkBytes`, `maxUploadBytes`,
     `maxSessionUploadBytes`, and `maxConcurrentSegmentWrites`
+- `GET /v1/activity?limit=100`
+  - Recent in-memory activity events for operator introspection
+  - Query: `limit`, `offset`, `q`, `operation`, `outcome`
+  - The actor is the authenticated Filegate credential kind (`bearer_token`,
+    `s3_key`, `signed_url`, or `system`). `X-Filegate-Actor` is logged only as
+    an optional delegated actor label and never participates in authorization.
 
 ## Paths API (Virtual Filesystem)
 

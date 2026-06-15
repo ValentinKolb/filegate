@@ -53,6 +53,11 @@ upload:
   max_session_upload_bytes: 53687091200 # 50 GiB REST upload-session limit
   min_free_bytes: 67108864         # 64 MiB
 
+activity:
+  # Recent operator activity kept in memory for /v1/activity and the
+  # admin UI. This is not durable compliance retention.
+  ring_buffer_size: 500
+
 versioning:
   # "auto" enables per-file versioning on btrfs mounts and silently
   # disables it elsewhere. Versions live under .fg-versions/ inside

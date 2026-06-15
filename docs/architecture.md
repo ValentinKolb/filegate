@@ -21,6 +21,7 @@
    - Pebble index
    - filesystem store
    - in-memory event bus
+   - bounded in-memory activity ring buffer
 3. Initial index scan occurs through service/index logic.
 4. Detector backend (`auto|poll|btrfs`) produces FS events.
 5. HTTP adapter serves `/v1/*` and maps directly to domain operations.

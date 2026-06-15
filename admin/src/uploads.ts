@@ -231,15 +231,6 @@ document.addEventListener("click", (event) => {
   }
 });
 
-document.addEventListener("submit", (event) => {
-  const form = event.target;
-  if (!(form instanceof HTMLFormElement) || !form.matches("[data-confirm-delete]")) return;
-  const label = form.dataset.confirmDelete || "this resource";
-  if (!window.confirm(`Delete ${label}?\n\nThis action cannot be undone.`)) {
-    event.preventDefault();
-  }
-});
-
 document.addEventListener("change", (event) => {
   const input = event.target;
   if (!(input instanceof HTMLInputElement) || !input.matches("[data-upload-input]") || !input.files?.length || !input.form) return;

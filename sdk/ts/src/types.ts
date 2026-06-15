@@ -104,6 +104,44 @@ export interface StatsResponse {
   disks: StatsDisk[];
 }
 
+// --- Activity ---
+
+export interface ActivityActor {
+  kind: "system" | "bearer_token" | "s3_key" | "signed_url" | string;
+  id: string;
+  label?: string;
+  delegatedActor?: string;
+}
+
+export interface ActivityTarget {
+  kind: string;
+  id?: string;
+  path?: string;
+}
+
+export interface ActivityEvent {
+  id: string;
+  at: number;
+  actor: ActivityActor;
+  operation: string;
+  outcome: "succeeded" | "failed" | "skipped" | string;
+  target?: ActivityTarget;
+  durationMs?: number;
+  requestId?: string;
+  error?: string;
+  meta?: Record<string, string | number | boolean>;
+}
+
+export interface ActivityListResponse {
+  items: ActivityEvent[];
+  total: number;
+  offset: number;
+  limit: number;
+  retained: number;
+  capacity: number;
+  operations: string[];
+}
+
 // --- Capabilities ---
 
 export interface CapabilitiesResponse {
