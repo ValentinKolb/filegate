@@ -62,7 +62,7 @@ For general API calls, run a **backend relay** in front of Filegate:
 Browser (no token) ──HTTP──▶ Your backend (holds token) ──HTTP──▶ Filegate
 ```
 
-For browser uploads, the backend can also mint a direct upload URL:
+For browser uploads/downloads, the backend can also mint direct URLs:
 
 ```ts
 const direct = await fg.uploads.createDirectUploadURL({
@@ -70,14 +70,19 @@ const direct = await fg.uploads.createDirectUploadURL({
   contentType: "image/jpeg",
   expiresInSeconds: 900,
 });
+
+const download = await fg.downloads.createDirectURL({
+  nodeId: "<node-id>",
+  expiresInSeconds: 300,
+});
 ```
 
 The browser then calls `uploadDirect(uploadUrl, file, handlers)` without a
-Filegate bearer token.
+Filegate bearer token, or follows the scoped `download.downloadUrl`.
 
 The backend uses the SDK normally; the browser talks to your backend
 endpoints with whatever auth you already have (sessions, JWT, OAuth, etc.)
-or to the single-purpose direct upload URL. See
+or to scoped direct URLs. See
 [`relay-patterns.md`](relay-patterns.md) for full upload/download patterns.
 For purely-client-side helpers like file hashing or segment math (no Filegate
 connection needed), import from `@valentinkolb/filegate/utils` — those are
@@ -88,7 +93,8 @@ pure functions and ship without the HTTP client.
 ```ts
 fg.paths        // PathsClient    — virtual paths (PUT, GET listings)
 fg.nodes        // NodesClient    — ID-based ops
-fg.uploads      // UploadsClient  — direct URLs and resumable sessions
+fg.uploads      // UploadsClient  — direct upload URLs and resumable sessions
+fg.downloads    // DownloadsClient — direct download URLs
 fg.transfers    // TransfersClient — move / copy
 fg.search       // SearchClient   — glob
 fg.index        // IndexClient    — rescan, resolve
@@ -98,7 +104,7 @@ fg.baseUrl      // string         — the configured base URL
 ```
 
 One-shot uploads live under `fg.paths.put()`, **not** under `fg.uploads`.
-`fg.uploads` contains direct URL minting and upload sessions.
+`fg.uploads` contains direct upload URL minting and upload sessions.
 
 Pure helpers ship under `@valentinkolb/filegate/utils`:
 

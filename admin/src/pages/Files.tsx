@@ -187,6 +187,10 @@ function Detail(props: { node: Node }) {
           </div>
           <button class="btn">Apply transfer</button>
         </form>
+        <div class="section-title">Download</div>
+        <a class="btn" href={`/files/download?id=${encodeURIComponent(node.id)}`}>
+          Download
+        </a>
         <div class="danger-zone">
           <div>
             <strong>Delete resource</strong>

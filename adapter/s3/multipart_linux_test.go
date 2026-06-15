@@ -1199,7 +1199,8 @@ func TestSyncSingleClearsETagOnInPlaceRewrite(t *testing.T) {
 	handler.ServeHTTP(hRec, hReq)
 	gotETag := strings.Trim(hRec.Header().Get("ETag"), `"`)
 
-	preETag := hex.EncodeToString(md5.New().Sum(body))
+	preMD5 := md5.Sum(body)
+	preETag := hex.EncodeToString(preMD5[:])
 	if gotETag == preETag {
 		t.Errorf("HEAD ETag=%q still matches pre-rewrite hash — in-place rewrite was not detected", gotETag)
 	}

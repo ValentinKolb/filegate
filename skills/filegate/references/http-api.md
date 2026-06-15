@@ -6,7 +6,7 @@ For runtimes without a Filegate SDK (Python, Rust, curl, ...), or when you need 
 
 - **Base path**: all routes (except `/health`) live under `/v1`.
 - **Auth**: every `/v1/*` request must include `Authorization: Bearer <token>`,
-  except the final `PUT /v1/uploads/direct/{token}` request.
+  except scoped direct upload/download URL requests.
 - **JSON**: request and response bodies use `application/json` unless explicitly noted (file uploads/downloads use the actual content type).
 - **Errors**: `{ "error": "..." }` for all non-2xx. **On 409 the body
   may also carry** `{ "existingId": "...", "existingPath": "..." }` —

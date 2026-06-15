@@ -46,6 +46,7 @@ type Filegate struct {
 	Stats        StatsClient
 	Capabilities CapabilitiesClient
 	Versions     VersionsClient
+	Downloads    DownloadsClient
 }
 
 type clientCore struct {
@@ -95,6 +96,7 @@ func New(cfg Config) (*Filegate, error) {
 	client.Stats = StatsClient{core: core}
 	client.Capabilities = CapabilitiesClient{core: core}
 	client.Versions = VersionsClient{core: core}
+	client.Downloads = DownloadsClient{core: core}
 	return client, nil
 }
 

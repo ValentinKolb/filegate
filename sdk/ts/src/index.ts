@@ -1,5 +1,6 @@
 export { Filegate, filegate, type FilegateConfig } from "./client.js";
 export { CapabilitiesClient } from "./capabilities.js";
+export { DownloadsClient } from "./downloads.js";
 export { FilegateError } from "./errors.js";
 export type { FetchImpl } from "./core.js";
 
@@ -51,6 +52,8 @@ export type { FileConflictMode, FingerprintMode, MkdirConflictMode, UploadSessio
 export type {
   DirectUploadURLRequest,
   DirectUploadURLResponse,
+  DirectDownloadURLRequest,
+  DirectDownloadURLResponse,
   CapabilitiesResponse,
   ErrorResponse,
   GlobSearchError,

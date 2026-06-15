@@ -23,6 +23,9 @@ segments directly from the browser to Filegate with scoped direct session tokens
 This keeps large uploads out of the admin server request path while still hiding
 the Filegate bearer token from the browser.
 
+Downloads use the same shape: the admin server mints a scoped direct download
+URL, then redirects the browser to Filegate.
+
 When Filegate is on a different browser origin, configure Filegate CORS for the
 admin app origin. The default Filegate CORS headers include
 `Filegate-Upload-Session` and `X-Segment-Checksum`.

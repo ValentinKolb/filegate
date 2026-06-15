@@ -6,7 +6,7 @@ This document lists core runtime assumptions and behavioral guarantees.
 
 - Linux-only runtime support
 - No backward-compatibility guarantee with legacy TS-only implementation
-- Bearer token auth for `/v1/*`, except the final `PUT` to a signed direct-upload URL
+- Bearer token auth for `/v1/*`, except scoped direct upload/download URLs
 
 ## Virtual Filesystem Model
 
@@ -40,6 +40,7 @@ Detector cost model:
 - `GET /v1/nodes/{id}/content`:
   - file node -> file stream
   - directory node -> tar stream
+- Direct signed download: `GET /v1/downloads/direct/{token}` after `POST /v1/downloads/direct`
 
 ## Write Behavior
 

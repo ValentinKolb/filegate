@@ -103,6 +103,6 @@ Filegate REST binary. Run it next to Filegate and give it:
 
 Uploads use Filegate upload sessions with direct session tokens, so large file
 and folder uploads go browser-to-Filegate after the admin app creates the
-sessions. If the browser reaches Filegate at a different URL than the admin
-server, set `server.public_url` in Filegate and configure CORS for the admin
-origin.
+sessions. Downloads use scoped direct download URLs. If the browser reaches
+Filegate at a different URL than the admin server, set `server.public_url` in
+Filegate and configure CORS for the admin origin.

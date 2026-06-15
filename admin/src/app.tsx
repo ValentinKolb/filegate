@@ -113,6 +113,19 @@ export const app = new Hono()
       return c.redirect(redirectFiles("", errorMessage(err)), 303);
     }
   })
+  .get("/files/download", async (c) => {
+    try {
+      const nodeId = c.req.query("id")?.trim();
+      if (!nodeId) throw new Error("node id required");
+      const out = await client().downloads.createDirectURL({
+        nodeId,
+        expiresInSeconds: 300,
+      });
+      return c.redirect(out.downloadUrl, 303);
+    } catch (err) {
+      return c.redirect(redirectFiles("", errorMessage(err)), 303);
+    }
+  })
   .post("/files/rename", async (c) => {
     const body = await c.req.parseBody();
     try {

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	httpadapter "github.com/valentinkolb/filegate/adapter/http"
+	apiv1 "github.com/valentinkolb/filegate/api/v1"
 	"github.com/valentinkolb/filegate/domain"
 	"github.com/valentinkolb/filegate/infra/eventbus"
 	"github.com/valentinkolb/filegate/infra/filesystem"
@@ -180,6 +183,148 @@ func TestPutGetRoundTrip(t *testing.T) {
 	if got := rec.Header().Get("Content-Length"); got != fmt.Sprint(len(body)) {
 		t.Fatalf("GET Content-Length=%q, want %d", got, len(body))
 	}
+}
+
+func TestRESTUploadParadigmsRemainReadableViaS3(t *testing.T) {
+	svc, s3Handler, mount, cleanup := newTestServer(t)
+	defer cleanup()
+
+	const token = "rest-upload-cross-protocol-token"
+	restHandler := httpadapter.NewRouter(svc, httpadapter.RouterOptions{
+		BearerToken:           token,
+		AccessLogEnabled:      false,
+		MaxChunkBytes:         64 << 20,
+		MaxUploadBytes:        64 << 20,
+		MaxSessionUploadBytes: 64 << 20,
+		UploadMinFreeBytes:    1 << 20,
+		UploadExpiry:          time.Hour,
+		UploadCleanupInterval: time.Hour,
+	})
+	if closer, ok := restHandler.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+
+	uploadSessionBody := []byte("session-upload bytes visible to s3")
+	session := createRESTUploadSessionForS3Test(t, restHandler, token, apiv1.UploadSessionCreateRequest{
+		Path:        mount + "/from-session.txt",
+		Size:        int64(len(uploadSessionBody)),
+		Checksum:    sha256ForS3Test(uploadSessionBody),
+		SegmentSize: 8,
+		OnConflict:  "error",
+	})
+	for _, segment := range session.Segments {
+		part := uploadSessionBody[segment.Offset : segment.Offset+segment.Size]
+		req := httptest.NewRequest(http.MethodPut, "/v1/uploads/sessions/"+session.ID+"/segments/"+fmt.Sprint(segment.Index), bytes.NewReader(part))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("X-Segment-Checksum", sha256ForS3Test(part))
+		rec := httptest.NewRecorder()
+		restHandler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("REST session segment %d status=%d body=%s", segment.Index, rec.Code, rec.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/uploads/sessions/"+session.ID+"/commit", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	restHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("REST session commit status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	directBody := []byte("direct-upload bytes visible to s3")
+	directReq := apiv1.DirectUploadURLRequest{
+		Path:             mount + "/from-direct.txt",
+		ExpiresInSeconds: 60,
+		ContentType:      "text/plain",
+		MaxBytes:         int64(len(directBody)),
+	}
+	raw, err := json.Marshal(directReq)
+	if err != nil {
+		t.Fatalf("marshal direct request: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/uploads/direct", bytes.NewReader(raw))
+	req.Host = "filegate.local"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	restHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("direct URL create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var direct apiv1.DirectUploadURLResponse
+	if err := json.NewDecoder(rec.Body).Decode(&direct); err != nil {
+		t.Fatalf("decode direct URL: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPut, direct.UploadURL, bytes.NewReader(directBody))
+	req.Header.Set("Content-Type", "text/plain")
+	rec = httptest.NewRecorder()
+	restHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("direct PUT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	assertS3ObjectBytesAndETag(t, s3Handler, mount, "from-session.txt", uploadSessionBody)
+	assertS3ObjectBytesAndETag(t, s3Handler, mount, "from-direct.txt", directBody)
+}
+
+func createRESTUploadSessionForS3Test(t *testing.T, handler http.Handler, token string, body apiv1.UploadSessionCreateRequest) apiv1.UploadSessionResponse {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal session request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/uploads/sessions", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("REST session create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out apiv1.UploadSessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	return out
+}
+
+func assertS3ObjectBytesAndETag(t *testing.T, handler http.Handler, mount, key string, body []byte) {
+	t.Helper()
+	wantMD5 := md5.Sum(body)
+	wantETag := hex.EncodeToString(wantMD5[:])
+
+	headReq := httptest.NewRequest(http.MethodHead, "/"+mount+"/"+key, nil)
+	headReq.Host = "example.com"
+	signRequestPayload(headReq, nil)
+	headRec := httptest.NewRecorder()
+	handler.ServeHTTP(headRec, headReq)
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("S3 HEAD %s status=%d body=%s", key, headRec.Code, headRec.Body.String())
+	}
+	if got := strings.Trim(headRec.Header().Get("ETag"), `"`); got != wantETag {
+		t.Fatalf("S3 HEAD %s ETag=%q, want %q", key, got, wantETag)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/"+mount+"/"+key, nil)
+	getReq.Host = "example.com"
+	signRequestPayload(getReq, nil)
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("S3 GET %s status=%d body=%s", key, getRec.Code, getRec.Body.String())
+	}
+	if !bytes.Equal(getRec.Body.Bytes(), body) {
+		t.Fatalf("S3 GET %s body=%q, want %q", key, getRec.Body.Bytes(), body)
+	}
+	if got := strings.Trim(getRec.Header().Get("ETag"), `"`); got != wantETag {
+		t.Fatalf("S3 GET %s ETag=%q, want %q", key, got, wantETag)
+	}
+}
+
+func sha256ForS3Test(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // TestPutContentMD5Verified: a Content-MD5 header that matches the

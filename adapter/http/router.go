@@ -118,6 +118,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 
 	thumbnailScheduler := jobs.New(thumbnailWorkers, thumbnailQueueSize)
 	directUploads := newDirectUploadManager(svc, opts.BearerToken, opts.PublicURL, opts.MaxUploadBytes, opts.TrustedProxies)
+	directDownloads := newDirectDownloadManager(svc, opts.BearerToken, opts.PublicURL, opts.TrustedProxies)
 	uploadSessions := newUploadSessionManager(
 		svc,
 		opts.BearerToken,
@@ -156,6 +157,8 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 	}
 
 	root.HandleFunc("PUT /v1/uploads/direct/{token}", directUploads.handlePut)
+	root.HandleFunc("GET /v1/downloads/direct/{token}", directDownloads.handleGet)
+	root.HandleFunc("HEAD /v1/downloads/direct/{token}", directDownloads.handleGet)
 	root.HandleFunc("GET /v1/uploads/sessions/{sessionId}", uploadSessions.handleStatus)
 	root.HandleFunc("PUT /v1/uploads/sessions/{sessionId}/segments/{index}", uploadSessions.handlePutSegment)
 	root.HandleFunc("POST /v1/uploads/sessions/{sessionId}/commit", uploadSessions.handleCommit)
@@ -304,62 +307,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 		if !ok {
 			return
 		}
-		meta, err := svc.GetFile(id)
-		if err != nil {
-			statusFromErr(w, err)
-			return
-		}
-
-		if meta.Type == "directory" {
-			abs, err := svc.ResolveAbsPath(id)
-			if err != nil {
-				statusFromErr(w, err)
-				return
-			}
-			if err := preflightDirectoryTar(abs); err != nil {
-				if errors.Is(err, os.ErrPermission) {
-					writeErr(w, http.StatusForbidden, "directory content is not readable")
-					return
-				}
-				var budgetErr directoryTarBudgetError
-				if errors.As(err, &budgetErr) {
-					writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
-					return
-				}
-				writeErr(w, http.StatusInternalServerError, "failed to prepare directory download")
-				return
-			}
-			tarName := meta.Name + ".tar"
-			w.Header().Set("Content-Type", "application/x-tar")
-			setContentDisposition(w, "attachment", tarName)
-			if err := writeDirectoryTar(w, abs, meta.Name); err != nil {
-				log.Printf("[filegate] tar stream failed for node=%s path=%s: %v", id.String(), abs, err)
-			}
-			return
-		}
-
-		reader, size, _, err := svc.OpenContent(id)
-		if err != nil {
-			statusFromErr(w, err)
-			return
-		}
-		defer reader.Close()
-
-		contentType := mime.TypeByExtension(filepath.Ext(meta.Name))
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		if r.URL.Query().Get("inline") == "true" {
-			setContentDisposition(w, "inline", meta.Name)
-		} else {
-			setContentDisposition(w, "attachment", meta.Name)
-		}
-		bufPtr := copyBufPool.Get().(*[]byte)
-		buf := *bufPtr
-		_, _ = io.CopyBuffer(w, reader, buf)
-		copyBufPool.Put(bufPtr)
+		streamNodeContent(w, r, svc, id, r.URL.Query().Get("inline") == "true")
 	})
 
 	handleV1("GET /v1/nodes/{id}/thumbnail", thumbs.handleGet)
@@ -574,6 +522,7 @@ func NewRouter(svc *domain.Service, opts RouterOptions) http.Handler {
 	})
 
 	handleV1("POST /v1/uploads/direct", directUploads.handleCreate)
+	handleV1("POST /v1/downloads/direct", directDownloads.handleCreate)
 	handleV1("POST /v1/uploads/sessions", uploadSessions.handleCreate)
 	handleV1("POST /v1/uploads/sessions:batch", uploadSessions.handleCreateBatch)
 
@@ -756,6 +705,76 @@ func metaForFingerprint(svc *domain.Service, meta *domain.FileMeta, mode fingerp
 		return meta, nil
 	}
 	return svc.EnsureFileSHA256(meta.ID)
+}
+
+func streamNodeContent(w http.ResponseWriter, r *http.Request, svc *domain.Service, id domain.FileID, inline bool) {
+	meta, err := svc.GetFile(id)
+	if err != nil {
+		statusFromErr(w, err)
+		return
+	}
+
+	if meta.Type == "directory" {
+		abs, err := svc.ResolveAbsPath(id)
+		if err != nil {
+			statusFromErr(w, err)
+			return
+		}
+		if err := preflightDirectoryTar(abs); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				writeErr(w, http.StatusForbidden, "directory content is not readable")
+				return
+			}
+			var budgetErr directoryTarBudgetError
+			if errors.As(err, &budgetErr) {
+				writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "failed to prepare directory download")
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-tar")
+		setContentDisposition(w, "attachment", meta.Name+".tar")
+		if r.Method == http.MethodHead {
+			return
+		}
+		if err := writeDirectoryTar(w, abs, meta.Name); err != nil {
+			log.Printf("[filegate] tar stream failed for node=%s path=%s: %v", id.String(), abs, err)
+		}
+		return
+	}
+
+	reader, size, _, err := svc.OpenContent(id)
+	if err != nil {
+		statusFromErr(w, err)
+		return
+	}
+	defer reader.Close()
+
+	contentType := mime.TypeByExtension(filepath.Ext(meta.Name))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Accept-Ranges", "bytes")
+	if inline {
+		setContentDisposition(w, "inline", meta.Name)
+	} else {
+		setContentDisposition(w, "attachment", meta.Name)
+	}
+
+	if seeker, ok := reader.(io.ReadSeeker); ok {
+		http.ServeContent(w, r, meta.Name, time.UnixMilli(meta.Mtime), seeker)
+		return
+	}
+	if r.Method == http.MethodHead {
+		return
+	}
+	bufPtr := copyBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	_, _ = io.CopyBuffer(w, reader, buf)
+	copyBufPool.Put(bufPtr)
 }
 
 func parseBoolDefault(v string, def bool) bool {

@@ -185,6 +185,45 @@ func TestCreateDirectUploadURL(t *testing.T) {
 	}
 }
 
+func TestCreateDirectDownloadURL(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/downloads/direct" {
+			t.Fatalf("%s %s", r.Method, r.URL.Path)
+		}
+		var body DirectDownloadURLRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.NodeID != "node-1" || body.ExpiresInSeconds != 60 {
+			t.Fatalf("body=%#v", body)
+		}
+		_ = json.NewEncoder(w).Encode(DirectDownloadURLResponse{
+			DownloadURL: "https://downloads.example.test/token",
+			Method:      "GET",
+			ExpiresAt:   42,
+			Node:        Node{ID: "node-1", Type: "file", Name: "hello.txt"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	out, err := client.Downloads.CreateDirectURL(context.Background(), DirectDownloadURLRequest{
+		NodeID:           "node-1",
+		ExpiresInSeconds: 60,
+	})
+	if err != nil {
+		t.Fatalf("create direct download url: %v", err)
+	}
+	if out.DownloadURL != "https://downloads.example.test/token" || out.Method != "GET" {
+		t.Fatalf("response=%#v", out)
+	}
+}
+
 func TestCapabilitiesGet(t *testing.T) {
 	t.Parallel()
 

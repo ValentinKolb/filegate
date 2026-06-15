@@ -109,7 +109,7 @@ func (m *directUploadManager) handleCreate(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusInternalServerError, "failed to create upload url")
 		return
 	}
-	baseURL, err := m.baseURLForRequest(r)
+	baseURL, err := directURLBaseForRequest(m.publicURL, m.trusted, r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "public upload URL unavailable")
 		return
@@ -215,13 +215,32 @@ func (m *directUploadManager) verify(token string) (directUploadToken, error) {
 	return out, nil
 }
 
-func (m *directUploadManager) baseURLForRequest(r *http.Request) (string, error) {
-	if m.publicURL != "" {
-		return m.publicURL, nil
+func hmacSHA256(secret, data []byte) []byte {
+	return hmacSHA256Purpose("direct-upload", secret, data)
+}
+
+func hmacSHA256Purpose(purpose string, secret, data []byte) []byte {
+	key := sha256.Sum256(append([]byte("filegate-"+purpose+"-v1:"), secret...))
+	mac := hmac.New(sha256.New, key[:])
+	_, _ = mac.Write(data)
+	return mac.Sum(nil)
+}
+
+func randomNonce() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func directURLBaseForRequest(publicURL string, trusted []netip.Prefix, r *http.Request) (string, error) {
+	if publicURL != "" {
+		return publicURL, nil
 	}
 	host := r.Host
 	proto := ""
-	if peerTrusted(r.RemoteAddr, m.trusted) {
+	if peerTrusted(r.RemoteAddr, trusted) {
 		if forwardedHost := firstHeaderValue(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
 			host = forwardedHost
 		}
@@ -238,21 +257,6 @@ func (m *directUploadManager) baseURLForRequest(r *http.Request) (string, error)
 		}
 	}
 	return proto + "://" + host, nil
-}
-
-func hmacSHA256(secret, data []byte) []byte {
-	key := sha256.Sum256(append([]byte("filegate-direct-upload-v1:"), secret...))
-	mac := hmac.New(sha256.New, key[:])
-	_, _ = mac.Write(data)
-	return mac.Sum(nil)
-}
-
-func randomNonce() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return base64.RawURLEncoding.EncodeToString(b[:])
 }
 
 func firstHeaderValue(raw string) string {

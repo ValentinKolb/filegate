@@ -4,7 +4,7 @@ Base requirements:
 
 - API prefix: `/v1`
 - Auth: `Authorization: Bearer <token>` on `/v1/*` routes, except scoped direct
-  upload requests that use their own upload token
+  upload/download requests that use their own URL token
 - Health route without auth: `GET /health`
 - JSON errors: `{ "error": "..." }`. On `409 Conflict`, the body also
   carries `"existingId"` and `"existingPath"` so clients can render a
@@ -243,6 +243,36 @@ without exposing the Filegate bearer token to the browser.
 `server.public_url` controls the base URL used in `uploadUrl`. Leave it empty
 only when the authenticated minting request already arrives with the public
 host and scheme.
+
+## Direct Download URLs
+
+Direct download URLs let a trusted backend mint a short-lived browser download
+URL without exposing the Filegate bearer token to the browser.
+
+- `POST /v1/downloads/direct`
+  - Requires `Authorization: Bearer <token>`
+  - Body:
+    - `nodeId` or `path` (required): exactly one resource selector
+    - `expiresInSeconds` (optional): default `900`, maximum `86400`
+    - `inline` (optional): sets inline content disposition when true
+  - Returns `201` with:
+    - `downloadUrl`: absolute `GET` URL
+    - `method`: `GET`
+    - `expiresAt`: Unix seconds
+    - `node`: resolved node metadata
+- `GET /v1/downloads/direct/{token}`
+  - Does not accept the REST bearer token; the URL token is the credential
+  - File: raw file stream with byte-range support
+  - Directory: tar stream with the same preflight limits as
+    `GET /v1/nodes/{id}/content`
+  - Returns `401` for expired, malformed, or tampered URLs
+  - Returns `409` when a file changed after the URL was minted
+- `HEAD /v1/downloads/direct/{token}`
+  - Same headers as `GET`, without a response body
+
+File download tokens pin the resolved node id plus current file identity
+(`ETag`, `sha256`, size, mtime). Directory tokens resolve the node id at mint
+time and stream the current directory contents when used.
 
 ## Index Maintenance
 

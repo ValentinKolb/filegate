@@ -199,6 +199,22 @@ export interface DirectUploadURLResponse {
   maxBytes: number;
 }
 
+// --- Direct downloads ---
+
+export interface DirectDownloadURLRequest {
+  nodeId?: string;
+  path?: string;
+  expiresInSeconds?: number;
+  inline?: boolean;
+}
+
+export interface DirectDownloadURLResponse {
+  downloadUrl: string;
+  method: "GET";
+  expiresAt: number;
+  node: Node;
+}
+
 // --- Upload sessions ---
 
 export interface UploadSessionDirectRequest {

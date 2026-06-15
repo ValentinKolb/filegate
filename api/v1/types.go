@@ -255,6 +255,26 @@ type DirectUploadURLResponse struct {
 	MaxBytes  int64  `json:"maxBytes"`
 }
 
+// DirectDownloadURLRequest is the body for POST /v1/downloads/direct.
+//
+// Filegate returns a short-lived unauthenticated GET URL scoped to one
+// concrete node. Callers may identify the node by NodeID or Path; the server
+// resolves Path at mint time and stores the resulting node ID in the token.
+type DirectDownloadURLRequest struct {
+	NodeID           string `json:"nodeId,omitempty"`
+	Path             string `json:"path,omitempty"`
+	ExpiresInSeconds int64  `json:"expiresInSeconds,omitempty"`
+	Inline           bool   `json:"inline,omitempty"`
+}
+
+// DirectDownloadURLResponse is returned after minting a direct download URL.
+type DirectDownloadURLResponse struct {
+	DownloadURL string `json:"downloadUrl"`
+	Method      string `json:"method"`
+	ExpiresAt   int64  `json:"expiresAt"`
+	Node        Node   `json:"node"`
+}
+
 // UploadSessionDirectRequest asks Filegate to mint a scoped direct session token.
 type UploadSessionDirectRequest struct {
 	ExpiresInSeconds int64    `json:"expiresInSeconds,omitempty"`

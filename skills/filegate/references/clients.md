@@ -18,6 +18,7 @@ Both SDKs provide the same scoped namespaces:
 client.paths      ← virtual path operations (one-shot PUT, GET listings/metadata)
 client.nodes      ← ID-based operations (get, content, mkdir, patch, delete, thumbnail)
 client.uploads    ← upload sessions (.sessions.create/status/segments.put/commit/abort)
+client.downloads  ← direct download URL minting
 client.transfers  ← move / copy
 client.search     ← glob search
 client.index      ← rescan, resolve
@@ -26,7 +27,7 @@ client.versions   ← per-file version history
 ```
 
 One-shot uploads live under `client.paths.put` — not under `client.uploads`.
-`client.uploads` contains resumable upload sessions and direct-URL minting.
+`client.uploads` contains resumable upload sessions and direct upload URL minting.
 
 Method names differ in case (`paths.put` vs `Paths.Put`) but the semantics are identical. If you know one, you can use the other.
 

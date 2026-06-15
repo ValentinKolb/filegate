@@ -34,8 +34,8 @@ Behavior expectation:
 ### Mode B: explicit instance
 
 Use this when you want explicit dependency injection. Keep the Filegate bearer
-token in trusted server runtimes; browser uploads should use direct upload URLs
-instead.
+token in trusted server runtimes; browser uploads/downloads should use scoped
+direct URLs instead.
 
 ```ts
 import { Filegate } from "@valentinkolb/filegate/client";
@@ -214,6 +214,23 @@ as a durable secret. For large browser uploads, create an upload session with
 then call `directUploads.segments.put`, `directUploads.status`, and
 `directUploads.commit` without the Filegate bearer token.
 
+### Direct browser download
+
+Use this when the browser should download from Filegate directly, while your
+app server keeps the Filegate bearer token.
+
+```ts
+const direct = await fg.downloads.createDirectURL({
+  nodeId: "<node-id>",
+  expiresInSeconds: 5 * 60,
+});
+
+return Response.redirect(direct.downloadUrl, 303);
+```
+
+The signed URL supports `GET`, `HEAD`, and byte ranges for files. Directories
+download as tar streams.
+
 ### Versions
 
 Per-file version history is REST-only and available when versioning is enabled
@@ -270,6 +287,7 @@ This is critical for backend observability under load.
 - Do not rely on `process.env` defaults in browser bundles.
 - Do not expose the Filegate bearer token in browser bundles.
 - Use `uploadDirect(...)` for direct uploads that should bypass your app server's request body path.
+- Use `fg.downloads.createDirectURL(...)` server-side, then redirect the browser for direct downloads.
 
 ## Contract Source of Truth
 

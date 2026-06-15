@@ -147,7 +147,7 @@ fg serve --config ./conf.yaml --server-listen ':9090'
 
 ## REST API
 
-All `/v1/*` routes require `Authorization: Bearer <token>` except the final `PUT` to a signed direct-upload URL. `/health` is public.
+All `/v1/*` routes require `Authorization: Bearer <token>` except scoped direct upload/download URLs. `/health` is public.
 
 ```bash
 # List roots.
