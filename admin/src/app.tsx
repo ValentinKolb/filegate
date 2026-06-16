@@ -23,6 +23,7 @@ import { env } from "./lib/env";
 import { errorMessage, redirectFiles, selectedFiles } from "./lib/format";
 import { config, routes, ssr } from "./config";
 import { LoginPage } from "./components/Layout";
+import { readThemeFromCookieHeader, type AdminTheme } from "./lib/theme";
 import { Files } from "./pages/Files";
 import { Overview } from "./pages/Overview";
 import { Search } from "./pages/Search";
@@ -54,11 +55,15 @@ export const app = new Hono()
     c.header("Content-Type", "text/javascript; charset=utf-8");
     return new Response(Bun.file(new URL("./prompts.js", import.meta.url)));
   })
+  .get("/theme.js", (c) => {
+    c.header("Content-Type", "text/javascript; charset=utf-8");
+    return new Response(Bun.file(new URL("./theme.js", import.meta.url)));
+  })
   .get("/health", (c) => c.text("OK"))
   .get(
     "/login",
     ...ssr(async (c) => {
-      c.get("page").title = "Sign in";
+      setPage(c, "Sign in");
       const hasError = c.req.query("error") === "invalid";
       return () => <LoginPage error={hasError ? "Invalid admin token" : undefined} />;
     }),
@@ -69,7 +74,7 @@ export const app = new Hono()
   .get(
     "/",
     ...ssr(async (c) => {
-      c.get("page").title = "Overview";
+      setPage(c, "Overview");
       const data = await loadBase();
       return () => <Overview stats={data.stats} roots={data.roots} error={queryError(c.req.query("error"), data.error)} />;
     }),
@@ -77,7 +82,7 @@ export const app = new Hono()
   .get(
     "/files",
     ...ssr(async (c) => {
-      c.get("page").title = "Files";
+      setPage(c, "Files");
       const data = await loadFiles(c.req.query("path") || "", c.req.query("id") || "");
       const loadError = "error" in data ? data.error : undefined;
       return () => <Files {...data} error={queryError(c.req.query("error"), loadError)} notice={c.req.query("notice")} />;
@@ -172,7 +177,7 @@ export const app = new Hono()
   .get(
     "/search",
     ...ssr(async (c) => {
-      c.get("page").title = "Search";
+      setPage(c, "Search");
       const stats = await loadStats();
       const pattern = c.req.query("pattern") || "";
       const hidden = c.req.query("hidden") === "true";
@@ -185,7 +190,7 @@ export const app = new Hono()
   .get(
     "/system",
     ...ssr(async (c) => {
-      c.get("page").title = "System";
+      setPage(c, "System");
       const activityQuery = parseActivityQuery({
         q: c.req.query("q"),
         operation: c.req.query("operation"),
@@ -202,6 +207,12 @@ export const app = new Hono()
       .catch((err) => console.error("index rescan failed:", errorMessage(err)));
     return c.redirect("/system?notice=rescan+started", 303);
   });
+
+function setPage(c: { get(key: "page"): { title?: string; theme?: AdminTheme }; req: { header(name: string): string | undefined } }, title: string) {
+  const page = c.get("page");
+  page.title = title;
+  page.theme = readThemeFromCookieHeader(c.req.header("cookie"));
+}
 
 async function loadBase(): Promise<{ stats: StatsResponse; roots: Node[]; error?: string }> {
   try {

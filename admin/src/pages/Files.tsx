@@ -26,7 +26,7 @@ export function Files(props: {
       notice={props.notice}
     >
       <section class="files-grid">
-        <div class="panel">
+        <div class="panel" style="view-transition-name: fg-files-list">
           <div class="panel-head filelist-head">
             <nav class="crumbs" aria-label="Folder path">
               {props.crumbs.map((crumb, index) => (
@@ -63,6 +63,7 @@ export function Files(props: {
             selectedId={props.selected?.id}
             emptyTitle={props.current ? "This folder is empty" : "No mount roots"}
             emptyText={props.current ? "Create a folder to get started." : "Configure storage base paths to browse files here."}
+            viewTransitionName="fg-files-table"
           />
         </div>
         <aside class="stack">
@@ -110,7 +111,7 @@ function UploadPanel() {
 function Detail(props: { node: Node }) {
   const node = props.node;
   return (
-    <section class="panel detail">
+    <section class="panel detail" style="view-transition-name: fg-files-detail">
       <div class="panel-head detail-head">
         <span class="name-cell">
           {node.type === "directory" ? <FolderIcon /> : <FileIcon />}
@@ -229,7 +230,7 @@ function Detail(props: { node: Node }) {
 
 function EmptyDetail() {
   return (
-    <section class="panel">
+    <section class="panel" style="view-transition-name: fg-files-detail">
       <div class="panel-body empty detail-empty">
         <strong>No resource selected</strong>
         <span>Open a folder, then select a file or folder to inspect its properties and manage it.</span>

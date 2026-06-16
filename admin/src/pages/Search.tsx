@@ -11,7 +11,7 @@ export function Search(props: { stats: StatsResponse; pattern: string; hidden: b
       mounts={props.stats.mounts.length}
       error={props.error}
     >
-      <section class="panel">
+      <section class="panel" style="view-transition-name: fg-search-panel">
         <form class="toolbar search-toolbar" method="get" action="/search">
           <input class="input" name="pattern" value={props.pattern} placeholder="Glob pattern, e.g. **/*.jpg" aria-label="Glob pattern" />
           <select class="select" name="hidden">
@@ -35,6 +35,7 @@ export function Search(props: { stats: StatsResponse; pattern: string; hidden: b
           nodes={props.results?.results ?? []}
           emptyTitle={props.pattern ? "No matches" : "Search the index"}
           emptyText={props.pattern ? "Nothing matched that pattern." : "Enter a glob pattern to find files and directories."}
+          viewTransitionName="fg-search-results"
         />
       </section>
     </Layout>

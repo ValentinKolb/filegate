@@ -38,6 +38,7 @@ changelog:
 nfpms:
   - id: packages
     package_name: filegate
+    file_name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}{{ .ConventionalExtension }}"
     description: Filegate filesystem gateway
     maintainer: Valentin Kolb <valentinkolb@users.noreply.github.com>
     license: MIT

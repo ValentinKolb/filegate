@@ -1,0 +1,16 @@
+{
+  "name": "@valentinkolb/filegate-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "fibel dev --port 5173 --config fibel.config.ts",
+    "build": "fibel build --config fibel.config.ts"
+  },
+  "dependencies": {
+    "@valentinkolb/fibel": "^0.0.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

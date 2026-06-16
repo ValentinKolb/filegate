@@ -13,7 +13,7 @@ export function Overview(props: { stats: StatsResponse; roots: Node[]; error?: s
       error={props.error}
       notice={props.notice}
     >
-      <section class="summary">
+      <section class="summary" style="view-transition-name: fg-overview-summary">
         <div>
           <div class="label">Files</div>
           <div class="metric">{props.stats.index.totalFiles}</div>
@@ -39,14 +39,19 @@ export function Overview(props: { stats: StatsResponse; roots: Node[]; error?: s
         </div>
       </section>
       <section class="grid">
-        <div class="panel">
+        <div class="panel" style="view-transition-name: fg-overview-mounts">
           <div class="panel-head">
             <h2>Mounts</h2>
             <a href="/files">Open files</a>
           </div>
-          <NodeTable nodes={props.roots} emptyTitle="No mounts configured" emptyText="Configure storage base paths to browse files here." />
+          <NodeTable
+            nodes={props.roots}
+            emptyTitle="No mounts configured"
+            emptyText="Configure storage base paths to browse files here."
+            viewTransitionName="fg-overview-mounts-table"
+          />
         </div>
-        <aside class="panel">
+        <aside class="panel" style="view-transition-name: fg-overview-storage">
           <div class="panel-head">
             <h2>Storage</h2>
           </div>

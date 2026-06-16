@@ -61,4 +61,4 @@ activity:
 thumbnail:
   lru_cache_size: 1024
   max_source_bytes: 67108864
-  max_pixels: 40000000
+  max_pixels: 41943040

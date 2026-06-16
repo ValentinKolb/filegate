@@ -34,7 +34,7 @@ export function System(props: {
       error={props.error}
       notice={props.notice}
     >
-      <section class="summary observability-summary">
+      <section class="summary observability-summary" style="view-transition-name: fg-system-summary">
         <div>
           <div class="label">Heap usage</div>
           <div class="metric">{formatPercent(heapUsage)}</div>
@@ -69,7 +69,7 @@ export function System(props: {
       </section>
 
       <section class="metrics-grid">
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-runtime">
           <div class="panel-head">
             <div>
               <h2>Runtime pressure</h2>
@@ -89,7 +89,7 @@ export function System(props: {
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-limits">
           <div class="panel-head">
             <div>
               <h2>Process limits</h2>
@@ -105,7 +105,7 @@ export function System(props: {
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-storage">
           <div class="panel-head">
             <div>
               <h2>Storage pressure</h2>
@@ -132,7 +132,7 @@ export function System(props: {
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-index">
           <div class="panel-head">
             <div>
               <h2>Index shape</h2>
@@ -161,7 +161,7 @@ export function System(props: {
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-cache">
           <div class="panel-head">
             <div>
               <h2>Cache pressure</h2>
@@ -185,7 +185,7 @@ export function System(props: {
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-mounts">
           <div class="panel-head">
             <div>
               <h2>Mount distribution</h2>
@@ -209,7 +209,7 @@ export function System(props: {
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-admin">
           <div class="panel-head">
             <div>
               <h2>Admin app</h2>
@@ -225,7 +225,7 @@ export function System(props: {
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" style="view-transition-name: fg-system-activity-buffer">
           <div class="panel-head">
             <div>
               <h2>Activity buffer</h2>
@@ -250,7 +250,7 @@ export function System(props: {
         </section>
       </section>
 
-      <section id="activity" class="panel activity-panel">
+      <section id="activity" class="panel activity-panel" style="view-transition-name: fg-system-activity">
         <div class="panel-head">
           <div>
             <h2>Activity</h2>

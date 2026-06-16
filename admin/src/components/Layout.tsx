@@ -20,7 +20,7 @@ const nav = [
 export function Layout(props: LayoutProps) {
   return (
     <>
-      <header class="topbar">
+      <header class="topbar" style="view-transition-name: fg-topbar">
         <div class="service">Filegate Admin</div>
         <div class="top-meta">
           <span class="status">
@@ -30,6 +30,9 @@ export function Layout(props: LayoutProps) {
           <span>
             {props.mounts} mount{props.mounts === 1 ? "" : "s"}
           </span>
+          <button class="btn theme-toggle" type="button" data-theme-toggle aria-label="Toggle theme">
+            Theme
+          </button>
           <form method="post" action="/logout">
             <button class="btn" type="submit">
               Log out
@@ -38,7 +41,7 @@ export function Layout(props: LayoutProps) {
         </div>
       </header>
       <div class="shell">
-        <aside class="sidebar">
+        <aside class="sidebar" style="view-transition-name: fg-sidebar">
           <div class="side-title">Resources</div>
           <nav class="nav">
             {nav.map(([key, label, href]) => (
@@ -56,7 +59,7 @@ export function Layout(props: LayoutProps) {
           </nav>
           {props.notice && <div class="notice">{props.notice}</div>}
           {props.error && <div class="error">{props.error}</div>}
-          <section class="head">
+          <section class="head" style="view-transition-name: fg-page-head">
             <div>
               <h1>{props.title}</h1>
               <div class="desc">{props.description}</div>
@@ -78,7 +81,7 @@ export function Layout(props: LayoutProps) {
 export function LoginPage(props: { error?: string }) {
   return (
     <main class="login">
-      <div class="panel">
+      <div class="panel" style="view-transition-name: fg-login-panel">
         <div class="panel-head">
           <h2>Filegate Admin</h2>
         </div>

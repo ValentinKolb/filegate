@@ -23,6 +23,7 @@ bench/results/*.txt
 # JS/TS tooling (optional local usage)
 node_modules/
 .cache/
+.fibel/
 .eslintcache
 *.tsbuildinfo
 coverage/

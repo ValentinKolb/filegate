@@ -2,9 +2,9 @@ import type { Node } from "@valentinkolb/filegate";
 import { FileIcon, FolderIcon } from "./Icons";
 import { formatBytes, formatUnix } from "../lib/format";
 
-export function NodeTable(props: { nodes: Node[]; selectedId?: string; emptyTitle: string; emptyText: string }) {
+export function NodeTable(props: { nodes: Node[]; selectedId?: string; emptyTitle: string; emptyText: string; viewTransitionName?: string }) {
   return (
-    <div class="table-wrap">
+    <div class="table-wrap" style={props.viewTransitionName ? `view-transition-name: ${props.viewTransitionName}` : undefined}>
       <table>
         <thead>
           <tr>
@@ -16,7 +16,7 @@ export function NodeTable(props: { nodes: Node[]; selectedId?: string; emptyTitl
         </thead>
         <tbody>
           {props.nodes.map((node) => (
-            <tr data-node-kind={node.type} class={props.selectedId === node.id ? "is-selected" : ""}>
+            <tr data-node-kind={node.type} class={props.selectedId === node.id ? "is-selected" : ""} style={nodeTransitionName(node.id)}>
               <td>
                 <span class="name-cell">
                   {node.type === "directory" ? <FolderIcon /> : <FileIcon />}
@@ -56,4 +56,8 @@ function parentPath(path: string): string {
   const clean = path.replace(/^\/+|\/+$/g, "");
   const idx = clean.lastIndexOf("/");
   return idx < 0 ? "" : clean.slice(0, idx);
+}
+
+function nodeTransitionName(id: string): string {
+  return `view-transition-name: fg-node-${id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
