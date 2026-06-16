@@ -22,6 +22,9 @@ export function System(props: {
   const storageUsed = props.stats.disks.reduce((sum, disk) => sum + disk.used, 0);
   const storageSize = props.stats.disks.reduce((sum, disk) => sum + disk.size, 0);
   const storageUsage = ratio(storageUsed, storageSize);
+  const activityRetained = props.activity?.retained ?? 0;
+  const activityCapacity = props.activity?.capacity ?? 0;
+  const activityUsage = ratio(activityRetained, activityCapacity);
   return (
     <Layout
       active="system"
@@ -218,6 +221,30 @@ export function System(props: {
               <MetricRow label="filegate_url" value={cfg.filegateUrl} mono />
               <MetricRow label="admin_token" value="configured; secret redacted" />
               <MetricRow label="session_secret" value="configured; secret redacted" />
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Activity buffer</h2>
+              <p>Ring buffer usage for recent audit and admin activity events.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <Chart
+              svg={charts.barGauge({
+                width: 520,
+                data: [{ label: "Retained", value: activityUsage * 100, min: 0, max: 100, unit: "%" }],
+                format: formatChartNumber,
+                thresholds: pressureThresholds(),
+              })}
+            />
+            <dl class="cfg">
+              <MetricRow label="retained" value={`${formatCount(activityRetained)} / ${formatCount(activityCapacity)}`} />
+              <MetricRow label="current_page" value={formatCount(props.activity?.items.length ?? 0)} />
+              <MetricRow label="matching" value={formatCount(props.activity?.total ?? 0)} />
             </dl>
           </div>
         </section>
