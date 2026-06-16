@@ -27,17 +27,28 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+      - name: Use npm 11.5.1+
+        run: npm install -g npm@11.5.1
+      - name: Read package metadata
+        id: package
+        working-directory: sdk/ts
+        run: |
+          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
       - name: Set version from tag
         working-directory: sdk/ts
-        run: npm version ${GITHUB_REF#refs/tags/v} --no-git-tag-version
+        run: npm version ${{ steps.package.outputs.version }} --no-git-tag-version --allow-same-version
       - name: Install and build
         working-directory: sdk/ts
         run: npm install && npm run build
       - name: Publish
         working-directory: sdk/ts
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version >/dev/null 2>&1; then
+            echo "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }} is already published."
+          else
+            npm publish --provenance --access public
+          fi
 
   release:
     runs-on: ubuntu-latest
@@ -71,8 +82,8 @@ jobs:
       - name: Extract version and image name
         id: meta
         run: |
-          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-          echo "IMAGE_NAME=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
