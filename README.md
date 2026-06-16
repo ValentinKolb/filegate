@@ -4,9 +4,9 @@
 
 # Filegate
 
-Filegate is a Linux file gateway for applications that want normal filesystem storage with an HTTP API, stable file IDs, fast metadata lookup, resumable uploads, and optional S3-compatible access.
+Filegate is a Linux file gateway for applications that need HTTP access to normal filesystem storage.
 
-Files stay as normal files on configured mounts. File bytes, directory layout, and stable IDs live on the filesystem; Pebble is the metadata index that makes path/id lookup, directory listings, and stats fast without turning the storage into an opaque blob store.
+Files stay as normal files on configured mounts. File bytes, directory layout, and stable IDs live on the filesystem; Pebble indexes path/id lookup, directory listings, and stats.
 
 ## Core properties
 
@@ -15,7 +15,6 @@ Files stay as normal files on configured mounts. File bytes, directory layout, a
 - **Stable file identity:** IDs are stored in `user.filegate.id` xattrs, so files can move without becoming new logical objects.
 - **Explicit writes:** uploads default to conflict errors; callers opt into `overwrite` or `rename`.
 - **Multiple access surfaces:** native REST API, TypeScript client, and optional path-style S3 listener.
-- **Plain operations:** YAML config, offline config CLI with validation/backups, systemd packages, short `fg` command, Docker image, and package upgrades that refuse to run while the service is active.
 
 ## Requirements
 
@@ -26,23 +25,19 @@ Files stay as normal files on configured mounts. File bytes, directory layout, a
 
 ## Production install
 
-The recommended production path is the packaged CLI under systemd. Packages install `/usr/bin/filegate`, the short `/usr/bin/fg` command link, `/etc/filegate/conf.yaml`, `filegate.service`, `/var/lib/filegate`, and `/var/log/filegate`.
+For production, install the package and run Filegate under systemd. Packages install `/usr/bin/filegate`, `/etc/filegate/conf.yaml`, `filegate.service`, `/var/lib/filegate`, and `/var/log/filegate`.
 
 ```bash
-sudo dpkg -i ./dist/filegate_<version>_linux_amd64.deb
+curl -fL -o /tmp/filegate.deb \
+  https://github.com/valentinkolb/filegate/releases/latest/download/filegate_linux_amd64.deb
+sudo dpkg -i /tmp/filegate.deb
 # or
-sudo rpm -Uvh ./dist/filegate-<version>-1.x86_64.rpm
+curl -fL -o /tmp/filegate.rpm \
+  https://github.com/valentinkolb/filegate/releases/latest/download/filegate_linux_amd64.rpm
+sudo rpm -Uvh /tmp/filegate.rpm
 ```
 
-The `fg` command works after package install. To also add a shell alias during package install, set the installer option explicitly:
-
-```bash
-sudo FILEGATE_INSTALL_ALIAS_FG=1 dpkg -i ./dist/filegate_<version>_linux_amd64.deb
-# or
-sudo FILEGATE_INSTALL_ALIAS_FG=1 rpm -Uvh ./dist/filegate-<version>-1.x86_64.rpm
-```
-
-The installer writes `alias fg='filegate'` to the invoking user's `.bashrc` or `.zshrc`. For other shells it prints the snippet instead of editing shell config.
+For ARM64 hosts, replace `amd64` with `arm64` in the package URL.
 
 Set the initial token and start the service:
 
@@ -95,7 +90,7 @@ The mount basename becomes the root name. `/tmp/filegate/data` is exposed as RES
 
 ## Docker
 
-Filegate can run in Docker, but the official recommended production path is the package plus systemd setup above. Use Docker for local evaluation, CI smoke tests, or environments that explicitly standardize on containers.
+Filegate can run in Docker. Use Docker for local evaluation, CI smoke tests, or container-based deployments.
 
 ```bash
 mkdir -p ./filegate-data
@@ -165,11 +160,11 @@ curl -fsS -H 'Authorization: Bearer dev-token' \
   http://127.0.0.1:8080/v1/stats
 ```
 
-REST routes cover path and ID lookup, file content, directory listings, uploads, transfers, search, thumbnails, stats, and version operations.
+REST routes cover path and ID lookup, file content, directory listings, uploads, transfers, search, thumbnails, stats, activity, capabilities, and version operations.
 
-### Direct browser upload URLs
+### Direct browser transfer URLs
 
-For browser uploads, keep the Filegate bearer token on your application server. The server asks Filegate for a short-lived upload URL and gives that URL to the browser.
+For browser uploads and downloads, keep the Filegate bearer token on your application server. The server asks Filegate for a short-lived scoped URL and gives that URL to the browser.
 
 ```bash
 curl -fsS -X POST \
@@ -178,6 +173,16 @@ curl -fsS -X POST \
   -d '{"path":"data/inbox/photo.jpg","contentType":"image/jpeg","expiresInSeconds":900,"onConflict":"rename"}' \
   http://127.0.0.1:8080/v1/uploads/direct
 ```
+
+```bash
+curl -fsS -X POST \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"data/inbox/photo.jpg","expiresInSeconds":300}' \
+  http://127.0.0.1:8080/v1/downloads/direct
+```
+
+Direct file downloads support `GET`, `HEAD`, and byte ranges. Directory downloads stream tar archives.
 
 Set `server.public_url` (`--server-public-url`, `FILEGATE_SERVER_PUBLIC_URL`) to the external REST URL behind Traefik/Caddy/nginx. If it is empty, Filegate builds URLs from the incoming request host.
 
@@ -250,7 +255,13 @@ const fg = new Filegate({
 });
 ```
 
-Do not put the Filegate bearer token in browser bundles. For direct browser uploads, mint a short-lived URL on your backend and upload with the token-free helper:
+The client namespaces match the API surface: `paths`, `nodes`, `uploads`, `downloads`, `transfers`, `search`, `index`, `stats`, `capabilities`, `versions`, and `activity`.
+
+```ts
+const caps = await fg.capabilities.get();
+```
+
+Do not put the Filegate bearer token in browser bundles. For single-file direct browser uploads, mint a short-lived URL on your backend and upload with the token-free helper:
 
 ```ts
 import { uploadDirect } from "@valentinkolb/filegate/client";
@@ -270,6 +281,53 @@ await uploadDirect(uploadUrlFromYourBackend, file, {
   },
 });
 ```
+
+For multi-file browser uploads, use the high-level upload helper. Your application server receives one allow request, applies auth and policy, and returns direct one-shot uploads or direct upload sessions.
+
+```ts
+import { upload } from "@valentinkolb/filegate/client";
+
+await upload({
+  files,
+  path: "data/inbox",
+  allow: async (request) => {
+    const response = await fetch("/api/filegate/uploads/allow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    return response.json();
+  },
+  onEvent: (event) => console.log(event.type),
+});
+```
+
+For direct browser downloads, mint a URL on your backend and redirect the browser:
+
+```ts
+const direct = await fg.downloads.createDirectURL({
+  nodeId: "<node-id>",
+  expiresInSeconds: 5 * 60,
+});
+
+return Response.redirect(direct.downloadUrl, 303);
+```
+
+## Admin app
+
+The admin app is an SSR UI in `admin/`. Run it next to Filegate for file operations, metrics, activity, and index operations without putting the Filegate bearer token in the browser.
+
+```bash
+cd admin
+bun install
+
+FILEGATE_URL=http://127.0.0.1:8080 \
+FILEGATE_TOKEN=dev-token \
+ADMIN_TOKEN=admin-token \
+bun run dev
+```
+
+Browser uploads and downloads use scoped direct Filegate URLs. Metadata mutations go through the admin app server.
 
 ## Bun S3Client
 
@@ -310,7 +368,9 @@ The package does not auto-start the service. Package upgrades are offline: stop 
 
 ```bash
 sudo systemctl stop filegate
-sudo dpkg -i ./dist/filegate_<version>_linux_amd64.deb
+curl -fL -o /tmp/filegate.deb \
+  https://github.com/valentinkolb/filegate/releases/latest/download/filegate_linux_amd64.deb
+sudo dpkg -i /tmp/filegate.deb
 sudo systemctl start filegate
 ```
 
@@ -339,12 +399,23 @@ sudo fg config set --config /etc/filegate/conf.yaml \
   --metrics-path /metrics
 ```
 
+Recent API activity is kept in a bounded in-memory ring buffer and exposed through `/v1/activity`:
+
+```bash
+curl -fsS -H 'Authorization: Bearer dev-token' \
+  'http://127.0.0.1:8080/v1/activity?limit=20'
+```
+
+The default ring buffer retains 500 records. Set `activity.ring_buffer_size` to adjust it.
+
 ## Limits
 
 - Single-node service; no replication.
 - Config changes are offline; restart after editing config.
 - REST uses one bearer token. S3 supports multiple keys and per-key bucket allowlists.
 - REST has no request rate limiting. S3 supports per-key request limits.
+- `X-Forwarded-For` is trusted only from configured `server.trusted_proxies`.
+- `X-Filegate-Actor` can attach delegated actor context to activity records.
 - S3 is path-style only.
 - External filesystem changes are reconciled eventually by the detector or by a manual rescan.
 - Version history is REST-side and not exposed as S3 object versioning.
@@ -357,6 +428,8 @@ sudo fg config set --config /etc/filegate/conf.yaml \
 - S3 API: [docs/s3-api.md](https://github.com/ValentinKolb/filegate/blob/main/docs/s3-api.md)
 - S3 config and clients: [docs/s3-config.md](https://github.com/ValentinKolb/filegate/blob/main/docs/s3-config.md), [docs/s3-clients.md](https://github.com/ValentinKolb/filegate/blob/main/docs/s3-clients.md)
 - TypeScript client: [docs/ts-client.md](https://github.com/ValentinKolb/filegate/blob/main/docs/ts-client.md)
+- Metrics: [docs/metrics.md](https://github.com/ValentinKolb/filegate/blob/main/docs/metrics.md)
+- Versioning: [docs/versioning.md](https://github.com/ValentinKolb/filegate/blob/main/docs/versioning.md)
 - Deployment and sysadmin: [docs/deployment.md](https://github.com/ValentinKolb/filegate/blob/main/docs/deployment.md), [docs/sysadmin.md](https://github.com/ValentinKolb/filegate/blob/main/docs/sysadmin.md)
 - Architecture and behavior: [docs/architecture.md](https://github.com/ValentinKolb/filegate/blob/main/docs/architecture.md), [docs/behavior-and-assumptions.md](https://github.com/ValentinKolb/filegate/blob/main/docs/behavior-and-assumptions.md)
 
