@@ -34,6 +34,13 @@
     "client",
     "sdk"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ValentinKolb/filegate"
+  },
+  "bugs": {
+    "url": "https://github.com/ValentinKolb/filegate/issues"
+  },
   "license": "MIT",
   "devDependencies": {
     "typescript": "^5.8"
